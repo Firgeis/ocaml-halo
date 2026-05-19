@@ -1,0 +1,58 @@
+(test
+ (name integration_http)
+ (modules integration_http)
+ (libraries unix alcotest)
+  (deps
+   %{exe:demo_server.exe}
+   %{exe:borrow_violation_server.exe}
+   fixtures/tls-cert.pem
+   fixtures/tls-key.pem
+   fixtures/tls-ticket-keys-malformed.txt)
+  (action
+   (setenv HALO_SERVER_BIN %{exe:demo_server.exe}
+    (setenv HALO_BORROW_VIOLATION_SERVER_BIN %{exe:borrow_violation_server.exe}
+     (setenv HALO_TLS_CERT_FIXTURE %{dep:fixtures/tls-cert.pem}
+      (setenv HALO_TLS_KEY_FIXTURE %{dep:fixtures/tls-key.pem}
+       (setenv HALO_TLS_TICKET_KEYS_MALFORMED_FIXTURE %{dep:fixtures/tls-ticket-keys-malformed.txt}
+        (run %{test}))))))))
+
+(executable
+ (name demo_server)
+ (modules demo_server)
+ (libraries ocaml-halo))
+
+(executable
+ (name borrow_violation_server)
+ (modules borrow_violation_server)
+ (libraries ocaml-halo))
+
+(test
+ (name router_unit)
+ (modules router_unit)
+ (libraries ocaml-halo alcotest))
+
+(test
+ (name headers_unit)
+ (modules headers_unit)
+ (libraries ocaml-halo alcotest))
+
+(test
+ (name runtime_unit)
+ (modules runtime_unit)
+ (libraries ocaml-halo alcotest)
+ (deps
+  fixtures/tls-cert.pem
+  fixtures/tls-key.pem
+  fixtures/tls-ticket-keys.txt
+  ../vendor/s2n-tls/bin/s2nc)
+ (action
+  (setenv HALO_TLS_CERT_FIXTURE %{dep:fixtures/tls-cert.pem}
+   (setenv HALO_TLS_KEY_FIXTURE %{dep:fixtures/tls-key.pem}
+    (setenv HALO_TLS_TICKET_KEYS_FIXTURE %{dep:fixtures/tls-ticket-keys.txt}
+     (setenv HALO_S2NC_BIN %{dep:../vendor/s2n-tls/bin/s2nc}
+      (run %{test})))))))
+
+(test
+ (name server_config_unit)
+ (modules server_config_unit)
+ (libraries ocaml-halo alcotest))

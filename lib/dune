@@ -1,0 +1,11 @@
+ (library
+ (name halo)
+ (public_name ocaml-halo)
+ (modules error headers router server_config server server_effects stream sse)
+ (foreign_archives ../c/halo_stubs ../c/halo_s2n)
+ (c_library_flags
+  (-lcrypto
+   -lpthread
+   -ldl
+   -lrt
+   -lm)))
