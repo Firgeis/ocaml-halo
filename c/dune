@@ -2,13 +2,27 @@
 
 (rule
  (target libhalo_s2n.a)
- (deps ../vendor/s2n-tls/lib/libs2n.a)
- (action (copy %{deps} %{target})))
+ (deps
+  (source_tree ../vendor/s2n-tls)
+  ../scripts/build_s2n_artifact.sh
+  ../scripts/resolve_libcrypto_root.sh)
+ (action (run bash ../scripts/build_s2n_artifact.sh lib %{target})))
 
 (rule
  (target dllhalo_s2n.so)
- (deps ../vendor/s2n-tls/lib/libs2n.so)
- (action (copy %{deps} %{target})))
+ (deps
+  (source_tree ../vendor/s2n-tls)
+  ../scripts/build_s2n_artifact.sh
+  ../scripts/resolve_libcrypto_root.sh)
+ (action (run bash ../scripts/build_s2n_artifact.sh shared %{target})))
+
+(rule
+ (target s2nc)
+ (deps
+  (source_tree ../vendor/s2n-tls)
+  ../scripts/build_s2n_artifact.sh
+  ../scripts/resolve_libcrypto_root.sh)
+ (action (run bash ../scripts/build_s2n_artifact.sh s2nc %{target})))
 
 (foreign_library
  (archive_name halo_stubs)

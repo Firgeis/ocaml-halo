@@ -1,0 +1,74 @@
+name: release-source
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version to package
+        required: true
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    outputs:
+      archive_name: ${{ steps.meta.outputs.archive_name }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine release version
+        id: meta
+        run: |
+          version="${{ github.event.inputs.version }}"
+          if [ -z "${version}" ]; then
+            version="${GITHUB_REF_NAME}"
+          fi
+          version="${version#v}"
+          archive_name="ocaml-halo-${version}.tar.gz"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "archive_name=${archive_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Fetch vendored sources
+        run: make vendor-fetch
+
+      - name: Build source archive
+        run: make release-source-artifact VERSION="${{ steps.meta.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.archive_name }}
+          path: dist/${{ steps.meta.outputs.archive_name }}
+
+      - name: Publish release asset
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ steps.meta.outputs.archive_name }}
+
+  verify:
+    runs-on: ubuntu-latest
+    needs: package
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.package.outputs.archive_name }}
+          path: dist
+
+      - uses: avsm/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.4.0
+
+      - name: Extract source archive
+        run: tar -xzf "dist/${{ needs.package.outputs.archive_name }}"
+
+      - name: Install package dependencies
+        run: opam install "./ocaml-halo-${{ needs.package.outputs.version }}" --deps-only -y
+
+      - name: Verify library build from release tarball
+        run: opam exec -- dune build --root "./ocaml-halo-${{ needs.package.outputs.version }}" @install

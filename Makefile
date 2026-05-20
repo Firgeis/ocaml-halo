@@ -1,6 +1,7 @@
 OPAM_BIN = ./_opam/bin
 DUNE = $(OPAM_BIN)/dune
 VENDOR_FORCE_FETCH = 0
+VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
 
 VENDOR_DIR = vendor
 
@@ -38,6 +39,7 @@ VENDORED_RUNTIME_ENV = \
 .PHONY: \
 	build \
 	release-build \
+	release-source-artifact \
 	run \
 	release-run \
 	body-stress \
@@ -105,6 +107,9 @@ build: vendor-build
 
 release-build: vendor-build
 	$(VENDORED_RUNTIME_ENV) $(DUNE) build --profile release ./test/demo_server.exe
+
+release-source-artifact: vendor-fetch
+	bash ./scripts/package_release_source.sh "$(VERSION)" ./dist
 
 asan-build: vendor-build
 	$(VENDORED_RUNTIME_ENV) $(DUNE) build --profile asan ./test/demo_server.exe

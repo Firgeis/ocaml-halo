@@ -44,12 +44,12 @@
   fixtures/tls-cert.pem
   fixtures/tls-key.pem
   fixtures/tls-ticket-keys.txt
-  ../vendor/s2n-tls/bin/s2nc)
+  ../c/s2nc)
  (action
   (setenv HALO_TLS_CERT_FIXTURE %{dep:fixtures/tls-cert.pem}
    (setenv HALO_TLS_KEY_FIXTURE %{dep:fixtures/tls-key.pem}
     (setenv HALO_TLS_TICKET_KEYS_FIXTURE %{dep:fixtures/tls-ticket-keys.txt}
-     (setenv HALO_S2NC_BIN %{dep:../vendor/s2n-tls/bin/s2nc}
+     (setenv HALO_S2NC_BIN %{dep:../c/s2nc}
       (run %{test})))))))
 
 (test

@@ -8,5 +8,10 @@
  (license MIT)
  (synopsis "Fast OCaml HTTP 1.1 server")
  (description "Fast Ocaml HTTP 1.1 server with C runtime for performance")
+ (homepage "https://github.com/firge/ocaml-halo")
+ (bug_reports "https://github.com/firge/ocaml-halo/issues")
+ (source (github firge/ocaml-halo))
  (depends
+  (conf-libssl :build)
+  (conf-pkg-config :build)
   (alcotest :with-test)))

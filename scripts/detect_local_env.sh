@@ -9,79 +9,13 @@ fi
 
 output_file=$1
 host_os=$(uname -s)
-openssl_root=
 warnings=()
 
 append_warning() {
   warnings+=("$1")
 }
 
-detect_openssl_root_from_pkg_config() {
-  local pkg
-
-  if ! command -v pkg-config >/dev/null 2>&1; then
-    return 1
-  fi
-
-  for pkg in openssl libcrypto libssl; do
-    if pkg-config --exists "$pkg" 2>/dev/null; then
-      pkg-config --variable=prefix "$pkg" 2>/dev/null
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-detect_openssl_root_from_brew() {
-  local formula
-
-  if ! command -v brew >/dev/null 2>&1; then
-    return 1
-  fi
-
-  for formula in openssl@3 openssl openssl@1.1; do
-    if brew --prefix "$formula" >/dev/null 2>&1; then
-      brew --prefix "$formula"
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-detect_openssl_root_from_common_paths() {
-  local candidate
-
-  for candidate in \
-    /opt/homebrew/opt/openssl@3 \
-    /opt/homebrew/opt/openssl \
-    /usr/local/opt/openssl@3 \
-    /usr/local/opt/openssl \
-    /usr/local/opt/openssl@1.1 \
-    /usr
-  do
-    if [[ -f "$candidate/include/openssl/ssl.h" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-if [[ -n "${LIBCRYPTO_ROOT:-}" ]]; then
-  openssl_root=$LIBCRYPTO_ROOT
-elif openssl_root=$(detect_openssl_root_from_pkg_config); then
-  :
-elif openssl_root=$(detect_openssl_root_from_brew); then
-  :
-elif openssl_root=$(detect_openssl_root_from_common_paths); then
-  :
-else
-  openssl_root=/usr
-  append_warning "Could not detect an OpenSSL prefix automatically. Falling back to /usr."
-fi
+openssl_root=$(bash ./scripts/resolve_libcrypto_root.sh)
 
 if ! command -v bash >/dev/null 2>&1; then
   append_warning "bash not found in PATH."

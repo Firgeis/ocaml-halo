@@ -4,8 +4,12 @@ synopsis: "Fast OCaml HTTP 1.1 server"
 description: "Fast Ocaml HTTP 1.1 server with C runtime for performance"
 authors: ["Ezequiel Lewin <firgeis@gmail.com>"]
 license: "MIT"
+homepage: "https://github.com/firge/ocaml-halo"
+bug-reports: "https://github.com/firge/ocaml-halo/issues"
 depends: [
   "dune" {>= "3.15"}
+  "conf-libssl" {build}
+  "conf-pkg-config" {build}
   "alcotest" {with-test}
   "odoc" {with-doc}
 ]
@@ -23,3 +27,4 @@ build: [
     "@doc" {with-doc}
   ]
 ]
+dev-repo: "git+https://github.com/firge/ocaml-halo.git"

@@ -9,12 +9,19 @@ modern OCaml to separate performance-oriented code handled in C on top of the fo
 
 ## Installation
 
-TODO: installation packaging is not finalized yet.
+System prerequisites:
 
-The opam metadata is present for package development, but the standalone package-consumer story is still
-unfinished because the vendored TLS archive needs cleaner downstream linkage semantics.
+- `make`
+- a C compiler toolchain
+- OpenSSL headers and libraries
+- `pkg-config`
 
-For now, treat this repository as source-first rather than as a polished installable package.
+Install from a release tarball:
+
+```sh
+opam pin add ocaml-halo https://github.com/firge/ocaml-halo/releases/download/vX.Y.Z/ocaml-halo-X.Y.Z.tar.gz
+opam install ocaml-halo
+```
 
 ## Development
 
@@ -25,19 +32,19 @@ System prerequisites for working from this repository:
 - `make`
 - a C compiler toolchain
 - OpenSSL headers and libraries
+- `pkg-config`
 
-Repository build flow:
+Fresh clones only contain stub directories under `vendor/`, so local development starts by fetching the
+pinned upstream sources:
 
 ```sh
 make vendor-fetch
-make local-setup
 make build
 ```
 
-For a fresh clone, run `make vendor-fetch` first to populate the tracked vendor stub directories with the
-pinned upstream sources. `make local-setup` then writes `mk/local.env`, which the build uses to locate
-`libcrypto` when `/usr` is not the right prefix. The build and test targets prepare any required native
-artifacts before invoking dune.
+After the vendored trees are present, the build and test flows compile the required native artifacts as part
+of the `dune` build. `make local-setup` is optional; it persists a detected `LIBCRYPTO_ROOT` for manual
+builds on machines where OpenSSL is not found automatically.
 
 ## Basic Usage
 
@@ -517,22 +524,3 @@ let server_config router =
 ```
 
 If you do not need mutual TLS, omit the `client_auth` override and Halo will use `Client_auth_none`.
-
-## Development
-
-Halo vendors its low-level C dependencies so runtime behavior, ABI expectations, and performance work stay reproducible across machines and over time.
-
-The repository keeps stub directories under `vendor/` and relies on `make` targets plus the files under `mk/` and `scripts/` for local population. The top-level `Makefile` pins the upstream versions and defines the runtime library search path, while `scripts/vendor_fetch.sh` downloads and unpacks the exact source archives into those stub directories.
-
-The repository is organized by layer:
-
-- `lib/` contains the public OCaml API, including the router, server configuration, runtime wrapper, headers helpers, and error types.
-- `c/runtime/` contains Halo-specific runtime code for request storage, parsing integration, dispatch coordination, and server lifecycle management.
-- `c/adapters/` contains the vendored or adapted C integration layer around dependencies such as `libuv` and `llhttp`.
-- `test/demo_server.ml` contains the runnable example server used for local execution and integration testing.
-- `test/` contains unit and integration tests, including TLS fixtures and runtime behavior checks.
-- `scripts/` contains helper scripts for vendoring, benchmarking, stress runs, and sanitizer-based smoke tests.
-- `docs/` contains design notes and benchmark documentation that are more detailed than the README.
-- `vendor/` contains tracked stub directories for vendored dependencies, populated locally by the vendoring scripts.
-
-For local development, the usual entry points are `make build`, `make run`, and `make test`. The build assumes the vendor directories already contain the expected sources. Run `make local-setup` once on a machine to detect platform-specific settings such as the OpenSSL prefix and write them to `mk/local.env`. Use `make vendor-status` to inspect the current pins, `make vendor-fetch` to populate empty stub directories, `make vendor-refetch` to replace existing local vendor contents, and `make vendor-clean` to return those directories to stub state.
