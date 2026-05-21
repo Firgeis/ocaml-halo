@@ -52,8 +52,13 @@ jobs:
           files: dist/${{ steps.meta.outputs.archive_name }}
 
   verify:
-    runs-on: ubuntu-latest
     needs: package
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -63,6 +68,10 @@ jobs:
       - uses: avsm/setup-ocaml@v3
         with:
           ocaml-compiler: 5.4.0
+
+      - name: Install OpenSSL toolchain on macOS
+        if: runner.os == 'macOS'
+        run: brew install openssl@3 pkg-config
 
       - name: Extract source archive
         run: tar -xzf "dist/${{ needs.package.outputs.archive_name }}"
