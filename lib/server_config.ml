@@ -44,7 +44,9 @@ type t = {
   host : string;
   port : int;
   backlog : int;
-  max_request_size : int;
+  max_request_line_size : int;
+  max_header_size : int;
+  max_body_size : int;
   request_timeout_ms : int;
   idle_timeout_ms : int;
   tls : tls_config option;
@@ -68,7 +70,9 @@ let ( let*? ) validation next =
 
 let default_host = "127.0.0.1"
 let default_backlog = 128
-let default_max_request_size = 8192
+let default_max_request_line_size = 8 * 1024
+let default_max_header_size = 32 * 1024
+let default_max_body_size = 1024 * 1024
 let default_request_timeout_ms = 30000
 let default_idle_timeout_ms = 5000
 
@@ -92,9 +96,21 @@ let backlog_error (config : t) =
   else
     None
 
-let max_request_size_error (config : t) =
-  if config.max_request_size <= 0 then
-    Some "server max_request_size must be positive"
+let max_request_line_size_error (config : t) =
+  if config.max_request_line_size <= 0 then
+    Some "server max_request_line_size must be positive"
+  else
+    None
+
+let max_header_size_error (config : t) =
+  if config.max_header_size <= 0 then
+    Some "server max_header_size must be positive"
+  else
+    None
+
+let max_body_size_error (config : t) =
+  if config.max_body_size <= 0 then
+    Some "server max_body_size must be positive"
   else
     None
 
@@ -378,7 +394,9 @@ let tls
 let create
     ?(host = default_host)
     ?(backlog = default_backlog)
-    ?(max_request_size = default_max_request_size)
+    ?(max_request_line_size = default_max_request_line_size)
+    ?(max_header_size = default_max_header_size)
+    ?(max_body_size = default_max_body_size)
     ?(request_timeout_ms = default_request_timeout_ms)
     ?(idle_timeout_ms = default_idle_timeout_ms)
     ?tls
@@ -389,7 +407,9 @@ let create
     host;
     port;
     backlog;
-    max_request_size;
+    max_request_line_size;
+    max_header_size;
+    max_body_size;
     request_timeout_ms;
     idle_timeout_ms;
     tls;
@@ -399,7 +419,9 @@ let create
 
 let validate (config : t) =
   let*? () = backlog_error config in
-  let*? () = max_request_size_error config in
+  let*? () = max_request_line_size_error config in
+  let*? () = max_header_size_error config in
+  let*? () = max_body_size_error config in
   let*? () = request_timeout_error config in
   let*? () = idle_timeout_error config in
   let*? () =

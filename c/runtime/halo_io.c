@@ -194,7 +194,9 @@ static void halo_listener_pair_release(struct halo_listener_pair* pair) {
 
 static int halo_listener_pair_create(struct halo_listener_pair* pair,
                                      struct halo_runtime* runtime,
-                                     value max_request_size,
+                                     value max_request_line_size,
+                                     value max_header_size,
+                                     value max_body_size,
                                      value request_timeout_ms,
                                      value idle_timeout_ms,
                                      value tls_enabled) {
@@ -217,7 +219,9 @@ static int halo_listener_pair_create(struct halo_listener_pair* pair,
   pair->listener->ref = pair->ref;
   pair->ref->handle = pair->listener;
   pair->ref->ocaml_alive = 0;
-  pair->ref->max_request_size = Int_val(max_request_size);
+  pair->ref->max_request_line_size = (size_t) Long_val(max_request_line_size);
+  pair->ref->max_header_size = (size_t) Long_val(max_header_size);
+  pair->ref->max_body_size = (size_t) Long_val(max_body_size);
   pair->ref->request_timeout_ms = Int_val(request_timeout_ms);
   pair->ref->idle_timeout_ms = Int_val(idle_timeout_ms);
   pair->ref->tls_enabled = Bool_val(tls_enabled);
@@ -2358,7 +2362,9 @@ CAMLprim value ocaml_halo_create_server(value runtime,
                                         value host,
                                         value port,
                                         value backlog,
-                                        value max_request_size,
+                                        value max_request_line_size,
+                                        value max_header_size,
+                                        value max_body_size,
                                         value request_timeout_ms,
                                         value idle_timeout_ms,
                                         value tls_enabled,
@@ -2378,26 +2384,28 @@ CAMLprim value ocaml_halo_create_server(value runtime,
                                         value tls_session_ticket_initial_count,
                                         value tls_server_keying_material_lifetime_secs,
                                         value tls_max_early_data_size) {
-  CAMLparam5(runtime, host, port, backlog, max_request_size);
-  CAMLxparam5(request_timeout_ms,
+  CAMLparam5(runtime, host, port, backlog, max_request_line_size);
+  CAMLxparam5(max_header_size,
+              max_body_size,
+              request_timeout_ms,
               idle_timeout_ms,
-              tls_enabled,
-              tls_cert_chain_path,
-              tls_private_key_path);
-  CAMLxparam5(tls_security_policy,
+              tls_enabled);
+  CAMLxparam5(tls_cert_chain_path,
+              tls_private_key_path,
+              tls_security_policy,
               tls_minimum_protocol_version,
-              tls_alpn_protocols,
-              tls_ocsp_staple_path,
-              tls_client_auth_mode);
-  CAMLxparam5(tls_client_auth_ca_cert_path,
+              tls_alpn_protocols);
+  CAMLxparam5(tls_ocsp_staple_path,
+              tls_client_auth_mode,
+              tls_client_auth_ca_cert_path,
               tls_client_auth_ca_cert_dir,
-              tls_session_tickets_enabled,
-              tls_session_ticket_keys_path,
-              tls_session_ticket_encrypt_decrypt_lifetime_secs);
-  CAMLxparam4(tls_session_ticket_decrypt_lifetime_secs,
+              tls_session_tickets_enabled);
+  CAMLxparam5(tls_session_ticket_keys_path,
+              tls_session_ticket_encrypt_decrypt_lifetime_secs,
+              tls_session_ticket_decrypt_lifetime_secs,
               tls_session_ticket_initial_count,
-              tls_server_keying_material_lifetime_secs,
-              tls_max_early_data_size);
+              tls_server_keying_material_lifetime_secs);
+  CAMLxparam1(tls_max_early_data_size);
   CAMLlocal1(listener_value);
   struct halo_listener_pair pair;
   struct halo_runtime* rt;
@@ -2415,7 +2423,9 @@ CAMLprim value ocaml_halo_create_server(value runtime,
   rt = halo_runtime_get(runtime);
   if (halo_listener_pair_create(&pair,
                                 rt,
-                                max_request_size,
+                                max_request_line_size,
+                                max_header_size,
+                                max_body_size,
                                 request_timeout_ms,
                                 idle_timeout_ms,
                                 tls_enabled) != 0) {
@@ -2522,5 +2532,7 @@ CAMLprim value ocaml_halo_create_server_bytecode(value* argv, int argn) {
                                   argv[20],
                                   argv[21],
                                   argv[22],
-                                  argv[23]);
+                                  argv[23],
+                                  argv[24],
+                                  argv[25]);
 }

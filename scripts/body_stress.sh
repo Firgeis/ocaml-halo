@@ -12,9 +12,9 @@ SERVER_LOG="${SERVER_LOG:-$RESULT_DIR/body-stress-server.log}"
 PROCESS_SAMPLE_JSON="${PROCESS_SAMPLE_JSON:-$RESULT_DIR/body-stress-process-sample.json}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8080}"
-MAX_REQUEST_SIZE="${MAX_REQUEST_SIZE:-1048576}"
-ACCEPTED_BODY_SIZE="${ACCEPTED_BODY_SIZE:-$((MAX_REQUEST_SIZE - 1024))}"
-OVERSIZED_BODY_SIZE="${OVERSIZED_BODY_SIZE:-$((MAX_REQUEST_SIZE + 1024))}"
+MAX_BODY_SIZE="${MAX_BODY_SIZE:-1048576}"
+ACCEPTED_BODY_SIZE="${ACCEPTED_BODY_SIZE:-$((MAX_BODY_SIZE - 1024))}"
+OVERSIZED_BODY_SIZE="${OVERSIZED_BODY_SIZE:-$((MAX_BODY_SIZE + 1024))}"
 REQUESTS="${REQUESTS:-12}"
 CONCURRENCY="${CONCURRENCY:-2}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-2}"
@@ -54,8 +54,8 @@ run_bench() {
   return "$exit_code"
 }
 
-if (( MAX_REQUEST_SIZE <= 0 )); then
-  echo "MAX_REQUEST_SIZE must be positive" >&2
+if (( MAX_BODY_SIZE <= 0 )); then
+  echo "MAX_BODY_SIZE must be positive" >&2
   exit 1
 fi
 
@@ -64,13 +64,13 @@ if (( ACCEPTED_BODY_SIZE <= 0 )); then
   exit 1
 fi
 
-if (( ACCEPTED_BODY_SIZE > MAX_REQUEST_SIZE )); then
-  echo "ACCEPTED_BODY_SIZE must be less than or equal to MAX_REQUEST_SIZE" >&2
+if (( ACCEPTED_BODY_SIZE > MAX_BODY_SIZE )); then
+  echo "ACCEPTED_BODY_SIZE must be less than or equal to MAX_BODY_SIZE" >&2
   exit 1
 fi
 
-if (( OVERSIZED_BODY_SIZE <= MAX_REQUEST_SIZE )); then
-  echo "OVERSIZED_BODY_SIZE must be greater than MAX_REQUEST_SIZE" >&2
+if (( OVERSIZED_BODY_SIZE <= MAX_BODY_SIZE )); then
+  echo "OVERSIZED_BODY_SIZE must be greater than MAX_BODY_SIZE" >&2
   exit 1
 fi
 
@@ -110,7 +110,7 @@ accepted_path.write_bytes(b"a" * accepted_size)
 oversized_path.write_bytes(b"b" * oversized_size)
 PY
 
-HALO_MAX_REQUEST_SIZE="$MAX_REQUEST_SIZE" "$SERVER_BIN" >"$SERVER_LOG" 2>&1 &
+HALO_MAX_BODY_SIZE="$MAX_BODY_SIZE" "$SERVER_BIN" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
 "$PYTHON_BIN" "$ROOT_DIR/scripts/process_sample.py" \
@@ -225,7 +225,7 @@ if [[ -n "${PROCESS_SAMPLE_PID:-}" ]]; then
   unset PROCESS_SAMPLE_PID
 fi
 
-"$PYTHON_BIN" - "$RESULT_JSON" "$PROCESS_SAMPLE_JSON" "$MAX_REQUEST_SIZE" "$ACCEPTED_BODY_SIZE" "$OVERSIZED_BODY_SIZE" "$CHUNK_SIZE" "$ACCEPTED_EXIT_CODE" "$ACCEPTED_CHUNKED_EXIT_CODE" "$OVERSIZED_EXIT_CODE" "$OVERSIZED_CHUNKED_EXIT_CODE" "$ACCEPTED_RESULT" "$ACCEPTED_CHUNKED_RESULT" "$OVERSIZED_RESULT" "$OVERSIZED_CHUNKED_RESULT" "$KEEP_ALIVE_ENABLED" <<'PY'
+"$PYTHON_BIN" - "$RESULT_JSON" "$PROCESS_SAMPLE_JSON" "$MAX_BODY_SIZE" "$ACCEPTED_BODY_SIZE" "$OVERSIZED_BODY_SIZE" "$CHUNK_SIZE" "$ACCEPTED_EXIT_CODE" "$ACCEPTED_CHUNKED_EXIT_CODE" "$OVERSIZED_EXIT_CODE" "$OVERSIZED_CHUNKED_EXIT_CODE" "$ACCEPTED_RESULT" "$ACCEPTED_CHUNKED_RESULT" "$OVERSIZED_RESULT" "$OVERSIZED_CHUNKED_RESULT" "$KEEP_ALIVE_ENABLED" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -248,7 +248,7 @@ def parse_result(name: str, exit_code: int, raw: str) -> dict:
 
 payload = {
     "config": {
-        "max_request_size": int(sys.argv[3]),
+        "max_body_size": int(sys.argv[3]),
         "accepted_body_size": int(sys.argv[4]),
         "oversized_body_size": int(sys.argv[5]),
         "chunk_size": int(sys.argv[6]),

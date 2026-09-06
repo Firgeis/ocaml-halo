@@ -136,6 +136,8 @@ struct halo_request {
   int http_major;
   int http_minor;
   uint64_t content_length;
+  size_t request_line_bytes;
+  size_t header_bytes;
   char* method_text;
   size_t method_len;
   size_t method_cap;
@@ -236,7 +238,9 @@ struct halo_tls_write_chunk {
 struct halo_listener_ref {
   struct halo_listener* handle;
   int ocaml_alive;
-  int max_request_size;
+  size_t max_request_line_size;
+  size_t max_header_size;
+  size_t max_body_size;
   int request_timeout_ms;
   int idle_timeout_ms;
   int tls_enabled;

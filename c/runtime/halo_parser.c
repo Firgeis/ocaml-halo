@@ -434,57 +434,11 @@ static int halo_request_expects_100_continue(llhttp_t* parser,
   return 1;
 }
 
-static int halo_request_append(char** buf,
-                               size_t* len,
-                               size_t* cap,
-                               size_t max_request_size,
-                               const char* data,
-                               size_t data_len) {
-  char* next_buf;
-  size_t next_cap;
-
-  if (data_len == 0)
-    return 0;
-
-  if (data_len > max_request_size - *len)
-    return -1;
-
-  if (*len + data_len + 1 <= *cap) {
-    memcpy(*buf + *len, data, data_len);
-    *len += data_len;
-    (*buf)[*len] = '\0';
-    return 0;
-  }
-
-  next_cap = *cap == 0 ? 128 : *cap;
-  while (next_cap < *len + data_len + 1) {
-    if (next_cap >= max_request_size) {
-      next_cap = max_request_size + 1;
-      break;
-    }
-    next_cap *= 2;
-  }
-
-  if (next_cap < *len + data_len + 1)
-    return -1;
-
-  next_buf = realloc(*buf, next_cap);
-  if (next_buf == NULL)
-    return -1;
-
-  *buf = next_buf;
-  *cap = next_cap;
-  memcpy(*buf + *len, data, data_len);
-  *len += data_len;
-  (*buf)[*len] = '\0';
-  return 0;
-}
-
 static int halo_request_storage_append(struct halo_request* request,
                                        char** buf,
                                        size_t* len,
                                        size_t* cap,
-                                       size_t max_request_size,
+                                       size_t limit,
                                        const char* data,
                                        size_t data_len) {
   char* next_buf;
@@ -493,14 +447,14 @@ static int halo_request_storage_append(struct halo_request* request,
   if (data_len == 0)
     return 0;
 
-  if (data_len > max_request_size - *len)
+  if (*len > limit || data_len > limit - *len)
     return -1;
 
   if (*len + data_len + 1 > *cap) {
-    next_cap = *cap == 0 ? 128 : *cap;
+    next_cap = *cap == 0 ? data_len + 1 : *cap;
     while (next_cap < *len + data_len + 1) {
-      if (next_cap >= max_request_size) {
-        next_cap = max_request_size + 1;
+      if (next_cap >= limit) {
+        next_cap = limit + 1;
         break;
       }
       next_cap *= 2;
@@ -526,28 +480,13 @@ static int halo_request_storage_append(struct halo_request* request,
   return 0;
 }
 
-static int halo_request_reserve(char** buf,
-                                size_t* cap,
-                                size_t max_request_size,
-                                size_t needed_len) {
-  char* next_buf;
-  size_t needed_cap;
-
-  if (needed_len > max_request_size)
+static int halo_request_charge_bytes(size_t* total,
+                                     size_t limit,
+                                     size_t amount) {
+  if (*total > limit || amount > limit - *total)
     return -1;
 
-  needed_cap = needed_len + 1;
-  if (needed_cap <= *cap)
-    return 0;
-
-  next_buf = realloc(*buf, needed_cap);
-  if (next_buf == NULL)
-    return -1;
-
-  *buf = next_buf;
-  *cap = needed_cap;
-  if (needed_len == 0)
-    (*buf)[0] = '\0';
+  *total += amount;
   return 0;
 }
 
@@ -692,13 +631,20 @@ static int halo_request_finalize_header(struct halo_request* request) {
 
 static int halo_on_method(llhttp_t* parser, const char* at, size_t length) {
   struct halo_client* client;
+  size_t max_request_line_size;
 
   client = halo_parser_client(parser);
+  max_request_line_size = client->listener_ref->max_request_line_size;
+  if (halo_request_charge_bytes(&client->request.request_line_bytes,
+                                max_request_line_size,
+                                length) != 0)
+    return halo_parser_fail(parser, "request line is too large");
+
   if (halo_request_storage_append(&client->request,
                                   &client->request.method_text,
                                   &client->request.method_len,
                                   &client->request.method_cap,
-                                  (size_t) client->listener_ref->max_request_size,
+                                  max_request_line_size,
                                   at,
                                   length) != 0)
     return halo_parser_fail(parser, "request method is too large");
@@ -707,13 +653,20 @@ static int halo_on_method(llhttp_t* parser, const char* at, size_t length) {
 
 static int halo_on_url(llhttp_t* parser, const char* at, size_t length) {
   struct halo_client* client;
+  size_t max_request_line_size;
 
   client = halo_parser_client(parser);
+  max_request_line_size = client->listener_ref->max_request_line_size;
+  if (halo_request_charge_bytes(&client->request.request_line_bytes,
+                                max_request_line_size,
+                                length) != 0)
+    return halo_parser_uri_too_long(parser, "request line is too large");
+
   if (halo_request_storage_append(&client->request,
                                   &client->request.url,
                                   &client->request.url_len,
                                   &client->request.url_cap,
-                                  (size_t) client->listener_ref->max_request_size,
+                                  max_request_line_size,
                                   at,
                                   length) != 0)
     return halo_parser_uri_too_long(parser, "request target is too large");
@@ -722,6 +675,7 @@ static int halo_on_url(llhttp_t* parser, const char* at, size_t length) {
 
 static int halo_on_header_field(llhttp_t* parser, const char* at, size_t length) {
   struct halo_client* client;
+  size_t max_header_size;
 
   client = halo_parser_client(parser);
   if (parser->flags & F_TRAILING)
@@ -729,11 +683,18 @@ static int halo_on_header_field(llhttp_t* parser, const char* at, size_t length)
   if (client->request.current_header_value_len != 0)
     return halo_parser_fail(parser, "header field/value callback order is invalid");
 
+  max_header_size = client->listener_ref->max_header_size;
+  if (halo_request_charge_bytes(&client->request.header_bytes,
+                                max_header_size,
+                                length) != 0)
+    return halo_parser_request_header_fields_too_large(
+      parser, "request headers are too large");
+
   if (halo_request_storage_append(&client->request,
                                   &client->request.current_header_name,
                                   &client->request.current_header_name_len,
                                   &client->request.current_header_name_cap,
-                                  (size_t) client->listener_ref->max_request_size,
+                                  max_header_size,
                                   at,
                                   length) != 0)
     return halo_parser_request_header_fields_too_large(parser,
@@ -743,6 +704,7 @@ static int halo_on_header_field(llhttp_t* parser, const char* at, size_t length)
 
 static int halo_on_header_value(llhttp_t* parser, const char* at, size_t length) {
   struct halo_client* client;
+  size_t max_header_size;
 
   client = halo_parser_client(parser);
   if (parser->flags & F_TRAILING)
@@ -750,11 +712,18 @@ static int halo_on_header_value(llhttp_t* parser, const char* at, size_t length)
   if (client->request.current_header_name_len == 0)
     return halo_parser_fail(parser, "header value arrived before a header field");
 
+  max_header_size = client->listener_ref->max_header_size;
+  if (halo_request_charge_bytes(&client->request.header_bytes,
+                                max_header_size,
+                                length) != 0)
+    return halo_parser_request_header_fields_too_large(
+      parser, "request headers are too large");
+
   if (halo_request_storage_append(&client->request,
                                   &client->request.current_header_value,
                                   &client->request.current_header_value_len,
                                   &client->request.current_header_value_cap,
-                                  (size_t) client->listener_ref->max_request_size,
+                                  max_header_size,
                                   at,
                                   length) != 0)
     return halo_parser_request_header_fields_too_large(parser,
@@ -813,7 +782,7 @@ static int halo_on_headers_complete(llhttp_t* parser) {
 
   if (client->request.has_content_length
       && client->request.content_length
-           > (uint64_t) client->listener_ref->max_request_size)
+           > (uint64_t) client->listener_ref->max_body_size)
     return halo_parser_content_too_large(parser, "request body is too large");
 
   expects_continue =
@@ -846,11 +815,12 @@ static int halo_on_headers_complete(llhttp_t* parser) {
 
 static int halo_on_body(llhttp_t* parser, const char* at, size_t length) {
   struct halo_client* client;
-  size_t max_request_size;
+  size_t max_body_size;
 
   client = halo_parser_client(parser);
-  max_request_size = (size_t) client->listener_ref->max_request_size;
-  if (length > max_request_size - client->body_bytes_read)
+  max_body_size = client->listener_ref->max_body_size;
+  if (client->body_bytes_read > max_body_size
+      || length > max_body_size - client->body_bytes_read)
     return halo_parser_content_too_large(parser, "request body is too large");
 
   client->body_bytes_read += length;

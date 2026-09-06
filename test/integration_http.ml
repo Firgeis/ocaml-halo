@@ -526,11 +526,7 @@ let test_tls_https_response () =
         ~body:"hello world\n" response)
 
 let test_tls_large_request_body () =
-  with_server
-    ~env:(
-      ("HALO_MAX_REQUEST_SIZE", string_of_int (256 * 1024))
-      :: tls_server_env ())
-    (fun () ->
+  with_server ~env:(tls_server_env ()) (fun () ->
       let body = String.make (128 * 1024) 't' in
       let request =
         Printf.sprintf
@@ -728,7 +724,7 @@ let test_rejects_too_large_request_target () =
         ~body:"uri too long\n" response)
 
 let test_rejects_too_large_request_body () =
-  with_server (fun () ->
+  with_server ~env:[("HALO_MAX_BODY_SIZE", "8192")] (fun () ->
       let body = String.make 9000 'a' in
       let request =
         Printf.sprintf
@@ -741,7 +737,7 @@ let test_rejects_too_large_request_body () =
         ~body:"content too large\n" response)
 
 let test_rejects_streamed_too_large_request_body_without_reset () =
-  with_server (fun () ->
+  with_server ~env:[("HALO_MAX_BODY_SIZE", "8192")] (fun () ->
       let body_length = 1024 * 1024 in
       let request_headers =
         Printf.sprintf
@@ -762,7 +758,7 @@ let test_rejects_streamed_too_large_request_body_without_reset () =
           assert_socket_closed fd))
 
 let test_rejects_too_large_request_header_fields () =
-  with_server (fun () ->
+  with_server ~env:[("HALO_MAX_HEADER_SIZE", "8192")] (fun () ->
       let oversized_value = String.make 9000 'a' in
       let request =
         Printf.sprintf
@@ -773,6 +769,56 @@ let test_rejects_too_large_request_header_fields () =
       assert_response ~connection:"close" ~content_length:32
         ~status:"HTTP/1.1 431 Request Header Fields Too Large"
         ~body:"request header fields too large\n" response)
+
+let test_request_line_limit_is_aggregate () =
+  with_server ~env:[("HALO_MAX_REQUEST_LINE_SIZE", "4")] (fun () ->
+      let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      Fun.protect
+        ~finally:(fun () -> Unix.close fd)
+        (fun () ->
+          Unix.connect fd (Unix.ADDR_INET (host, port));
+          let request = "GET / HTTP/1.1\r\nHost: a\r\n\r\n" in
+          write_all fd request 0 (String.length request);
+          let accepted = read_response fd in
+          assert_response ~content_length:12 ~status:"HTTP/1.1 200 OK"
+            ~body:"hello world\n" accepted;
+          write_all fd request 0 (String.length request);
+          let accepted_again = read_response fd in
+          assert_response ~content_length:12 ~status:"HTTP/1.1 200 OK"
+            ~body:"hello world\n" accepted_again;
+          let oversized = "GET /x HTTP/1.1\r\nHost: a\r\n\r\n" in
+          write_all fd oversized 0 (String.length oversized);
+          let rejected = read_response fd in
+          assert_response ~connection:"close" ~content_length:13
+            ~status:"HTTP/1.1 414 URI Too Long" ~body:"uri too long\n" rejected))
+
+let test_header_limit_is_aggregate () =
+  with_server ~env:[("HALO_MAX_HEADER_SIZE", "5")] (fun () ->
+      let accepted = request_response "GET / HTTP/1.1\r\nHost: a\r\n\r\n" in
+      assert_response ~content_length:12 ~status:"HTTP/1.1 200 OK"
+        ~body:"hello world\n" accepted;
+      let rejected =
+        request_response "GET / HTTP/1.1\r\nHost: a\r\nX:\r\n\r\n"
+      in
+      assert_response ~connection:"close" ~content_length:32
+        ~status:"HTTP/1.1 431 Request Header Fields Too Large"
+        ~body:"request header fields too large\n" rejected)
+
+let test_body_limit_is_independent () =
+  with_server ~env:[("HALO_MAX_BODY_SIZE", "1")] (fun () ->
+      let accepted =
+        request_response
+          "POST /submit HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\nConnection: close\r\n\r\na"
+      in
+      assert_response ~connection:"close" ~content_length:11
+        ~status:"HTTP/1.1 200 OK" ~body:"submitted:a" accepted;
+      let rejected =
+        request_response
+          "POST /submit HTTP/1.1\r\nHost: a\r\nContent-Length: 2\r\nConnection: close\r\n\r\naa"
+      in
+      assert_response ~connection:"close" ~content_length:18
+        ~status:"HTTP/1.1 413 Content Too Large"
+        ~body:"content too large\n" rejected)
 
 let test_post_without_defined_length_returns_411 () =
   with_server (fun () ->
@@ -1499,6 +1545,12 @@ let () =
             `Quick test_rejects_streamed_too_large_request_body_without_reset;
           timed_test_case "rejects too large request header fields" `Quick
             test_rejects_too_large_request_header_fields;
+          timed_test_case "request line limit is aggregate" `Quick
+            test_request_line_limit_is_aggregate;
+          timed_test_case "header limit is aggregate" `Quick
+            test_header_limit_is_aggregate;
+          timed_test_case "body limit is independent" `Quick
+            test_body_limit_is_independent;
           timed_test_case "POST without defined length returns 411" `Quick
             test_post_without_defined_length_returns_411;
           timed_test_case "accepts chunked request body" `Quick

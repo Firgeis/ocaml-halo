@@ -57,7 +57,6 @@ let () =
     |> Option.value ~default:4096
   in
   let config =
-    Halo.Server.Config.create ~host:"127.0.0.1" ~port:8081
-      ~max_request_size:(2 * 1024 * 1024) router
+    Halo.Server.Config.create ~host:"127.0.0.1" ~port:8081 router
   in
   Halo.Server.run ~max_in_flight_requests [ config ]

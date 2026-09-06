@@ -17,15 +17,13 @@ static int halo_request_reserve_headers(struct halo_request* request, size_t min
     next_cap *= 2;
   }
 
-  headers =
-    halo_request_storage_alloc(&request->storage,
-                               next_cap * sizeof(*headers),
-                               _Alignof(struct halo_header));
+  if (next_cap > SIZE_MAX / sizeof(*headers))
+    return -1;
+
+  headers = realloc(request->headers, next_cap * sizeof(*headers));
   if (headers == NULL)
     return -1;
 
-  if (request->header_count != 0)
-    memcpy(headers, request->headers, request->header_count * sizeof(*headers));
   request->headers = headers;
   request->header_cap = next_cap;
   return 0;
@@ -49,18 +47,13 @@ static int halo_request_reserve_connection_options(struct halo_request* request,
     next_cap *= 2;
   }
 
-  options =
-    halo_request_storage_alloc(&request->storage,
-                               next_cap * sizeof(*options),
-                               _Alignof(struct halo_connection_option));
+  if (next_cap > SIZE_MAX / sizeof(*options))
+    return -1;
+
+  options = realloc(request->connection_options, next_cap * sizeof(*options));
   if (options == NULL)
     return -1;
 
-  if (request->connection_option_count != 0) {
-    memcpy(options,
-           request->connection_options,
-           request->connection_option_count * sizeof(*options));
-  }
   request->connection_options = options;
   request->connection_option_cap = next_cap;
   return 0;
@@ -124,6 +117,8 @@ void halo_request_clear(struct halo_request* request) {
   request->http_major = 0;
   request->http_minor = 0;
   request->content_length = 0;
+  request->request_line_bytes = 0;
+  request->header_bytes = 0;
   request->method_len = 0;
   request->url_len = 0;
   request->current_header_name_len = 0;
@@ -137,12 +132,8 @@ void halo_request_clear(struct halo_request* request) {
   request->current_header_name_cap = 0;
   request->current_header_value = NULL;
   request->current_header_value_cap = 0;
-  request->headers = NULL;
   request->header_count = 0;
-  request->header_cap = 0;
-  request->connection_options = NULL;
   request->connection_option_count = 0;
-  request->connection_option_cap = 0;
   request->known_headers.host_count = 0;
   request->known_headers.host_value = NULL;
   request->known_headers.host_value_len = 0;
@@ -156,6 +147,8 @@ void halo_request_free(struct halo_request* request) {
     return;
 
   halo_request_clear(request);
+  free(request->headers);
+  free(request->connection_options);
   halo_request_storage_destroy(&request->storage);
   memset(request, 0, sizeof(*request));
 }

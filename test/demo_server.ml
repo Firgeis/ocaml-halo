@@ -331,13 +331,22 @@ let run_server clock =
   let idle_timeout_ms =
     int_env_or_default "HALO_IDLE_TIMEOUT_MS" 5000
   in
-  let max_request_size =
-    int_env_or_default "HALO_MAX_REQUEST_SIZE"
-      Halo.Server.Config.default_max_request_size
+  let max_request_line_size =
+    int_env_or_default "HALO_MAX_REQUEST_LINE_SIZE"
+      Halo.Server.Config.default_max_request_line_size
+  in
+  let max_header_size =
+    int_env_or_default "HALO_MAX_HEADER_SIZE"
+      Halo.Server.Config.default_max_header_size
+  in
+  let max_body_size =
+    int_env_or_default "HALO_MAX_BODY_SIZE"
+      Halo.Server.Config.default_max_body_size
   in
   let config =
     Halo.Server.Config.create ~port:8080
-      ~max_request_size ~request_timeout_ms ~idle_timeout_ms
+      ~max_request_line_size ~max_header_size ~max_body_size ~request_timeout_ms
+      ~idle_timeout_ms
       ?tls:(tls_config_from_env ())
       router
   in

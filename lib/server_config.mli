@@ -44,7 +44,9 @@ type t = {
   host : string;
   port : int;
   backlog : int;
-  max_request_size : int;
+  max_request_line_size : int;
+  max_header_size : int;
+  max_body_size : int;
   request_timeout_ms : int;
   idle_timeout_ms : int;
   tls : tls_config option;
@@ -54,7 +56,15 @@ type t = {
 
 val default_host : string
 val default_backlog : int
-val default_max_request_size : int
+val default_max_request_line_size : int
+(** Maximum combined method and request-target bytes. *)
+
+val default_max_header_size : int
+(** Maximum combined header-name and header-value bytes. *)
+
+val default_max_body_size : int
+(** Maximum decoded request-body bytes. *)
+
 val default_request_timeout_ms : int
 val default_idle_timeout_ms : int
 val default_controller : controller_config
@@ -86,7 +96,9 @@ val tls :
 val create :
   ?host:string ->
   ?backlog:int ->
-  ?max_request_size:int ->
+  ?max_request_line_size:int ->
+  ?max_header_size:int ->
+  ?max_body_size:int ->
   ?request_timeout_ms:int ->
   ?idle_timeout_ms:int ->
   ?tls:tls_config ->
@@ -94,5 +106,8 @@ val create :
   port:int ->
   Router.t ->
   t
+(** Build a listener configuration. Request-line, header, and body limits are
+    independent and are enforced cumulatively within their respective request
+    sections. *)
 
 val validate : t -> string option

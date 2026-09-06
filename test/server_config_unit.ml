@@ -15,14 +15,30 @@ let check_invalid label expected config =
 let test_default_config_is_valid () =
   check_valid "default config is valid" (default_config ())
 
+let test_default_request_limits () =
+  let config = default_config () in
+  Alcotest.(check int) "request line" (8 * 1024) config.max_request_line_size;
+  Alcotest.(check int) "headers" (32 * 1024) config.max_header_size;
+  Alcotest.(check int) "body" (1024 * 1024) config.max_body_size
+
 let test_backlog_must_be_positive () =
   check_invalid "backlog validation" "server backlog must be positive"
     (Halo.Server.Config.create ~port:8080 ~backlog:0 default_router)
 
-let test_max_request_size_must_be_positive () =
-  check_invalid "max request size validation"
-    "server max_request_size must be positive"
-    (Halo.Server.Config.create ~port:8080 ~max_request_size:0 default_router)
+let test_max_request_line_size_must_be_positive () =
+  check_invalid "max request line size validation"
+    "server max_request_line_size must be positive"
+    (Halo.Server.Config.create ~port:8080 ~max_request_line_size:0 default_router)
+
+let test_max_header_size_must_be_positive () =
+  check_invalid "max header size validation"
+    "server max_header_size must be positive"
+    (Halo.Server.Config.create ~port:8080 ~max_header_size:0 default_router)
+
+let test_max_body_size_must_be_positive () =
+  check_invalid "max body size validation"
+    "server max_body_size must be positive"
+    (Halo.Server.Config.create ~port:8080 ~max_body_size:0 default_router)
 
 let test_request_timeout_must_be_non_negative () =
   check_invalid "request timeout validation"
@@ -188,10 +204,16 @@ let () =
         [
           Alcotest.test_case "default config is valid" `Quick
             test_default_config_is_valid;
+          Alcotest.test_case "default request limits" `Quick
+            test_default_request_limits;
           Alcotest.test_case "backlog must be positive" `Quick
             test_backlog_must_be_positive;
-          Alcotest.test_case "max request size must be positive" `Quick
-            test_max_request_size_must_be_positive;
+          Alcotest.test_case "max request line size must be positive" `Quick
+            test_max_request_line_size_must_be_positive;
+          Alcotest.test_case "max header size must be positive" `Quick
+            test_max_header_size_must_be_positive;
+          Alcotest.test_case "max body size must be positive" `Quick
+            test_max_body_size_must_be_positive;
           Alcotest.test_case "request timeout must be non-negative" `Quick
             test_request_timeout_must_be_non_negative;
           Alcotest.test_case "idle timeout must be non-negative" `Quick

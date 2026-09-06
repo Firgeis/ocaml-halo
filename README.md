@@ -33,6 +33,13 @@ Add `ocaml-halo` and `eio_main` to the executable's Dune libraries:
 Ctrl-C is received. Pass several configurations to `Server.run` to serve
 several listeners.
 
+Request limits are configured independently on `Server.Config.create`:
+`max_request_line_size` caps the combined method and request-target bytes,
+`max_header_size` caps the combined bytes in all header names and values, and
+`max_body_size` caps decoded body bytes (including chunked requests). The
+defaults are 8 KiB, 32 KiB, and 1 MiB, respectively. Requests exceeding them
+receive 414, 431, and 413.
+
 ## Routes and requests
 
 Routes use applicative matchers and compose with `<|>`:

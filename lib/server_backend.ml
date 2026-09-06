@@ -65,7 +65,9 @@ external create_server_raw :
   host:string ->
   port:int ->
   backlog:int ->
-  max_request_size:int ->
+  max_request_line_size:int ->
+  max_header_size:int ->
+  max_body_size:int ->
   request_timeout_ms:int ->
   idle_timeout_ms:int ->
   tls_enabled:bool ->
@@ -189,7 +191,9 @@ let listen runtime (config : config) =
   in
   let tls = create_server_tls_args config.tls in
   create_server_raw runtime ~host:config.host ~port:config.port
-    ~backlog:config.backlog ~max_request_size:config.max_request_size
+    ~backlog:config.backlog
+    ~max_request_line_size:config.max_request_line_size
+    ~max_header_size:config.max_header_size ~max_body_size:config.max_body_size
     ~request_timeout_ms:config.request_timeout_ms
     ~idle_timeout_ms:config.idle_timeout_ms ~tls_enabled:tls.enabled
     ~tls_cert_chain_path:tls.cert_chain_path
