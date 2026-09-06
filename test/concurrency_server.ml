@@ -1,21 +1,23 @@
+module Status = Halo.Router.Status
+
 let router clock =
   let open Halo.Router in
   let open Matcher in
   route
     (let+ () = request_method_is GET and+ () = path_end in
-     fun _request -> text 200 "hello\n")
+     fun _request -> text Status.ok "hello\n")
   <|> route
         (let+ () = request_method_is GET
          and+ () = path_segment "fast"
          and+ () = path_end in
-         fun _request -> text 200 "fast\n")
+         fun _request -> text Status.ok "fast\n")
   <|> route
         (let+ () = request_method_is GET
          and+ () = path_segment "slow"
          and+ () = path_end in
          fun _request ->
            Eio.Time.sleep clock 0.30;
-           text 200 "slow\n")
+           text Status.ok "slow\n")
   <|> route
         (let+ () = request_method_is GET
          and+ () = path_segment "child"
@@ -25,13 +27,13 @@ let router clock =
            Eio.Fiber.fork ~sw:(Request.switch _request) (fun () ->
                Eio.Time.sleep clock 0.02;
                Eio.Promise.resolve set_value "child\n");
-           text 200 (Eio.Promise.await value))
+           text Status.ok (Eio.Promise.await value))
   <|> route
         (let+ () = request_method_is POST
          and+ () = path_segment "echo"
          and+ () = path_end
          and+ () = require_body in
-         fun request -> text 200 (Halo.Body.read_all (Request.body request)))
+         fun request -> text Status.ok (Halo.Body.read_all (Request.body request)))
   <|> route
         (let+ () = request_method_is POST
          and+ () = path_segment "stream-length"
@@ -43,7 +45,7 @@ let router clock =
              | None -> total
              | Some chunk -> consume (total + String.length chunk)
            in
-           text 200 (Printf.sprintf "%d\n" (consume 0)))
+           text Status.ok (Printf.sprintf "%d\n" (consume 0)))
 
 let () =
   Eio_main.run @@ fun env ->

@@ -9,12 +9,7 @@ type message =
   | Event of event
   | Comment of string
 
-let default_headers =
-  [
-    ("Content-Type", "text/event-stream");
-    ("Cache-Control", "no-cache");
-    ("X-Accel-Buffering", "no");
-  ]
+let default_headers = Router.Headers.sse_defaults
 
 let event ?event ?id ?retry_ms data = Event { event; data; id; retry_ms }
 let comment line = Comment line
@@ -56,6 +51,7 @@ let encode_message = function
       Buffer.add_string buffer "\n";
       Buffer.contents buffer
 
-let respond ?(headers = []) producer =
-  Stream.respond ~status:200 ~headers:(default_headers @ headers) (fun ~yield ->
+let respond ?(headers = Router.Headers.empty) producer =
+  Stream.respond ~status:Router.Status.ok
+    ~headers:(Router.Headers.append default_headers headers) (fun ~yield ->
       producer ~send:(fun message -> yield (encode_message message)))

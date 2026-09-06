@@ -26,6 +26,123 @@ type http_method =
   | OPTIONS
   | TRACE
 
+(** Valid HTTP status codes. *)
+module Status : sig
+  type t
+  type error = Invalid_status_code of int
+
+  (** Preferred constructor for dynamically selected status codes. *)
+  val of_int : int -> (t, error) result
+
+  (** [of_int_exn code] raises [Invalid_argument] unless [code] is between 100
+      and 599. *)
+  val of_int_exn : int -> t
+
+  val to_int : t -> int
+  val is_informational : t -> bool
+
+  (** [reason_phrase status] is empty for a valid unregistered status. *)
+  val reason_phrase : t -> string
+
+  val error_message : error -> string
+
+  val continue : t
+  val switching_protocols : t
+  val processing : t
+  val early_hints : t
+  val ok : t
+  val created : t
+  val accepted : t
+  val non_authoritative_information : t
+  val no_content : t
+  val reset_content : t
+  val partial_content : t
+  val multi_status : t
+  val already_reported : t
+  val im_used : t
+  val multiple_choices : t
+  val moved_permanently : t
+  val found : t
+  val see_other : t
+  val not_modified : t
+  val use_proxy : t
+  val temporary_redirect : t
+  val permanent_redirect : t
+  val bad_request : t
+  val unauthorized : t
+  val payment_required : t
+  val forbidden : t
+  val not_found : t
+  val method_not_allowed : t
+  val not_acceptable : t
+  val proxy_authentication_required : t
+  val request_timeout : t
+  val conflict : t
+  val gone : t
+  val length_required : t
+  val precondition_failed : t
+  val content_too_large : t
+  val uri_too_long : t
+  val unsupported_media_type : t
+  val range_not_satisfiable : t
+  val expectation_failed : t
+  val im_a_teapot : t
+  val misdirected_request : t
+  val unprocessable_content : t
+  val locked : t
+  val failed_dependency : t
+  val too_early : t
+  val upgrade_required : t
+  val precondition_required : t
+  val too_many_requests : t
+  val request_header_fields_too_large : t
+  val unavailable_for_legal_reasons : t
+  val internal_server_error : t
+  val not_implemented : t
+  val bad_gateway : t
+  val service_unavailable : t
+  val gateway_timeout : t
+  val http_version_not_supported : t
+  val variant_also_negotiates : t
+  val insufficient_storage : t
+  val loop_detected : t
+  val not_extended : t
+  val network_authentication_required : t
+end
+
+(** Valid response-header collections. Field names follow the HTTP token
+    grammar. Field values reject CR, LF, NUL, DEL, and other prohibited control
+    characters. *)
+module Headers : sig
+  type t
+
+  type error =
+    | Invalid_name of string
+    | Invalid_value of { name : string }
+
+  val empty : t
+
+  (** Default response headers for a server-sent event stream. *)
+  val sse_defaults : t
+
+  (** Preferred constructor when fields are not already validated. *)
+  val of_list : (string * string) list -> (t, error) result
+
+  (** [of_list_exn fields] raises [Invalid_argument] on the first invalid field. *)
+  val of_list_exn : (string * string) list -> t
+
+  val to_list : t -> (string * string) list
+  val add : string -> string -> t -> (t, error) result
+  val add_exn : string -> string -> t -> t
+  val set : string -> string -> t -> (t, error) result
+  val set_exn : string -> string -> t -> t
+  val append : t -> t -> t
+  val iter : (string -> string -> unit) -> t -> unit
+  val is_valid_name : string -> bool
+  val is_valid_value : string -> bool
+  val error_message : error -> string
+end
+
 type request_target =
   | Origin of {
       path : string;
@@ -47,20 +164,30 @@ type request = {
   body : string;
 }
 
-type response = {
-  status : int;
-  headers : (string * string) list;
-  body : response_body;
-}
-
-and response_body =
+type response_body =
   | Fixed_body of string
   | Stream_body of (yield:(string -> unit) -> unit)
 
-type informational_response = {
-  status : int;
-  headers : (string * string) list;
-}
+(** An HTTP response whose status and headers have been validated. *)
+type response
+
+(** A validated 1xx response. *)
+type informational_response
+
+module Response : sig
+  type t = response
+
+  val status : t -> Status.t
+  val headers : t -> Headers.t
+  val body : t -> response_body
+end
+
+module Informational_response : sig
+  type t = informational_response
+
+  val status : t -> Status.t
+  val headers : t -> Headers.t
+end
 
 type request_patch = {
   request_method : http_method option;
@@ -147,14 +274,25 @@ module Runtime : sig
     response
 end
 
+(** Final-response constructors and modifiers raise [Invalid_argument] when
+    given an informational status. *)
+val make : ?headers:Headers.t -> status:Status.t -> string -> response
+val with_status : Status.t -> response -> response
+val with_headers : Headers.t -> response -> response
+
+(** [with_header name value response] replaces fields named [name]
+    case-insensitively. It raises [Invalid_argument] for an invalid field. *)
 val with_header : string -> string -> response -> response
-val informational : int -> (string * string) list -> informational_response
+
+(** [informational status headers] raises [Invalid_argument] unless [status]
+    is in the 1xx class. *)
+val informational : Status.t -> Headers.t -> informational_response
 val with_content_type : string -> response -> response
-val text : int -> string -> response
-val html : int -> string -> response
-val json : int -> string -> response
+val text : Status.t -> string -> response
+val html : Status.t -> string -> response
+val json : Status.t -> string -> response
 val stream :
-  ?headers:(string * string) list ->
-  status:int ->
+  ?headers:Headers.t ->
+  status:Status.t ->
   (yield:(string -> unit) -> unit) ->
   response

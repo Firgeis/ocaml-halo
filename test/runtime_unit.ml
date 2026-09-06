@@ -1,3 +1,5 @@
+module Status = Halo.Router.Status
+
 let assert_int64_equal label expected actual =
   Alcotest.(check int64) label expected actual
 
@@ -141,7 +143,7 @@ let with_live_server ?tls f =
         Matcher.(
           let+ () = request_method_is GET
           and+ () = path_end in
-          fun _request -> text 200 "hello world\n"))
+          fun _request -> text Status.ok "hello world\n"))
   in
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->

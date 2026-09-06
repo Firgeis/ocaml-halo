@@ -478,6 +478,16 @@ let test_fixed_response () =
         ~status:"HTTP/1.1 200 OK"
         ~body:"hello world\n" response)
 
+let test_forbidden_reason_phrase () =
+  with_server (fun () ->
+      let response =
+        request_response
+          "GET /forbidden HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+      in
+      assert_response ~connection:"close" ~content_length:10
+        ~status:"HTTP/1.1 403 Forbidden"
+        ~body:"forbidden\n" response)
+
 let test_tls_https_response () =
   with_server ~env:(tls_server_env ()) (fun () ->
       let response =
@@ -1421,6 +1431,8 @@ let () =
       ( "integration",
         [
           timed_test_case "fixed HTTP response" `Quick test_fixed_response;
+          timed_test_case "403 uses the Forbidden reason phrase" `Quick
+            test_forbidden_reason_phrase;
           timed_test_case "TLS HTTPS response" `Quick test_tls_https_response;
           timed_test_case "TLS streams a large request body" `Quick
             test_tls_large_request_body;

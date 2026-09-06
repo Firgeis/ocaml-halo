@@ -13,7 +13,7 @@ let router =
   route
     (let+ () = request_method_is GET
      and+ () = path_end in
-     fun _request -> text 200 "hello world\n")
+     fun _request -> text Status.ok "hello world\n")
 
 let () =
   Eio_main.run @@ fun _env ->
@@ -49,7 +49,7 @@ let users =
      and+ () = path_end in
      fun request ->
        let agent = Request.header request "user-agent" in
-       json 200
+       json Status.ok
          (Printf.sprintf {|{"id":%d,"verbose":%S,"agent":%S}|}
             id verbose agent))
 ```
@@ -84,7 +84,7 @@ route
     and+ () = path_end
     and+ () = require_body in
     fun request ->
-      text 200 (Halo.Body.read_all (Request.body request)))
+      text Status.ok (Halo.Body.read_all (Request.body request)))
 ```
 
 If a handler responds before draining the body, Halo sends the response and
@@ -92,15 +92,19 @@ then closes the connection.
 
 ## Streaming and server-sent events
 
-Streaming responses are values, just like fixed responses:
+Streaming responses are values, just like fixed responses. Header construction
+returns a result so applications can choose how to handle invalid input:
 
 ```ocaml
-Halo.Stream.respond ~status:200
-  ~headers:[ "Content-Type", "text/plain; charset=utf-8" ]
-  (fun ~yield ->
-    yield "hello ";
-    Eio.Time.sleep clock 0.1;
-    yield "world\n")
+let streamed_response clock =
+  Halo.Router.Headers.of_list
+    [ "Content-Type", "text/plain; charset=utf-8" ]
+  |> Result.map (fun headers ->
+       Halo.Stream.respond ~status:Halo.Router.Status.ok ~headers
+         (fun ~yield ->
+           yield "hello ";
+           Eio.Time.sleep clock 0.1;
+           yield "world\n"))
 ```
 
 Each `yield` waits until its chunk is written, applying response backpressure.
@@ -111,10 +115,20 @@ HTTP/1.0 request.
 Handlers can emit 1xx responses explicitly:
 
 ```ocaml
-Halo.Router.Request.send_informational request
-  (Halo.Router.informational 103
-     [ "Link", "</style.css>; rel=preload; as=style" ])
+let send_early_hints request =
+  Halo.Router.Headers.of_list
+    [ "Link", "</style.css>; rel=preload; as=style" ]
+  |> Result.map (fun headers ->
+       Halo.Router.Request.send_informational request
+         (Halo.Router.informational Halo.Router.Status.early_hints headers))
 ```
+
+Response statuses, headers, and responses are validated types. Use a named
+`Router.Status` value when possible. For dynamically selected codes,
+`Router.Status.of_int` returns a result. Build dynamic header collections with
+`Router.Headers.of_list` and handle its result explicitly. Invalid field names
+and values containing prohibited control characters are rejected before a
+response can be serialized.
 
 ## Lifecycle and metrics
 

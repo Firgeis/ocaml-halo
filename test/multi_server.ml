@@ -1,9 +1,11 @@
+module Status = Halo.Router.Status
+
 let router body =
   let open Halo.Router in
   let open Matcher in
   route
     (let+ () = request_method_is GET and+ () = path_end in
-     fun _request -> text 200 body)
+     fun _request -> text Status.ok body)
 
 let run_runtime ~port ~body shutdown =
   Eio_main.run @@ fun _env ->

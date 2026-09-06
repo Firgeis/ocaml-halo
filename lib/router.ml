@@ -46,6 +46,248 @@ type http_method =
   | OPTIONS
   | TRACE
 
+module Status = struct
+  type t = int
+  type error = Invalid_status_code of int
+
+  let error_message (Invalid_status_code code) =
+    Printf.sprintf "invalid HTTP status code %d (expected 100..599)" code
+
+  let of_int code =
+    if code >= 100 && code <= 599 then Ok code
+    else Error (Invalid_status_code code)
+
+  let of_int_exn code =
+    match of_int code with
+    | Ok status -> status
+    | Error error -> invalid_arg (error_message error)
+
+  let to_int status = status
+  let is_informational status = status < 200
+
+  let reason_phrase = function
+    | 100 -> "Continue"
+    | 101 -> "Switching Protocols"
+    | 102 -> "Processing"
+    | 103 -> "Early Hints"
+    | 200 -> "OK"
+    | 201 -> "Created"
+    | 202 -> "Accepted"
+    | 203 -> "Non-Authoritative Information"
+    | 204 -> "No Content"
+    | 205 -> "Reset Content"
+    | 206 -> "Partial Content"
+    | 207 -> "Multi-Status"
+    | 208 -> "Already Reported"
+    | 226 -> "IM Used"
+    | 300 -> "Multiple Choices"
+    | 301 -> "Moved Permanently"
+    | 302 -> "Found"
+    | 303 -> "See Other"
+    | 304 -> "Not Modified"
+    | 305 -> "Use Proxy"
+    | 307 -> "Temporary Redirect"
+    | 308 -> "Permanent Redirect"
+    | 400 -> "Bad Request"
+    | 401 -> "Unauthorized"
+    | 402 -> "Payment Required"
+    | 403 -> "Forbidden"
+    | 404 -> "Not Found"
+    | 405 -> "Method Not Allowed"
+    | 406 -> "Not Acceptable"
+    | 407 -> "Proxy Authentication Required"
+    | 408 -> "Request Timeout"
+    | 409 -> "Conflict"
+    | 410 -> "Gone"
+    | 411 -> "Length Required"
+    | 412 -> "Precondition Failed"
+    | 413 -> "Content Too Large"
+    | 414 -> "URI Too Long"
+    | 415 -> "Unsupported Media Type"
+    | 416 -> "Range Not Satisfiable"
+    | 417 -> "Expectation Failed"
+    | 418 -> "I'm a Teapot"
+    | 421 -> "Misdirected Request"
+    | 422 -> "Unprocessable Content"
+    | 423 -> "Locked"
+    | 424 -> "Failed Dependency"
+    | 425 -> "Too Early"
+    | 426 -> "Upgrade Required"
+    | 428 -> "Precondition Required"
+    | 429 -> "Too Many Requests"
+    | 431 -> "Request Header Fields Too Large"
+    | 451 -> "Unavailable For Legal Reasons"
+    | 500 -> "Internal Server Error"
+    | 501 -> "Not Implemented"
+    | 502 -> "Bad Gateway"
+    | 503 -> "Service Unavailable"
+    | 504 -> "Gateway Timeout"
+    | 505 -> "HTTP Version Not Supported"
+    | 506 -> "Variant Also Negotiates"
+    | 507 -> "Insufficient Storage"
+    | 508 -> "Loop Detected"
+    | 510 -> "Not Extended"
+    | 511 -> "Network Authentication Required"
+    | _ -> ""
+
+  let continue = 100
+  let switching_protocols = 101
+  let processing = 102
+  let early_hints = 103
+  let ok = 200
+  let created = 201
+  let accepted = 202
+  let non_authoritative_information = 203
+  let no_content = 204
+  let reset_content = 205
+  let partial_content = 206
+  let multi_status = 207
+  let already_reported = 208
+  let im_used = 226
+  let multiple_choices = 300
+  let moved_permanently = 301
+  let found = 302
+  let see_other = 303
+  let not_modified = 304
+  let use_proxy = 305
+  let temporary_redirect = 307
+  let permanent_redirect = 308
+  let bad_request = 400
+  let unauthorized = 401
+  let payment_required = 402
+  let forbidden = 403
+  let not_found = 404
+  let method_not_allowed = 405
+  let not_acceptable = 406
+  let proxy_authentication_required = 407
+  let request_timeout = 408
+  let conflict = 409
+  let gone = 410
+  let length_required = 411
+  let precondition_failed = 412
+  let content_too_large = 413
+  let uri_too_long = 414
+  let unsupported_media_type = 415
+  let range_not_satisfiable = 416
+  let expectation_failed = 417
+  let im_a_teapot = 418
+  let misdirected_request = 421
+  let unprocessable_content = 422
+  let locked = 423
+  let failed_dependency = 424
+  let too_early = 425
+  let upgrade_required = 426
+  let precondition_required = 428
+  let too_many_requests = 429
+  let request_header_fields_too_large = 431
+  let unavailable_for_legal_reasons = 451
+  let internal_server_error = 500
+  let not_implemented = 501
+  let bad_gateway = 502
+  let service_unavailable = 503
+  let gateway_timeout = 504
+  let http_version_not_supported = 505
+  let variant_also_negotiates = 506
+  let insufficient_storage = 507
+  let loop_detected = 508
+  let not_extended = 510
+  let network_authentication_required = 511
+end
+
+module Headers = struct
+  type t = (string * string) list
+
+  type error =
+    | Invalid_name of string
+    | Invalid_value of { name : string }
+
+  let is_tchar = function
+    | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_'
+    | '`' | '|' | '~' ->
+        true
+    | '0' .. '9' | 'A' .. 'Z' | 'a' .. 'z' -> true
+    | _ -> false
+
+  let is_valid_name name =
+    String.length name > 0 && String.for_all is_tchar name
+
+  let is_valid_value value =
+    String.for_all
+      (fun character ->
+        let code = Char.code character in
+        code = 0x09 || (code >= 0x20 && code <> 0x7f))
+      value
+
+  let validate name value =
+    if not (is_valid_name name) then Error (Invalid_name name)
+    else if not (is_valid_value value) then Error (Invalid_value { name })
+    else Ok ()
+
+  let error_message = function
+    | Invalid_name name -> Printf.sprintf "invalid HTTP header name %S" name
+    | Invalid_value { name } ->
+        Printf.sprintf "invalid value for HTTP header %S" name
+
+  let empty = []
+
+  let sse_defaults =
+    [
+      ("Content-Type", "text/event-stream");
+      ("Cache-Control", "no-cache");
+      ("X-Accel-Buffering", "no");
+    ]
+
+  let of_list fields =
+    let rec validate_all = function
+      | [] -> Ok fields
+      | (name, value) :: rest -> (
+          match validate name value with
+          | Ok () -> validate_all rest
+          | Error _ as error -> error)
+    in
+    validate_all fields
+
+  let of_list_exn fields =
+    match of_list fields with
+    | Ok headers -> headers
+    | Error error -> invalid_arg (error_message error)
+
+  let to_list headers = headers
+
+  let add name value headers =
+    match validate name value with
+    | Ok () -> Ok ((name, value) :: headers)
+    | Error _ as error -> error
+
+  let add_exn name value headers =
+    match add name value headers with
+    | Ok headers -> headers
+    | Error error -> invalid_arg (error_message error)
+
+  let set name value headers =
+    match validate name value with
+    | Error _ as error -> error
+    | Ok () ->
+        let normalized_name = String.lowercase_ascii name in
+        Ok
+          ((name, value)
+          :: List.filter
+               (fun (existing_name, _value) ->
+                 not
+                   (String.equal
+                      (String.lowercase_ascii existing_name)
+                      normalized_name))
+               headers)
+
+  let set_exn name value headers =
+    match set name value headers with
+    | Ok headers -> headers
+    | Error error -> invalid_arg (error_message error)
+
+  let append first second = first @ second
+  let iter f headers = List.iter (fun (name, value) -> f name value) headers
+end
+
 type request_target =
   | Origin of {
       path : string;
@@ -67,20 +309,35 @@ type request = {
   body : string;
 }
 
-type response = {
-  status : int;
-  headers : (string * string) list;
-  body : response_body;
-}
-
-and response_body =
+type response_body =
   | Fixed_body of string
   | Stream_body of (yield:(string -> unit) -> unit)
 
-type informational_response = {
-  status : int;
-  headers : (string * string) list;
+type response = {
+  status : Status.t;
+  headers : Headers.t;
+  body : response_body;
 }
+
+type informational_response = {
+  status : Status.t;
+  headers : Headers.t;
+}
+
+module Response = struct
+  type t = response
+
+  let status (response : response) = response.status
+  let headers (response : response) = response.headers
+  let body (response : response) = response.body
+end
+
+module Informational_response = struct
+  type t = informational_response
+
+  let status (response : informational_response) = response.status
+  let headers (response : informational_response) = response.headers
+end
 
 type request_patch = {
   request_method : http_method option;
@@ -489,8 +746,10 @@ module Matcher = struct
     else
       Reject
         {
-          status = 411;
-          headers = [("Content-Type", "text/plain; charset=utf-8")];
+          status = Status.length_required;
+          headers =
+            Headers.of_list_exn
+              [("Content-Type", "text/plain; charset=utf-8")];
           body = Fixed_body "length required\n";
         }
 end
@@ -597,19 +856,22 @@ let all_http_methods = [GET; HEAD; POST; PATCH; PUT; DELETE; CONNECT; OPTIONS; T
 
 let not_found_response () =
   {
-    status = 404;
-    headers = [("Content-Type", "text/plain; charset=utf-8")];
+    status = Status.not_found;
+    headers =
+      Headers.of_list_exn [("Content-Type", "text/plain; charset=utf-8")];
     body = Fixed_body "not found\n";
   }
 
 let method_not_allowed_response allowed_methods =
   {
-    status = 405;
+    status = Status.method_not_allowed;
     headers =
-      [
-        ("Allow", String.concat ", " (List.map string_of_http_method allowed_methods));
-        ("Content-Type", "text/plain; charset=utf-8");
-      ];
+      Headers.of_list_exn
+        [
+          ( "Allow",
+            String.concat ", " (List.map string_of_http_method allowed_methods) );
+          ("Content-Type", "text/plain; charset=utf-8");
+        ];
     body = Fixed_body "method not allowed\n";
   }
 
@@ -706,20 +968,25 @@ module Runtime = struct
       }
 end
 
+let ensure_final_status status =
+  if Status.is_informational status then
+    invalid_arg "final response status must be between 200 and 599"
+
+let make ?(headers = Headers.empty) ~status body =
+  ensure_final_status status;
+  { status; headers; body = Fixed_body body }
+
+let with_status status (response : response) =
+  ensure_final_status status;
+  { response with status }
+
+let with_headers headers (response : response) = { response with headers }
+
 let with_header name value (response : response) =
-  let normalized_name = normalize_header_name name in
-  let headers =
-    (name, value)
-    :: List.filter
-         (fun (header_name, _value) ->
-           not
-             (String.equal (normalize_header_name header_name) normalized_name))
-         response.headers
-  in
-  { response with headers }
+  { response with headers = Headers.set_exn name value response.headers }
 
 let informational status headers =
-  if status < 100 || status >= 200 then
+  if not (Status.is_informational status) then
     invalid_arg "informational response status must be 1xx"
   else
     { status; headers }
@@ -728,11 +995,9 @@ let with_content_type content_type (response : response) =
   with_header "Content-Type" content_type response
 
 let response_with_content_type status content_type body =
-  {
-    status;
-    headers = [("Content-Type", content_type)];
-    body = Fixed_body body;
-  }
+  make ~status
+    ~headers:(Headers.of_list_exn [("Content-Type", content_type)])
+    body
 
 let text status body =
   response_with_content_type status "text/plain; charset=utf-8" body
@@ -743,5 +1008,6 @@ let html status body =
 let json status body =
   response_with_content_type status "application/json; charset=utf-8" body
 
-let stream ?(headers = []) ~status producer =
+let stream ?(headers = Headers.empty) ~status producer =
+  ensure_final_status status;
   { status; headers; body = Stream_body producer }

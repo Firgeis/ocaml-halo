@@ -13,6 +13,6 @@ val event :
   ?event:string -> ?id:string -> ?retry_ms:int -> string list -> message
 val comment : string -> message
 val respond :
-  ?headers:(string * string) list ->
+  ?headers:Router.Headers.t ->
   (send:(message -> unit) -> unit) ->
   Router.response
