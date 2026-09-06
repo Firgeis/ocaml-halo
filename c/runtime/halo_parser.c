@@ -1,3 +1,4 @@
+#include "halo_bridge.h"
 #include "halo_runtime_internal.h"
 #include "halo_utils.h"
 
@@ -626,7 +627,7 @@ static int halo_request_mark_hop_by_hop_headers(llhttp_t* parser,
 }
 
 int halo_request_has_data(const struct halo_request* request) {
-  return request->method_len != 0 || request->url_len != 0 || request->body_len != 0
+  return request->method_len != 0 || request->url_len != 0
     || request->header_count != 0 || request->current_header_name_len != 0
     || request->current_header_value_len != 0;
 }
@@ -815,14 +816,6 @@ static int halo_on_headers_complete(llhttp_t* parser) {
            > (uint64_t) client->listener_ref->max_request_size)
     return halo_parser_content_too_large(parser, "request body is too large");
 
-  if (client->request.has_content_length
-      && client->request.content_length > 0
-      && halo_request_reserve(&client->request.body,
-                              &client->request.body_cap,
-                              (size_t) client->listener_ref->max_request_size,
-                              (size_t) client->request.content_length) != 0)
-    return halo_parser_content_too_large(parser, "request body is too large");
-
   expects_continue =
     halo_request_expects_100_continue(parser,
                                       &client->request,
@@ -860,17 +853,12 @@ static int halo_on_body(llhttp_t* parser, const char* at, size_t length) {
   if (length > max_request_size - client->body_bytes_read)
     return halo_parser_content_too_large(parser, "request body is too large");
 
-  if (halo_request_append(&client->request.body,
-                          &client->request.body_len,
-                          &client->request.body_cap,
-                          max_request_size,
-                          at,
-                          length) != 0)
-    return halo_parser_content_too_large(parser, "request body is too large");
-
   client->body_bytes_read += length;
-  if (client->awaiting_request_body)
-    return HPE_PAUSED;
+  if (client->awaiting_request_body) {
+    if (halo_bridge_emit_body_chunk(client, at, length) != 0)
+      return halo_parser_fail(parser, "could not deliver request body");
+    client->body_chunk_delivered = 1;
+  }
   return 0;
 }
 

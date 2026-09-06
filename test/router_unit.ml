@@ -14,7 +14,12 @@ let check_response label (expected : Halo.Router.response) actual =
   Alcotest.(check int) (label ^ " status") expected.status response.status;
   Alcotest.(check (list (pair string string))) (label ^ " headers")
     expected.headers response.headers;
-  Alcotest.(check string) (label ^ " body") expected.body response.body
+  let fixed_body = function
+    | Halo.Router.Fixed_body body -> body
+    | Halo.Router.Stream_body _ -> Alcotest.fail "expected a fixed response"
+  in
+  Alcotest.(check string) (label ^ " body")
+    (fixed_body expected.body) (fixed_body response.body)
 
 let health_router =
     Halo.Router.route
@@ -61,7 +66,7 @@ let test_method_mismatch () =
             ("Allow", "GET");
             ("Content-Type", "text/plain; charset=utf-8");
           ];
-        body = "method not allowed\n";
+        body = Fixed_body "method not allowed\n";
       }
     (Halo.Router.dispatch routes (request POST "/health"))
 
@@ -249,7 +254,8 @@ let test_request_headers_and_body () =
             | Some value -> value
             | None -> "missing"
           in
-          text 200 (host ^ ":" ^ Halo.Router.Request.body request))
+          text 200
+            (host ^ ":" ^ Halo.Body.read_all (Halo.Router.Request.body request)))
   in
   check_response "request headers and body" (text 200 "localhost:payload")
     (Halo.Router.dispatch router
@@ -290,7 +296,12 @@ let test_response_headers () =
           |> Halo.Router.with_header "X-Test" "1")
   in
   check_response "response headers"
-    Halo.Router.{ status = 200; headers = [("X-Test", "1"); ("Content-Type", "text/plain")]; body = "ok\n" }
+    Halo.Router.
+      {
+        status = 200;
+        headers = [("X-Test", "1"); ("Content-Type", "text/plain")];
+        body = Fixed_body "ok\n";
+      }
     (Halo.Router.dispatch router (request GET "/headers"))
 
 let test_text_sets_default_content_type () =
@@ -299,7 +310,7 @@ let test_text_sets_default_content_type () =
       {
         status = 200;
         headers = [("Content-Type", "text/plain; charset=utf-8")];
-        body = "hello\n";
+        body = Fixed_body "hello\n";
       }
     (Halo.Router.text 200 "hello\n")
 
@@ -309,7 +320,7 @@ let test_html_sets_default_content_type () =
       {
         status = 200;
         headers = [("Content-Type", "text/html; charset=utf-8")];
-        body = "<h1>hello</h1>\n";
+        body = Fixed_body "<h1>hello</h1>\n";
       }
     (Halo.Router.html 200 "<h1>hello</h1>\n")
 
@@ -319,7 +330,7 @@ let test_json_sets_default_content_type () =
       {
         status = 200;
         headers = [("Content-Type", "application/json; charset=utf-8")];
-        body = "{\"ok\":true}\n";
+        body = Fixed_body "{\"ok\":true}\n";
       }
     (Halo.Router.json 200 "{\"ok\":true}\n")
 
@@ -329,7 +340,7 @@ let test_with_content_type_overrides_existing_header () =
       {
         status = 200;
         headers = [("Content-Type", "text/custom")];
-        body = "hello\n";
+        body = Fixed_body "hello\n";
       }
     (Halo.Router.text 200 "hello\n"
     |> Halo.Router.with_content_type "text/custom")
@@ -340,7 +351,7 @@ let test_with_header_overrides_case_insensitively () =
       {
         status = 200;
         headers = [("content-type", "text/custom")];
-        body = "hello\n";
+        body = Fixed_body "hello\n";
       }
     (Halo.Router.text 200 "hello\n"
     |> Halo.Router.with_header "content-type" "text/custom")
@@ -368,7 +379,7 @@ let test_middleware_can_modify_response () =
             ("X-Trace", "middleware");
             ("Content-Type", "text/plain; charset=utf-8");
           ];
-        body = "ok\n";
+        body = Fixed_body "ok\n";
       }
     (Halo.Router.dispatch router (request GET "/hello"))
 
@@ -419,7 +430,7 @@ let test_middleware_wraps_not_found_and_method_not_allowed () =
             ("X-Trace", "router");
             ("Content-Type", "text/plain; charset=utf-8");
           ];
-        body = "not found\n";
+        body = Fixed_body "not found\n";
       }
     (Halo.Router.dispatch router (request GET "/missing"));
   check_response "middleware wraps 405"
@@ -432,7 +443,7 @@ let test_middleware_wraps_not_found_and_method_not_allowed () =
             ("Allow", "GET");
             ("Content-Type", "text/plain; charset=utf-8");
           ];
-        body = "method not allowed\n";
+        body = Fixed_body "method not allowed\n";
       }
     (Halo.Router.dispatch router (request POST "/health"))
 

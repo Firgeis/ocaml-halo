@@ -21,6 +21,7 @@ def build_request(
     body: bytes,
     chunked: bool,
     chunk_size: int,
+    keep_alive: bool,
 ) -> bytes:
     lines = [f"{method} {path} HTTP/1.1", f"Host: {host}"]
     has_connection = False
@@ -37,7 +38,7 @@ def build_request(
         lines.append(f"{name}: {value}")
 
     if not has_connection:
-        lines.append("Connection: close")
+        lines.append("Connection: keep-alive" if keep_alive else "Connection: close")
     if chunked:
         if has_content_length:
             raise ValueError("chunked requests cannot include Content-Length")
@@ -113,6 +114,10 @@ def send_request(host: str, port: int, request: bytes, timeout: float) -> int:
         sock.settimeout(timeout)
         sock.sendall(request)
         response = read_response(sock)
+    return response_status(response)
+
+
+def response_status(response: bytes) -> int:
     status_line = response.split(CRLF, 1)[0].decode("ascii", errors="replace")
     parts = status_line.split(" ")
     if len(parts) < 2:
@@ -138,6 +143,7 @@ def worker(
     request: bytes,
     timeout: float,
     iterations: int,
+    keep_alive: bool,
     latencies_ms: List[float],
     status_counts: Dict[int, int],
     errors: List[str],
@@ -147,16 +153,28 @@ def worker(
     local_status_counts: Dict[int, int] = {}
 
     try:
-        for _ in range(iterations):
-            started = time.perf_counter()
-            status = send_request(host, port, request, timeout)
-            ended = time.perf_counter()
-            local_latencies.append((ended - started) * 1000.0)
-            local_status_counts[status] = local_status_counts.get(status, 0) + 1
+        if keep_alive:
+            with socket.create_connection((host, port), timeout=timeout) as sock:
+                sock.settimeout(timeout)
+                for _ in range(iterations):
+                    started = time.perf_counter()
+                    sock.sendall(request)
+                    status = response_status(read_response(sock))
+                    ended = time.perf_counter()
+                    local_latencies.append((ended - started) * 1000.0)
+                    local_status_counts[status] = (
+                        local_status_counts.get(status, 0) + 1
+                    )
+        else:
+            for _ in range(iterations):
+                started = time.perf_counter()
+                status = send_request(host, port, request, timeout)
+                ended = time.perf_counter()
+                local_latencies.append((ended - started) * 1000.0)
+                local_status_counts[status] = local_status_counts.get(status, 0) + 1
     except Exception as exc:  # pragma: no cover - script path
         with lock:
             errors.append(str(exc))
-        return
 
     with lock:
         latencies_ms.extend(local_latencies)
@@ -171,6 +189,7 @@ def run_benchmark(
     concurrency: int,
     requests: int,
     timeout: float,
+    keep_alive: bool,
 ) -> Dict[str, object]:
     threads = []
     latencies_ms: List[float] = []
@@ -194,6 +213,7 @@ def run_benchmark(
                 request,
                 timeout,
                 iterations,
+                keep_alive,
                 latencies_ms,
                 status_counts,
                 errors,
@@ -255,6 +275,7 @@ def main() -> int:
     parser.add_argument("--expect-status", action="append", default=[], type=int)
     parser.add_argument("--chunked", action="store_true")
     parser.add_argument("--chunk-size", type=int, default=8192)
+    parser.add_argument("--keep-alive", action="store_true")
     args = parser.parse_args()
 
     if args.concurrency <= 0:
@@ -280,6 +301,7 @@ def main() -> int:
         body,
         args.chunked,
         args.chunk_size,
+        args.keep_alive,
     )
 
     if args.warmup_requests > 0:
@@ -290,6 +312,7 @@ def main() -> int:
             min(args.concurrency, max(args.warmup_requests, 1)),
             args.warmup_requests,
             args.timeout_seconds,
+            args.keep_alive,
         )
         if warmup_result["errors"]:
             print(json.dumps({"scenario": args.scenario, "warmup": warmup_result}, indent=2))
@@ -302,6 +325,7 @@ def main() -> int:
         args.concurrency,
         args.requests,
         args.timeout_seconds,
+        args.keep_alive,
     )
     result["scenario"] = args.scenario
     result["request_bytes"] = len(request)
@@ -309,6 +333,7 @@ def main() -> int:
     result["method"] = args.method
     result["path"] = args.path
     result["chunked"] = args.chunked
+    result["keep_alive"] = args.keep_alive
     if args.chunked:
         result["chunk_size"] = args.chunk_size
     if args.expect_status:

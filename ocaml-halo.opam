@@ -10,6 +10,8 @@ depends: [
   "dune" {>= "3.15"}
   "conf-libssl" {build}
   "conf-pkg-config" {build}
+  "eio"
+  "eio_main" {with-test}
   "alcotest" {with-test}
   "odoc" {with-doc}
 ]

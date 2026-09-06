@@ -4,31 +4,56 @@
  (libraries unix alcotest)
   (deps
    %{exe:demo_server.exe}
-   %{exe:borrow_violation_server.exe}
    fixtures/tls-cert.pem
    fixtures/tls-key.pem
    fixtures/tls-ticket-keys-malformed.txt)
   (action
    (setenv HALO_SERVER_BIN %{exe:demo_server.exe}
-    (setenv HALO_BORROW_VIOLATION_SERVER_BIN %{exe:borrow_violation_server.exe}
-     (setenv HALO_TLS_CERT_FIXTURE %{dep:fixtures/tls-cert.pem}
-      (setenv HALO_TLS_KEY_FIXTURE %{dep:fixtures/tls-key.pem}
-       (setenv HALO_TLS_TICKET_KEYS_MALFORMED_FIXTURE %{dep:fixtures/tls-ticket-keys-malformed.txt}
-        (run %{test}))))))))
+    (setenv HALO_TLS_CERT_FIXTURE %{dep:fixtures/tls-cert.pem}
+     (setenv HALO_TLS_KEY_FIXTURE %{dep:fixtures/tls-key.pem}
+      (setenv HALO_TLS_TICKET_KEYS_MALFORMED_FIXTURE %{dep:fixtures/tls-ticket-keys-malformed.txt}
+       (run %{test})))))))
 
 (executable
  (name demo_server)
  (modules demo_server)
- (libraries ocaml-halo))
+ (libraries ocaml-halo eio_main))
 
 (executable
- (name borrow_violation_server)
- (modules borrow_violation_server)
- (libraries ocaml-halo))
+ (name concurrency_server)
+ (modules concurrency_server)
+ (libraries ocaml-halo eio_main))
+
+(executable
+ (name multi_server)
+ (modules multi_server)
+ (libraries ocaml-halo eio_main))
+
+(executable
+ (name bench_server)
+ (modules bench_server)
+ (libraries ocaml-halo eio_main))
+
+(test
+ (name concurrency_integration)
+ (modules concurrency_integration)
+ (libraries unix alcotest)
+ (deps
+  %{exe:concurrency_server.exe}
+  %{exe:multi_server.exe})
+ (action
+  (setenv HALO_CONCURRENCY_SERVER_BIN %{exe:concurrency_server.exe}
+   (setenv HALO_MULTI_SERVER_BIN %{exe:multi_server.exe}
+    (run %{test})))))
 
 (test
  (name router_unit)
  (modules router_unit)
+ (libraries ocaml-halo alcotest))
+
+(test
+ (name body_unit)
+ (modules body_unit)
  (libraries ocaml-halo alcotest))
 
 (test
@@ -39,7 +64,7 @@
 (test
  (name runtime_unit)
  (modules runtime_unit)
- (libraries ocaml-halo alcotest)
+ (libraries ocaml-halo eio_main alcotest)
  (deps
   fixtures/tls-cert.pem
   fixtures/tls-key.pem

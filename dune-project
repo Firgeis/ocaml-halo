@@ -14,4 +14,6 @@
  (depends
   (conf-libssl :build)
   (conf-pkg-config :build)
+  eio
+  (eio_main :with-test)
   (alcotest :with-test)))

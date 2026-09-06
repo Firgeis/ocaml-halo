@@ -2,7 +2,6 @@
 #define OCAML_HALO_RUNTIME_INTERNAL_H
 
 #include <caml/alloc.h>
-#include <caml/callback.h>
 #include <caml/custom.h>
 #include <caml/fail.h>
 #include <caml/memory.h>
@@ -24,7 +23,8 @@
 
 enum halo_handle_kind {
   HALO_HANDLE_LISTENER = 1,
-  HALO_HANDLE_CLIENT = 2
+  HALO_HANDLE_CLIENT = 2,
+  HALO_HANDLE_BRIDGE = 3
 };
 
 enum halo_controller_state {
@@ -66,13 +66,16 @@ struct halo_runtime_controller {
   unsigned int recovery_samples;
 };
 
+struct halo_bridge;
+
 struct halo_runtime {
   uv_loop_t loop;
   int is_closed;
   int is_stopping;
-  uv_signal_t sigint;
   struct halo_runtime_metrics metrics;
   struct halo_runtime_controller controller;
+  struct halo_bridge* bridge;
+  uint64_t next_listener_id;
 };
 
 struct halo_listener_ref;
@@ -139,9 +142,6 @@ struct halo_request {
   char* url;
   size_t url_len;
   size_t url_cap;
-  char* body;
-  size_t body_len;
-  size_t body_cap;
   struct halo_request_storage storage;
   char* current_header_name;
   size_t current_header_name_len;
@@ -163,12 +163,9 @@ struct halo_client {
   uv_tcp_t handle;
   uv_shutdown_t shutdown_req;
   uv_timer_t timer;
-  uv_timer_t dispatch_timer;
   int timer_initialized;
-  int dispatch_timer_initialized;
   int handle_closed;
   int timer_closed;
-  int dispatch_timer_closed;
   int response_started;
   int interim_response_started;
   int shutdown_started;
@@ -176,11 +173,10 @@ struct halo_client {
   int should_keep_alive;
   int parser_error_status;
   int pending_continue;
-  int dispatch_resume_token;
   int dispatch_started;
   int dispatch_after_headers;
   int awaiting_request_body;
-  int awaiting_timeout;
+  int body_chunk_delivered;
   int connection_accounted;
   int connection_closed_accounted;
   int request_in_flight;
@@ -189,7 +185,8 @@ struct halo_client {
   int tls_close_started;
   int tls_early_data_complete;
   size_t body_bytes_read;
-  size_t request_body_stream_offset;
+  uint64_t bridge_request_id;
+  int bridge_response_in_flight;
   char* paused_data;
   size_t paused_data_len;
   char* tls_input_data;
@@ -203,9 +200,6 @@ struct halo_client {
   int tls_write_in_flight;
   int timeout_mode;
   struct halo_listener_ref* listener_ref;
-  struct halo_borrowed_request* active_borrowed_request;
-  value active_borrowed_request_value;
-  int active_borrowed_request_rooted;
   struct halo_request request;
   llhttp_t parser;
   struct s2n_connection* tls_conn;
@@ -252,7 +246,7 @@ struct halo_listener_ref {
   struct s2n_config* tls_config;
   struct s2n_cert_chain_and_key* tls_cert_chain;
   struct halo_tls_replay_entry* tls_replay_entries;
-  value router;
+  uint64_t bridge_listener_id;
 };
 
 struct halo_tls_replay_entry {
@@ -262,18 +256,10 @@ struct halo_tls_replay_entry {
   struct halo_tls_replay_entry* next;
 };
 
-struct halo_borrowed_request {
-  struct halo_request* request;
-  int valid;
-};
-
 struct halo_runtime** halo_runtime_slot(value runtime);
 struct halo_listener_ref** halo_listener_slot(value listener);
-struct halo_borrowed_request** halo_borrowed_request_slot(value request);
 
 struct halo_runtime* halo_runtime_get(value runtime);
-struct halo_listener* halo_listener_get(value listener);
-struct halo_borrowed_request* halo_borrowed_request_get(value request);
 
 typedef int (*halo_header_token_callback)(const char* token,
                                           size_t token_len,
@@ -286,7 +272,6 @@ value halo_option_none(void);
 value halo_option_some_message(const char* message);
 value halo_option_some_uv(const char* operation, int code);
 value halo_listener_alloc(struct halo_listener_ref* ref);
-value halo_borrowed_request_alloc(struct halo_request* request);
 
 void halo_listener_ref_release(struct halo_listener_ref* ref);
 struct halo_tls_replay_entry* halo_tls_replay_entry_create(const uint8_t* identity,
@@ -304,7 +289,6 @@ int halo_request_store_connection_option(struct halo_request* request,
                                          const char* name,
                                          size_t name_len);
 void halo_request_clear(struct halo_request* request);
-void halo_request_release_body(struct halo_request* request);
 void halo_request_free(struct halo_request* request);
 int halo_header_name_matches(const struct halo_header* header,
                              const char* name,
@@ -335,6 +319,8 @@ void halo_runtime_note_request_started(struct halo_client* client);
 void halo_runtime_note_request_finished(struct halo_client* client, int completed);
 void halo_runtime_note_tls_handshake(struct halo_client* client, int resumed);
 void halo_runtime_note_tls_handshake_failure(struct halo_client* client);
+void halo_runtime_controller_tick(struct halo_runtime* runtime);
+void halo_runtime_begin_shutdown(struct halo_runtime* runtime);
 int halo_runtime_configure_controller(struct halo_runtime* runtime,
                                       uint64_t interval_ms,
                                       double busy_threshold,

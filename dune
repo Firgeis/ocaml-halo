@@ -3,4 +3,4 @@
   (c_flags
    (:standard -fsanitize=address))
   (link_flags
-   (:standard -fsanitize=address))))
+   (:standard -cclib -fsanitize=address))))

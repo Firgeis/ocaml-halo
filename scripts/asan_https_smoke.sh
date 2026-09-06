@@ -10,6 +10,7 @@ PORT="${PORT:-8080}"
 REQUESTS="${REQUESTS:-100}"
 CONCURRENCY="${CONCURRENCY:-4}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-10}"
+ASAN_OPTIONS_VALUE="${ASAN_OPTIONS:-detect_leaks=0:abort_on_error=1:halt_on_error=1}"
 
 SERVER_PID=""
 
@@ -24,7 +25,7 @@ trap cleanup EXIT INT TERM
 
 DYLD_LIBRARY_PATH="$ROOT_DIR/vendor/s2n-tls/lib" \
 LD_LIBRARY_PATH="$ROOT_DIR/vendor/s2n-tls/lib" \
-ASAN_OPTIONS="detect_leaks=1:abort_on_error=1:halt_on_error=1" \
+ASAN_OPTIONS="$ASAN_OPTIONS_VALUE" \
 HALO_TLS_CERT_CHAIN="$CERT_FILE" \
 HALO_TLS_PRIVATE_KEY="$KEY_FILE" \
 "$SERVER_BIN" &

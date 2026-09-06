@@ -1,5 +1,5 @@
-OPAM_BIN = ./_opam/bin
-DUNE = $(OPAM_BIN)/dune
+OPAM = opam
+DUNE = $(OPAM) exec --switch=. -- dune
 VENDOR_FORCE_FETCH = 0
 VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
 

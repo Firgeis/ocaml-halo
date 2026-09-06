@@ -134,18 +134,7 @@ let assert_process_success result =
       fail "process stopped by signal %d\nstdout:\n%s\nstderr:\n%s" signal
         result.stdout result.stderr
 
-let wait_for_child_with_runtime runtime pid =
-  let rec loop () =
-    ignore (Halo.Server.run_once runtime);
-    match Unix.waitpid [Unix.WNOHANG] pid with
-    | 0, _ ->
-        Unix.sleepf 0.01;
-        loop ()
-    | _, status -> status
-  in
-  loop ()
-
-let with_live_tls_server tls f =
+let with_live_server ?tls f =
   let router =
     Halo.Router.(
       route
@@ -154,39 +143,29 @@ let with_live_tls_server tls f =
           and+ () = path_end in
           fun _request -> text 200 "hello world\n"))
   in
-  match Halo.Server.with_runtime (fun runtime ->
-      let config = Halo.Server.Config.create ~port:8443 ~tls router in
-      match Halo.Server.listen runtime config with
-      | Error message -> Error (Halo.Error.Runtime_error message)
-      | Ok _server ->
-          let pid = Unix.fork () in
-          if pid = 0 then (
-            try
-              Unix.sleepf 0.05;
-              f ();
-              exit 0
-            with
-            | exn ->
-                prerr_endline (Printexc.to_string exn);
-                exit 1);
-          let status = wait_for_child_with_runtime runtime pid in
-          match status with
-          | Unix.WEXITED 0 -> Ok (Halo.Server.runtime_metrics runtime)
-          | Unix.WEXITED code ->
-              Error
-                (Halo.Error.Runtime_error
-                   (Printf.sprintf "child exited with code %d" code))
-          | Unix.WSIGNALED signal ->
-              Error
-                (Halo.Error.Runtime_error
-                   (Printf.sprintf "child terminated by signal %d" signal))
-          | Unix.WSTOPPED signal ->
-              Error
-                (Halo.Error.Runtime_error
-                   (Printf.sprintf "child stopped by signal %d" signal)))
-  with
-  | Error error -> Alcotest.fail (Halo.Error.to_string error)
-  | Ok metrics -> metrics
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let shutdown = Halo.Server.Shutdown.create () in
+  let started, notify_started = Eio.Promise.create () in
+  let config = Halo.Server.Config.create ~port:8443 ?tls router in
+  let server =
+    Eio.Fiber.fork_promise ~sw (fun () ->
+        Halo.Server.run ~shutdown ~handle_sigint:false
+          ~on_ready:(fun running -> Eio.Promise.resolve notify_started running)
+          [ config ])
+  in
+  let running = Eio.Promise.await started in
+  let outcome =
+    try
+      Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) f;
+      Ok (Halo.Server.metrics running)
+    with exn -> Error exn
+  in
+  Halo.Server.shutdown running;
+  Eio.Promise.await_exn server;
+  match outcome with Ok metrics -> metrics | Error exn -> raise exn
+
+let with_live_tls_server tls = with_live_server ~tls
 
 let tls_resumption_config ?session_ticket_keys_path () =
   Halo.Server.Config.tls
@@ -205,12 +184,7 @@ let tls_resumption_config ?session_ticket_keys_path () =
     ?session_ticket_keys_path ()
 
 let test_runtime_metrics_defaults () =
-  match Halo.Server.with_runtime (fun runtime ->
-      ignore (Halo.Server.run_once runtime);
-      Ok (Halo.Server.runtime_metrics runtime))
-  with
-  | Error error -> Alcotest.fail (Halo.Error.to_string error)
-  | Ok metrics ->
+  let metrics = with_live_server (fun () -> ()) in
       Alcotest.(check bool)
         "utilization is normalized"
         true

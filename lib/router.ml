@@ -1,37 +1,3 @@
-type borrowed_request
-
-external borrowed_request_method_text : borrowed_request -> string
-  = "ocaml_halo_request_method_text"
-
-external borrowed_request_target : borrowed_request -> string
-  = "ocaml_halo_request_target"
-
-external borrowed_request_body : borrowed_request -> string
-  = "ocaml_halo_request_body"
-
-external borrowed_request_header : borrowed_request -> string -> string option
-  = "ocaml_halo_request_header"
-
-external borrowed_request_headers : borrowed_request -> string -> string list
-  = "ocaml_halo_request_headers"
-
-external borrowed_request_fold_headers :
-  borrowed_request -> 'a -> ('a -> string -> string -> 'a) -> 'a
-  = "ocaml_halo_request_fold_headers"
-
-external borrowed_request_has_raw_header : borrowed_request -> string -> bool
-  = "ocaml_halo_request_has_raw_header"
-
-external borrowed_request_copy_headers : borrowed_request -> (string * string) list
-  = "ocaml_halo_request_copy_headers"
-
-external borrowed_request_copy_raw_headers :
-  borrowed_request -> (string * string) list
-  = "ocaml_halo_request_copy_raw_headers"
-
-type _ Effect.t += Drain_request_body : string Effect.t
-type _ Effect.t += Drain_request_body_with_prefix : string -> string Effect.t
-
 module Http_method = struct
   type t =
     | GET
@@ -104,13 +70,12 @@ type request = {
 type response = {
   status : int;
   headers : (string * string) list;
-  body : string;
+  body : response_body;
 }
 
-type response_head = {
-  status : int;
-  headers : (string * string) list;
-}
+and response_body =
+  | Fixed_body of string
+  | Stream_body of (yield:(string -> unit) -> unit)
 
 type informational_response = {
   status : int;
@@ -124,9 +89,23 @@ type request_patch = {
   body : string option;
 }
 
-type request_view =
-  | Owned_request of request
-  | Borrowed_request of borrowed_request
+type request_context = {
+  body : Body.t;
+  request_id : int64 option;
+  request_switch : Eio.Switch.t option;
+  send_informational : informational_response -> unit;
+  on_disconnect : (unit -> unit) -> unit;
+}
+
+type request_view = {
+  request_method_text : string;
+  request_method : http_method option;
+  raw_target : string;
+  target : request_target;
+  headers : (string * string) list;
+  raw_headers : (string * string) list;
+  context : request_context;
+}
 
 type handler = request_view -> response
 type middleware = handler -> handler
@@ -245,7 +224,6 @@ module Req = struct
     | Target : request_target t
     | Body : string t
     | Copy_headers : (string * string) list t
-    | Raw_copy_headers : (string * string) list t
     | Materialize : request t
 
   let request_method_text = Request_method_text
@@ -256,35 +234,12 @@ module Req = struct
   let rec eval : type a. request_view -> a t -> a =
    fun request_view program ->
     match program with
-    | Request_method_text -> (
-        match request_view with
-        | Owned_request request -> string_of_http_method request.request_method
-        | Borrowed_request request -> borrowed_request_method_text request)
-    | Request_method ->
-        http_method_of_string (eval request_view Request_method_text)
-    | Raw_target -> (
-        match request_view with
-        | Owned_request request -> request.raw_target
-        | Borrowed_request request -> borrowed_request_target request)
-    | Target ->
-        parse_request_target
-          (match eval request_view Request_method with
-          | Some request_method -> request_method
-          | None ->
-              invalid_arg "cannot parse request target with unknown HTTP method")
-          (eval request_view Raw_target)
-    | Body -> (
-        match request_view with
-        | Owned_request request -> request.body
-        | Borrowed_request _request -> Effect.perform Drain_request_body)
-    | Copy_headers -> (
-        match request_view with
-        | Owned_request request -> request.headers
-        | Borrowed_request request -> borrowed_request_copy_headers request)
-    | Raw_copy_headers -> (
-        match request_view with
-        | Owned_request request -> request.headers
-        | Borrowed_request request -> borrowed_request_copy_raw_headers request)
+    | Request_method_text -> request_view.request_method_text
+    | Request_method -> request_view.request_method
+    | Raw_target -> request_view.raw_target
+    | Target -> request_view.target
+    | Body -> Body.read_all request_view.context.body
+    | Copy_headers -> request_view.headers
     | Materialize ->
         let request_method_text = eval request_view Request_method_text in
         (match http_method_of_string request_method_text with
@@ -340,36 +295,39 @@ let input_of_request_view request_view =
     queryparams = parse_queryparams (Req.eval request_view Req.target);
   }
 
-let apply_request_patch request_view (patch : request_patch) =
-  let request = materialize_request request_view in
+let apply_request_patch (request_view : request_view) (patch : request_patch) =
   let request_method =
     match patch.request_method with
     | Some request_method -> request_method
-    | None -> request.request_method
+    | None -> (
+        match request_view.request_method with
+        | Some request_method -> request_method
+        | None -> invalid_arg "cannot rewrite a request with an unknown method")
   in
   let raw_target =
     match patch.raw_target with
     | Some raw_target -> raw_target
-    | None -> request.raw_target
+    | None -> request_view.raw_target
   in
   let headers =
     match patch.headers with
     | Some headers -> headers
-    | None -> request.headers
+    | None -> request_view.headers
   in
   let body =
     match patch.body with
-    | Some body -> body
-    | None -> request.body
+    | Some body -> Body.Private.of_string body
+    | None -> request_view.context.body
   in
-  Owned_request
-    {
-      request_method;
-      raw_target;
-      target = parse_request_target request_method raw_target;
-      headers;
-      body;
-    }
+  {
+    request_method_text = string_of_http_method request_method;
+    request_method = Some request_method;
+    raw_target;
+    target = parse_request_target request_method raw_target;
+    headers;
+    raw_headers = headers;
+    context = { request_view.context with body };
+  }
 
 module Request = struct
   type t = request_view
@@ -386,23 +344,29 @@ module Request = struct
   let target request =
     Req.eval request Req.Target
 
-  let body request =
-    Req.eval request Req.Body
+  let body request = request.context.body
 
-  let header request name =
-    match request with
-    | Owned_request request -> header_from_list request.headers name
-    | Borrowed_request request -> borrowed_request_header request name
+  let switch request =
+    match request.context.request_switch with
+    | Some switch -> switch
+    | None -> invalid_arg "request switch is unavailable outside a server handler"
 
-  let headers request name =
-    match request with
-    | Owned_request request -> headers_from_list request.headers name
-    | Borrowed_request request -> borrowed_request_headers request name
+  let id request =
+    match request.context.request_id with
+    | Some request_id -> request_id
+    | None -> invalid_arg "request ID is unavailable outside a server handler"
+
+  let send_informational request response =
+    request.context.send_informational response
+
+  let on_disconnect request cleanup = request.context.on_disconnect cleanup
+
+  let header request name = header_from_list request.headers name
+
+  let headers request name = headers_from_list request.headers name
 
   let fold_headers request ~init ~f =
-    match request with
-    | Owned_request request -> fold_header_list request.headers ~init ~f
-    | Borrowed_request request -> borrowed_request_fold_headers request init f
+    fold_header_list request.headers ~init ~f
 
   let copy_headers request =
     Req.eval request Req.Copy_headers
@@ -513,17 +477,12 @@ module Matcher = struct
 
   let require_body input =
     let has_defined_length =
-      match input.request_view with
-      | Owned_request request ->
-          List.exists
-            (fun (name, _value) ->
-              let name = String.lowercase_ascii name in
-              String.equal name "content-length"
-              || String.equal name "transfer-encoding")
-            request.headers
-      | Borrowed_request request ->
-          borrowed_request_has_raw_header request "content-length"
-          || borrowed_request_has_raw_header request "transfer-encoding"
+      List.exists
+        (fun (name, _value) ->
+          let name = String.lowercase_ascii name in
+          String.equal name "content-length"
+          || String.equal name "transfer-encoding")
+        input.request_view.raw_headers
     in
     if has_defined_length then
       Match ((), input)
@@ -532,7 +491,7 @@ module Matcher = struct
         {
           status = 411;
           headers = [("Content-Type", "text/plain; charset=utf-8")];
-          body = "length required\n";
+          body = Fixed_body "length required\n";
         }
 end
 
@@ -636,13 +595,11 @@ let ( <|> ) = or_else
 
 let all_http_methods = [GET; HEAD; POST; PATCH; PUT; DELETE; CONNECT; OPTIONS; TRACE]
 
-let response_head status headers : response_head = { status; headers }
-
 let not_found_response () =
   {
     status = 404;
     headers = [("Content-Type", "text/plain; charset=utf-8")];
-    body = "not found\n";
+    body = Fixed_body "not found\n";
   }
 
 let method_not_allowed_response allowed_methods =
@@ -653,7 +610,7 @@ let method_not_allowed_response allowed_methods =
         ("Allow", String.concat ", " (List.map string_of_http_method allowed_methods));
         ("Content-Type", "text/plain; charset=utf-8");
       ];
-    body = "method not allowed\n";
+    body = Fixed_body "method not allowed\n";
   }
 
 let allowed_methods_for_path router input =
@@ -689,14 +646,65 @@ let dispatch_from_input router input =
       apply_middleware router.middleware fallback_handler
         effective_input.request_view
 
-let dispatch router request =
+let dispatch router (request : request) =
+  let context =
+    {
+      body = Body.Private.of_string request.body;
+      request_id = None;
+      request_switch = None;
+      send_informational =
+        (fun _ ->
+          invalid_arg "informational responses require a server handler");
+      on_disconnect =
+        (fun _ -> invalid_arg "disconnect hooks require a server handler");
+    }
+  in
   dispatch_from_input router
     {
-      request_view = Owned_request request;
+      request_view =
+        {
+          request_method_text = string_of_http_method request.request_method;
+          request_method = Some request.request_method;
+          raw_target = request.raw_target;
+          target = request.target;
+          headers = request.headers;
+          raw_headers = request.headers;
+          context;
+        };
       request_method = Some request.request_method;
       path = { segments = split_target request.target; index = 0 };
       queryparams = parse_queryparams request.target;
     }
+
+module Runtime = struct
+  let dispatch router (request : request) ~raw_headers ~body ~request_id ~request_switch
+      ~send_informational ~on_disconnect =
+    let request_view =
+      {
+        request_method_text = string_of_http_method request.request_method;
+        request_method = Some request.request_method;
+        raw_target = request.raw_target;
+        target = request.target;
+        headers = request.headers;
+        raw_headers;
+        context =
+          {
+            body;
+            request_id = Some request_id;
+            request_switch = Some request_switch;
+            send_informational;
+            on_disconnect;
+          };
+      }
+    in
+    dispatch_from_input router
+      {
+        request_view;
+        request_method = Some request.request_method;
+        path = { segments = split_target request.target; index = 0 };
+        queryparams = parse_queryparams request.target;
+      }
+end
 
 let with_header name value (response : response) =
   let normalized_name = normalize_header_name name in
@@ -723,7 +731,7 @@ let response_with_content_type status content_type body =
   {
     status;
     headers = [("Content-Type", content_type)];
-    body;
+    body = Fixed_body body;
   }
 
 let text status body =
@@ -735,48 +743,5 @@ let html status body =
 let json status body =
   response_with_content_type status "application/json; charset=utf-8" body
 
-module Borrowed = struct
-  type nonrec borrowed_request = borrowed_request
-
-  let request_method_text request =
-    Req.eval (Borrowed_request request) Req.request_method_text
-
-  let request_method request =
-    Req.eval (Borrowed_request request) Req.request_method
-
-  let target request =
-    Req.eval (Borrowed_request request) Req.Raw_target
-
-  let body request =
-    borrowed_request_body request
-
-  let full_body request =
-    Effect.perform (Drain_request_body_with_prefix (borrowed_request_body request))
-
-  let header request name =
-    borrowed_request_header request name
-
-  let headers request name =
-    borrowed_request_headers request name
-
-  let fold_headers request ~init ~f =
-    borrowed_request_fold_headers request init f
-
-  let copy_headers request =
-    Req.eval (Borrowed_request request) Req.Copy_headers
-
-  let copy_raw_headers request =
-    Req.eval (Borrowed_request request) Req.Raw_copy_headers
-
-  let materialize request =
-    Req.eval (Borrowed_request request) Req.Materialize
-
-  let dispatch_borrowed router request =
-    dispatch_from_input router
-      {
-        request_view = Borrowed_request request;
-        request_method = request_method request;
-        path = { segments = split_target (Req.eval (Borrowed_request request) Req.target); index = 0 };
-        queryparams = parse_queryparams (Req.eval (Borrowed_request request) Req.target);
-      }
-end
+let stream ?(headers = []) ~status producer =
+  { status; headers; body = Stream_body producer }

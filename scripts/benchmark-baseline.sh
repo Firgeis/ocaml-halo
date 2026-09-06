@@ -126,6 +126,48 @@ POST_REQUEST=$("$PYTHON_BIN" "$ROOT_DIR/scripts/http_bench.py" \
   --concurrency "$CONCURRENCY" \
   --warmup-requests "$WARMUP_REQUESTS")
 
+ROOT_KEEP_ALIVE_REQUEST=$("$PYTHON_BIN" "$ROOT_DIR/scripts/http_bench.py" \
+  --scenario root_get_keep_alive \
+  --host "$HOST" \
+  --port "$PORT" \
+  --path / \
+  --requests "$REQUESTS" \
+  --concurrency "$CONCURRENCY" \
+  --warmup-requests "$WARMUP_REQUESTS" \
+  --keep-alive)
+
+HEADER_KEEP_ALIVE_REQUEST=$("$PYTHON_BIN" "$ROOT_DIR/scripts/http_bench.py" \
+  --scenario header_heavy_get_keep_alive \
+  --host "$HOST" \
+  --port "$PORT" \
+  --path /inspect/headers \
+  --header "X-Header-01: alpha" \
+  --header "X-Header-02: beta" \
+  --header "X-Header-03: gamma" \
+  --header "X-Header-04: delta" \
+  --header "X-Header-05: epsilon" \
+  --header "X-Header-06: zeta" \
+  --header "X-Header-07: eta" \
+  --header "X-Header-08: theta" \
+  --header "X-Header-09: iota" \
+  --header "X-Header-10: kappa" \
+  --requests "$REQUESTS" \
+  --concurrency "$CONCURRENCY" \
+  --warmup-requests "$WARMUP_REQUESTS" \
+  --keep-alive)
+
+POST_KEEP_ALIVE_REQUEST=$("$PYTHON_BIN" "$ROOT_DIR/scripts/http_bench.py" \
+  --scenario post_submit_1k_keep_alive \
+  --host "$HOST" \
+  --port "$PORT" \
+  --method POST \
+  --path /submit \
+  --body "$(printf 'a%.0s' $(seq 1 1024))" \
+  --requests "$REQUESTS" \
+  --concurrency "$CONCURRENCY" \
+  --warmup-requests "$WARMUP_REQUESTS" \
+  --keep-alive)
+
 kill -INT "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" || true
 unset SERVER_PID
@@ -139,7 +181,7 @@ if [[ -n "${PROCESS_SAMPLE_PID:-}" ]]; then
   unset PROCESS_SAMPLE_PID
 fi
 
-"$PYTHON_BIN" - "$RESULT_JSON" "$SERVER_TIME_LOG" "$PIDSTAT_LOG" "$PROCESS_SAMPLE_JSON" "$ROOT_REQUEST" "$HEADER_REQUEST" "$POST_REQUEST" <<'PY'
+"$PYTHON_BIN" - "$RESULT_JSON" "$SERVER_TIME_LOG" "$PIDSTAT_LOG" "$PROCESS_SAMPLE_JSON" "$ROOT_REQUEST" "$HEADER_REQUEST" "$POST_REQUEST" "$ROOT_KEEP_ALIVE_REQUEST" "$HEADER_KEEP_ALIVE_REQUEST" "$POST_KEEP_ALIVE_REQUEST" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -151,6 +193,9 @@ process_sample_json = Path(sys.argv[4])
 root_result = json.loads(sys.argv[5])
 header_result = json.loads(sys.argv[6])
 post_result = json.loads(sys.argv[7])
+root_keep_alive_result = json.loads(sys.argv[8])
+header_keep_alive_result = json.loads(sys.argv[9])
+post_keep_alive_result = json.loads(sys.argv[10])
 
 server_metrics = {}
 for line in server_time_log.read_text().splitlines():
@@ -204,7 +249,14 @@ if process_sample_json.exists():
 
 payload = {
     "server_metrics": server_metrics,
-    "scenarios": [root_result, header_result, post_result],
+    "scenarios": [
+        root_result,
+        header_result,
+        post_result,
+        root_keep_alive_result,
+        header_keep_alive_result,
+        post_keep_alive_result,
+    ],
 }
 result_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 print(json.dumps(payload, indent=2, sort_keys=True))

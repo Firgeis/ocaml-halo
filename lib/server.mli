@@ -1,12 +1,18 @@
-type t
-type server
-type controller_state =
+module Shutdown : sig
+  type t
+
+  val create : unit -> t
+  val request : t -> unit
+end
+(** A thread-safe shutdown signal. *)
+
+type controller_state = Server_backend.controller_state =
   | Normal
   | Busy
   | Saturated
   | Recovering
 
-type runtime_metrics = {
+type runtime_metrics = Server_backend.runtime_metrics = {
   utilization : float;
   active_connections : int64;
   active_requests : int64;
@@ -30,32 +36,32 @@ type tls_client_auth_mode = Server_config.tls_client_auth_mode =
   | Client_auth_required
 type tls_client_auth_config = Server_config.tls_client_auth_config
 type tls_config = Server_config.tls_config
-
-type request_body_event =
-  | Body_chunk of string
-  | Body_end
-
-type runtime_command =
-  | Final of string
-  | Interim of string * int
-  | Await_request_body of int
-  | Await_timeout of int * int
-  | Start_response_stream of string * int
-  | Write_response_chunk of string * int
-  | Finish_response_stream
-
-type runtime_error = string
-
 type config = Server_config.t
 
 module Config = Server_config
 
 val runtime_backend_name : unit -> string
-val close_server : server -> runtime_error option
-val run : t -> unit
-val run_once : t -> bool
-val stop : t -> unit
-val close : t -> runtime_error option
-val runtime_metrics : t -> runtime_metrics
-val listen : t -> config -> (server, string) result
-val with_runtime : (t -> ('a, Error.t) result) -> ('a, Error.t) result
+
+exception Client_disconnected
+exception Runtime_error of string
+
+type running
+(** A live server handle. It is valid until [run] returns. *)
+
+val metrics : running -> runtime_metrics
+(** Request a metrics snapshot from the reactor domain. *)
+
+val shutdown : running -> unit
+(** Request graceful shutdown. *)
+
+val run :
+  ?shutdown:Shutdown.t ->
+  ?handle_sigint:bool ->
+  ?max_in_flight_requests:int ->
+  ?command_capacity:int ->
+  ?on_ready:(running -> unit) ->
+  ?on_error:(int64 -> exn -> unit) ->
+  Config.t list ->
+  unit
+(** Run all configured listeners. Each request handler executes in its own Eio
+    fiber. [on_ready] runs in a child fiber after listeners are bound. *)

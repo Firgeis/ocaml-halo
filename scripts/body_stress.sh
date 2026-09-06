@@ -21,6 +21,20 @@ WARMUP_REQUESTS="${WARMUP_REQUESTS:-2}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-15}"
 CHUNK_SIZE="${CHUNK_SIZE:-8192}"
 PROCESS_SAMPLE_INTERVAL_SECONDS="${PROCESS_SAMPLE_INTERVAL_SECONDS:-0.02}"
+KEEP_ALIVE="${KEEP_ALIVE:-0}"
+
+KEEP_ALIVE_ARGS=()
+case "$KEEP_ALIVE" in
+  0|false|no|off) KEEP_ALIVE_ENABLED=0 ;;
+  1|true|yes|on)
+    KEEP_ALIVE_ENABLED=1
+    KEEP_ALIVE_ARGS+=(--keep-alive)
+    ;;
+  *)
+    echo "KEEP_ALIVE must be a boolean" >&2
+    exit 1
+    ;;
+esac
 
 mkdir -p "$RESULT_DIR"
 
@@ -136,6 +150,7 @@ if run_bench ACCEPTED_RESULT \
   --concurrency "$CONCURRENCY" \
   --warmup-requests "$WARMUP_REQUESTS" \
   --timeout-seconds "$TIMEOUT_SECONDS" \
+  "${KEEP_ALIVE_ARGS[@]}" \
   --expect-status 200; then
   ACCEPTED_EXIT_CODE=0
 else
@@ -156,6 +171,7 @@ if run_bench ACCEPTED_CHUNKED_RESULT \
   --concurrency "$CONCURRENCY" \
   --warmup-requests "$WARMUP_REQUESTS" \
   --timeout-seconds "$TIMEOUT_SECONDS" \
+  "${KEEP_ALIVE_ARGS[@]}" \
   --expect-status 200; then
   ACCEPTED_CHUNKED_EXIT_CODE=0
 else
@@ -209,7 +225,7 @@ if [[ -n "${PROCESS_SAMPLE_PID:-}" ]]; then
   unset PROCESS_SAMPLE_PID
 fi
 
-"$PYTHON_BIN" - "$RESULT_JSON" "$PROCESS_SAMPLE_JSON" "$MAX_REQUEST_SIZE" "$ACCEPTED_BODY_SIZE" "$OVERSIZED_BODY_SIZE" "$CHUNK_SIZE" "$ACCEPTED_EXIT_CODE" "$ACCEPTED_CHUNKED_EXIT_CODE" "$OVERSIZED_EXIT_CODE" "$OVERSIZED_CHUNKED_EXIT_CODE" "$ACCEPTED_RESULT" "$ACCEPTED_CHUNKED_RESULT" "$OVERSIZED_RESULT" "$OVERSIZED_CHUNKED_RESULT" <<'PY'
+"$PYTHON_BIN" - "$RESULT_JSON" "$PROCESS_SAMPLE_JSON" "$MAX_REQUEST_SIZE" "$ACCEPTED_BODY_SIZE" "$OVERSIZED_BODY_SIZE" "$CHUNK_SIZE" "$ACCEPTED_EXIT_CODE" "$ACCEPTED_CHUNKED_EXIT_CODE" "$OVERSIZED_EXIT_CODE" "$OVERSIZED_CHUNKED_EXIT_CODE" "$ACCEPTED_RESULT" "$ACCEPTED_CHUNKED_RESULT" "$OVERSIZED_RESULT" "$OVERSIZED_CHUNKED_RESULT" "$KEEP_ALIVE_ENABLED" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -236,6 +252,7 @@ payload = {
         "accepted_body_size": int(sys.argv[4]),
         "oversized_body_size": int(sys.argv[5]),
         "chunk_size": int(sys.argv[6]),
+        "keep_alive": sys.argv[15] == "1",
     },
     "process_sample": json.loads(process_sample_json.read_text()),
     "scenarios": [

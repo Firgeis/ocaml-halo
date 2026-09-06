@@ -1,3 +1,4 @@
+#include "halo_bridge.h"
 #include "halo_runtime_internal.h"
 
 #define HALO_CONTROLLER_INTERVAL_MS_DEFAULT 100
@@ -11,7 +12,6 @@
 struct halo_runtime_owner {
   struct halo_runtime* handle;
   int loop_initialized;
-  int sigint_initialized;
 };
 
 static struct halo_runtime* halo_runtime_from_client(struct halo_client* client) {
@@ -30,7 +30,7 @@ static double halo_runtime_clamp_utilization(double utilization) {
   return utilization;
 }
 
-static void halo_runtime_controller_tick(struct halo_runtime* runtime) {
+void halo_runtime_controller_tick(struct halo_runtime* runtime) {
   struct halo_runtime_metrics* metrics;
   struct halo_runtime_controller* controller;
   uint64_t now_ns;
@@ -181,12 +181,6 @@ static void halo_runtime_owner_release(struct halo_runtime_owner* owner) {
   if (owner == NULL || owner->handle == NULL)
     return;
 
-  if (owner->sigint_initialized
-      && !uv_is_closing((uv_handle_t*) &owner->handle->sigint)) {
-    uv_signal_stop(&owner->handle->sigint);
-    uv_close((uv_handle_t*) &owner->handle->sigint, NULL);
-  }
-
   if (owner->handle->controller.timer_initialized
       && !uv_is_closing((uv_handle_t*) &owner->handle->controller.timer)) {
     uv_timer_stop(&owner->handle->controller.timer);
@@ -218,16 +212,6 @@ struct halo_runtime* halo_runtime_get(value runtime) {
     caml_failwith("halo runtime is closed");
 
   return handle;
-}
-
-struct halo_listener* halo_listener_get(value listener) {
-  struct halo_listener_ref* ref;
-
-  ref = *halo_listener_slot(listener);
-  if (ref == NULL || ref->handle == NULL)
-    caml_failwith("halo server is closed");
-
-  return ref->handle;
 }
 
 value halo_result_ok(value payload) {
@@ -337,7 +321,6 @@ void halo_listener_ref_release(struct halo_listener_ref* ref) {
   }
   halo_tls_replay_entry_list_destroy(ref->tls_replay_entries);
   ref->tls_replay_entries = NULL;
-  caml_remove_generational_global_root(&ref->router);
   free(ref);
 }
 
@@ -422,8 +405,6 @@ void halo_runtime_note_tls_handshake_failure(struct halo_client* client) {
   client->tls_handshake_accounted = 1;
 }
 
-static void halo_runtime_begin_shutdown(struct halo_runtime* handle);
-
 static void halo_close_walk_cb(uv_handle_t* handle, void* arg) {
   struct halo_runtime* runtime;
   void* data;
@@ -433,8 +414,7 @@ static void halo_close_walk_cb(uv_handle_t* handle, void* arg) {
   runtime = arg;
 
   (void)arg;
-  if ((uv_handle_t*) &runtime->sigint == handle
-      || (uv_handle_t*) &runtime->controller.timer == handle)
+  if ((uv_handle_t*) &runtime->controller.timer == handle)
     return;
 
   data = handle->data;
@@ -451,14 +431,12 @@ static void halo_close_walk_cb(uv_handle_t* handle, void* arg) {
     uv_close(handle, halo_on_handle_closed);
 }
 
-static void halo_runtime_begin_shutdown(struct halo_runtime* handle) {
+void halo_runtime_begin_shutdown(struct halo_runtime* handle) {
   if (handle->is_closed || handle->is_stopping)
     return;
 
   handle->is_stopping = 1;
-
-  if (!uv_is_closing((uv_handle_t*) &handle->sigint))
-    uv_signal_stop(&handle->sigint);
+  halo_bridge_begin_shutdown(handle);
 
   if (handle->controller.timer_initialized
       && !uv_is_closing((uv_handle_t*) &handle->controller.timer)) {
@@ -468,17 +446,6 @@ static void halo_runtime_begin_shutdown(struct halo_runtime* handle) {
 
   uv_walk(&handle->loop, halo_close_walk_cb, handle);
 
-  if (!uv_is_closing((uv_handle_t*) &handle->sigint))
-    uv_close((uv_handle_t*) &handle->sigint, NULL);
-}
-
-static void halo_sigint_cb(uv_signal_t* sigint, int signum) {
-  struct halo_runtime* runtime;
-
-  (void)signum;
-
-  runtime = sigint->data;
-  halo_runtime_begin_shutdown(runtime);
 }
 
 static void halo_runtime_destroy(struct halo_runtime* handle) {
@@ -499,6 +466,7 @@ static void halo_runtime_destroy(struct halo_runtime* handle) {
     return;
 
   handle->is_closed = 1;
+  halo_bridge_destroy(handle);
 }
 
 static void halo_runtime_finalize(value runtime) {
@@ -522,7 +490,8 @@ static struct custom_operations halo_runtime_ops = {
   custom_hash_default,
   custom_serialize_default,
   custom_deserialize_default,
-  custom_compare_ext_default
+  custom_compare_ext_default,
+  custom_fixed_length_default
 };
 
 static void halo_listener_finalize(value listener) {
@@ -548,7 +517,8 @@ static struct custom_operations halo_listener_ops = {
   custom_hash_default,
   custom_serialize_default,
   custom_deserialize_default,
-  custom_compare_ext_default
+  custom_compare_ext_default,
+  custom_fixed_length_default
 };
 
 value halo_listener_alloc(struct halo_listener_ref* ref) {
@@ -559,13 +529,29 @@ value halo_listener_alloc(struct halo_listener_ref* ref) {
   return listener;
 }
 
+CAMLprim value ocaml_halo_server_release(value listener) {
+  CAMLparam1(listener);
+  struct halo_listener_ref** slot;
+  struct halo_listener_ref* ref;
+
+  slot = halo_listener_slot(listener);
+  ref = *slot;
+  if (ref == NULL)
+    CAMLreturn(Val_unit);
+
+  *slot = NULL;
+  ref->ocaml_alive = 0;
+  halo_listener_ref_release(ref);
+  CAMLreturn(Val_unit);
+}
+
 CAMLprim value ocaml_halo_runtime_backend_name(value unit) {
   CAMLparam1(unit);
   CAMLreturn(caml_copy_string(uv_version_string()));
 }
 
-CAMLprim value ocaml_halo_runtime_create(value unit) {
-  CAMLparam1(unit);
+static value halo_runtime_create_internal(void) {
+  CAMLparam0();
   CAMLlocal1(runtime);
   struct halo_runtime_owner owner;
   struct halo_runtime* handle;
@@ -579,6 +565,8 @@ CAMLprim value ocaml_halo_runtime_create(value unit) {
   owner.handle = handle;
   handle->is_closed = 0;
   handle->is_stopping = 0;
+  handle->bridge = NULL;
+  handle->next_listener_id = 0;
   memset(&handle->metrics, 0, sizeof(handle->metrics));
   memset(&handle->controller, 0, sizeof(handle->controller));
   handle->controller.state = HALO_CONTROLLER_NORMAL;
@@ -619,68 +607,15 @@ CAMLprim value ocaml_halo_runtime_create(value unit) {
     CAMLreturn(halo_result_error_uv("uv_timer_start", code));
   }
 
-  code = uv_signal_init(&handle->loop, &handle->sigint);
-  if (code != 0) {
-    halo_runtime_owner_release(&owner);
-    CAMLreturn(halo_result_error_uv("uv_signal_init", code));
-  }
-
-  owner.sigint_initialized = 1;
-  handle->sigint.data = handle;
-
-  code = uv_signal_start(&handle->sigint, halo_sigint_cb, SIGINT);
-  if (code != 0) {
-    halo_runtime_owner_release(&owner);
-    CAMLreturn(halo_result_error_uv("uv_signal_start", code));
-  }
-
   runtime = caml_alloc_custom(&halo_runtime_ops, sizeof(struct halo_runtime*), 0, 1);
   *halo_runtime_slot(runtime) = handle;
   owner.handle = NULL;
   CAMLreturn(halo_result_ok(runtime));
 }
 
-CAMLprim value ocaml_halo_runtime_run(value runtime) {
-  CAMLparam1(runtime);
-  struct halo_runtime* handle;
-
-  handle = halo_runtime_get(runtime);
-  uv_run(&handle->loop, UV_RUN_DEFAULT);
-  CAMLreturn(Val_unit);
-}
-
-CAMLprim value ocaml_halo_runtime_run_once(value runtime) {
-  CAMLparam1(runtime);
-  struct halo_runtime* handle;
-  int code;
-
-  handle = halo_runtime_get(runtime);
-  code = uv_run(&handle->loop, UV_RUN_NOWAIT);
-  CAMLreturn(Val_bool(code != 0));
-}
-
-CAMLprim value ocaml_halo_runtime_metrics(value runtime) {
-  CAMLparam1(runtime);
-  CAMLlocal2(result, active);
-  struct halo_runtime* handle;
-
-  handle = halo_runtime_get(runtime);
-  halo_runtime_controller_tick(handle);
-
-  result = caml_alloc_tuple(11);
-  Store_field(result, 0, caml_copy_double(handle->metrics.utilization));
-  Store_field(result, 1, caml_copy_int64(handle->metrics.active_connections));
-  Store_field(result, 2, caml_copy_int64(handle->metrics.active_requests));
-  Store_field(result, 3, caml_copy_int64(handle->metrics.accepted_connections));
-  Store_field(result, 4, caml_copy_int64(handle->metrics.rejected_connections));
-  Store_field(result, 5, caml_copy_int64(handle->metrics.requests_completed));
-  Store_field(result, 6, caml_copy_int64(handle->metrics.tls_full_handshakes));
-  Store_field(result, 7, caml_copy_int64(handle->metrics.tls_resumed_handshakes));
-  Store_field(result, 8, caml_copy_int64(handle->metrics.tls_handshake_failures));
-  Store_field(result, 9, Val_int(handle->controller.state));
-  active = Val_bool(handle->controller.backpressure_enabled);
-  Store_field(result, 10, active);
-  CAMLreturn(result);
+CAMLprim value ocaml_halo_bridge_runtime_create(value unit) {
+  CAMLparam1(unit);
+  CAMLreturn(halo_runtime_create_internal());
 }
 
 CAMLprim value ocaml_halo_runtime_configure_controller(value runtime,
@@ -725,15 +660,6 @@ CAMLprim value ocaml_halo_runtime_configure_controller_bytecode(value* argv, int
                                                  argv[5],
                                                  argv[6],
                                                  argv[7]);
-}
-
-CAMLprim value ocaml_halo_runtime_stop(value runtime) {
-  CAMLparam1(runtime);
-  struct halo_runtime* handle;
-
-  handle = halo_runtime_get(runtime);
-  halo_runtime_begin_shutdown(handle);
-  CAMLreturn(Val_unit);
 }
 
 CAMLprim value ocaml_halo_runtime_close(value runtime) {

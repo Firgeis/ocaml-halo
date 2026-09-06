@@ -1,5 +1,7 @@
+#include "halo_bridge.h"
 #include "halo_runtime_internal.h"
 #include "halo_utils.h"
+#include <inttypes.h>
 #include <signal.h>
 #include "s2n_connection.h"
 
@@ -43,24 +45,19 @@ static int halo_write_buffer(uv_stream_t* stream,
                              const char* response,
                              size_t response_len,
                              enum halo_write_kind kind);
+static int halo_write_owned_buffer(uv_stream_t* stream,
+                                   struct halo_client* client,
+                                   char* response,
+                                   size_t response_len,
+                                   enum halo_write_kind kind);
 static int halo_handle_parser_result(uv_stream_t* stream,
                                      struct halo_client* client,
                                      llhttp_errno_t err);
-static int halo_handle_runtime_command(uv_stream_t* stream,
-                                       struct halo_client* client,
-                                       value command);
 static int halo_capture_paused_remainder(struct halo_client* client,
                                          const char* buf_base,
                                          size_t buf_len);
 static int halo_wait_for_request_body(uv_stream_t* stream,
-                                      struct halo_client* client,
-                                      int token);
-static int halo_wait_for_timeout(struct halo_client* client,
-                                 int delay_ms,
-                                 int token);
-static int halo_try_resume_dispatch(uv_stream_t* stream,
-                                    struct halo_client* client,
-                                    int token);
+                                      struct halo_client* client);
 static int halo_request_body_expected(const struct halo_client* client);
 static int halo_request_body_complete_for_reuse(const struct halo_client* client);
 static void halo_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf);
@@ -77,7 +74,6 @@ static void halo_tls_try_start_shutdown(struct halo_client* client);
 static void halo_alloc_cb(uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf);
 static void halo_after_shutdown(uv_shutdown_t* req, int status);
 static int halo_start_graceful_close(uv_stream_t* stream, struct halo_client* client);
-static void halo_dispatch_timer_cb(uv_timer_t* timer);
 static int halo_handle_write_kind_complete(uv_stream_t* stream,
                                            struct halo_client* client,
                                            enum halo_write_kind kind);
@@ -164,7 +160,6 @@ static void halo_tls_server_files_release(struct halo_tls_server_files* files) {
 struct halo_listener_pair {
   struct halo_listener* listener;
   struct halo_listener_ref* ref;
-  int router_rooted;
 };
 
 static void halo_listener_pair_init(struct halo_listener_pair* pair) {
@@ -189,10 +184,6 @@ static void halo_listener_pair_release(struct halo_listener_pair* pair) {
     }
     halo_tls_replay_entry_list_destroy(pair->ref->tls_replay_entries);
     pair->ref->tls_replay_entries = NULL;
-    if (pair->router_rooted) {
-      caml_remove_generational_global_root(&pair->ref->router);
-      pair->router_rooted = 0;
-    }
     free(pair->ref);
     pair->ref = NULL;
   }
@@ -202,7 +193,7 @@ static void halo_listener_pair_release(struct halo_listener_pair* pair) {
 }
 
 static int halo_listener_pair_create(struct halo_listener_pair* pair,
-                                     value router,
+                                     struct halo_runtime* runtime,
                                      value max_request_size,
                                      value request_timeout_ms,
                                      value idle_timeout_ms,
@@ -236,27 +227,8 @@ static int halo_listener_pair_create(struct halo_listener_pair* pair,
   pair->ref->tls_config = NULL;
   pair->ref->tls_cert_chain = NULL;
   pair->ref->tls_replay_entries = NULL;
-  pair->ref->router = router;
-  caml_register_generational_global_root(&pair->ref->router);
-  pair->router_rooted = 1;
+  pair->ref->bridge_listener_id = ++runtime->next_listener_id;
   return 0;
-}
-
-static void halo_cancel_dispatch(int token) {
-  CAMLparam0();
-  CAMLlocal2(ocaml_token, result);
-  const value* callback;
-
-  callback = caml_named_value("ocaml_halo_cancel_dispatch");
-  if (callback == NULL)
-    caml_failwith("ocaml_halo_cancel_dispatch is not registered");
-
-  ocaml_token = Val_int(token);
-  result = caml_callback_exn(*callback, ocaml_token);
-  if (Is_exception_result(result))
-    caml_raise(Extract_exception(result));
-
-  CAMLreturn0;
 }
 
 static void halo_client_clear_paused_data(struct halo_client* client) {
@@ -266,33 +238,6 @@ static void halo_client_clear_paused_data(struct halo_client* client) {
   free(client->paused_data);
   client->paused_data = NULL;
   client->paused_data_len = 0;
-}
-
-static void halo_invalidate_borrowed_request(struct halo_client* client) {
-  struct halo_borrowed_request* borrowed;
-
-  if (client == NULL)
-    return;
-
-  borrowed = client->active_borrowed_request;
-  if (borrowed != NULL) {
-    borrowed->valid = 0;
-    borrowed->request = NULL;
-  }
-
-  if (client->active_borrowed_request_rooted) {
-    struct halo_borrowed_request** slot;
-
-    slot = halo_borrowed_request_slot(client->active_borrowed_request_value);
-    if (*slot == borrowed)
-      *slot = NULL;
-    caml_remove_generational_global_root(&client->active_borrowed_request_value);
-    client->active_borrowed_request_value = Val_unit;
-    client->active_borrowed_request_rooted = 0;
-  }
-
-  free(borrowed);
-  client->active_borrowed_request = NULL;
 }
 
 static int halo_request_body_expected(const struct halo_client* client) {
@@ -311,8 +256,7 @@ static int halo_request_body_complete_for_reuse(const struct halo_client* client
     return 0;
 
   return client->request.has_content_length
-    && client->body_bytes_read >= (size_t) client->request.content_length
-    && client->request_body_stream_offset >= client->request.body_len;
+    && client->body_bytes_read >= (size_t) client->request.content_length;
 }
 
 static int halo_tls_enabled(const struct halo_client* client) {
@@ -1057,8 +1001,7 @@ static void halo_free_handle(uv_handle_t* handle) {
 
   runtime = handle->loop != NULL ? (struct halo_runtime*) handle->loop->data : NULL;
   if (runtime != NULL
-      && (handle == (uv_handle_t*) &runtime->controller.timer
-          || handle == (uv_handle_t*) &runtime->sigint))
+      && handle == (uv_handle_t*) &runtime->controller.timer)
     return;
 
   kind = *(enum halo_handle_kind*) data;
@@ -1079,13 +1022,8 @@ static void halo_free_handle(uv_handle_t* handle) {
       else if (client->timer_initialized
                && handle == (uv_handle_t*) &client->timer)
         client->timer_closed = 1;
-      else if (client->dispatch_timer_initialized
-               && handle == (uv_handle_t*) &client->dispatch_timer)
-        client->dispatch_timer_closed = 1;
-
       if (client->handle_closed
-          && (!client->timer_initialized || client->timer_closed)
-          && (!client->dispatch_timer_initialized || client->dispatch_timer_closed)) {
+          && (!client->timer_initialized || client->timer_closed)) {
         struct halo_tls_write_chunk* chunk;
         struct halo_tls_write_chunk* next;
 
@@ -1101,11 +1039,13 @@ static void halo_free_handle(uv_handle_t* handle) {
           halo_tls_write_chunk_destroy(chunk);
           chunk = next;
         }
-        halo_invalidate_borrowed_request(client);
         halo_client_clear_paused_data(client);
         halo_request_free(&client->request);
         free(client);
       }
+      break;
+
+    case HALO_HANDLE_BRIDGE:
       break;
 
     default:
@@ -1158,16 +1098,6 @@ void halo_client_stop_timer(struct halo_client* client) {
   client->timeout_mode = HALO_TIMEOUT_NONE;
 }
 
-static void halo_client_stop_dispatch_timer(struct halo_client* client) {
-  if (client == NULL || !client->dispatch_timer_initialized)
-    return;
-  if (uv_is_closing((uv_handle_t*) &client->dispatch_timer))
-    return;
-
-  uv_timer_stop(&client->dispatch_timer);
-  client->awaiting_timeout = 0;
-}
-
 void halo_close_client(struct halo_client* client) {
   if (client == NULL)
     return;
@@ -1184,19 +1114,12 @@ void halo_close_client(struct halo_client* client) {
   halo_runtime_note_request_finished(client, 0);
   halo_runtime_note_connection_closed(client);
 
-  if (client->dispatch_resume_token != 0) {
-    halo_cancel_dispatch(client->dispatch_resume_token);
-    client->dispatch_resume_token = 0;
-  }
+  halo_bridge_disconnect_request(client);
 
   halo_client_stop_timer(client);
-  halo_client_stop_dispatch_timer(client);
 
   if (client->timer_initialized && !uv_is_closing((uv_handle_t*) &client->timer))
     uv_close((uv_handle_t*) &client->timer, halo_on_handle_closed);
-  if (client->dispatch_timer_initialized
-      && !uv_is_closing((uv_handle_t*) &client->dispatch_timer))
-    uv_close((uv_handle_t*) &client->dispatch_timer, halo_on_handle_closed);
   if (!uv_is_closing((uv_handle_t*) &client->handle))
     uv_close((uv_handle_t*) &client->handle, halo_on_handle_closed);
 }
@@ -1232,19 +1155,15 @@ static int halo_start_graceful_close(uv_stream_t* stream, struct halo_client* cl
     return -1;
 
   halo_client_clear_paused_data(client);
-  halo_invalidate_borrowed_request(client);
-  halo_request_release_body(&client->request);
   halo_request_clear(&client->request);
   client->message_complete = 0;
   client->parser_error_status = 0;
   client->pending_continue = 0;
-  client->dispatch_resume_token = 0;
   client->dispatch_started = 0;
   client->dispatch_after_headers = 0;
   client->awaiting_request_body = 0;
-  client->awaiting_timeout = 0;
+  client->body_chunk_delivered = 0;
   client->body_bytes_read = 0;
-  client->request_body_stream_offset = 0;
 
   if (!client->shutdown_started) {
     client->shutdown_started = 1;
@@ -1317,102 +1236,19 @@ static void halo_write_req_destroy(struct halo_write_req* write_req) {
   free(write_req);
 }
 
-static int halo_client_write_ocaml_response(uv_stream_t* stream,
-                                            struct halo_client* client,
-                                            value response_text) {
-  return halo_write_response(stream,
-                             client,
-                             String_val(response_text),
-                             caml_string_length(response_text));
-}
-
-static int halo_try_resume_dispatch_with_body_chunk(uv_stream_t* stream,
-                                                    struct halo_client* client,
-                                                    int token,
-                                                    const char* chunk,
-                                                    size_t chunk_len) {
-  CAMLparam0();
-  CAMLlocal3(ocaml_token, ocaml_chunk, response);
-  value args[2];
-  const value* callback;
-  int code;
-
-  callback = caml_named_value("ocaml_halo_resume_dispatch_with_body_chunk");
-  if (callback == NULL)
-    CAMLreturnT(int, -1);
-
-  ocaml_token = Val_int(token);
-  ocaml_chunk = caml_alloc_initialized_string(chunk_len, chunk);
-  args[0] = ocaml_token;
-  args[1] = ocaml_chunk;
-  response = caml_callbackN_exn(*callback, 2, args);
-  if (Is_exception_result(response))
-    CAMLreturnT(int, -1);
-
-  code = halo_handle_runtime_command(stream, client, response);
-  CAMLreturnT(int, code);
-}
-
-static int halo_try_resume_dispatch_with_body_end(uv_stream_t* stream,
-                                                  struct halo_client* client,
-                                                  int token) {
-  CAMLparam0();
-  CAMLlocal2(ocaml_token, response);
-  const value* callback;
-  int code;
-
-  callback = caml_named_value("ocaml_halo_resume_dispatch_with_body_end");
-  if (callback == NULL)
-    CAMLreturnT(int, -1);
-
-  ocaml_token = Val_int(token);
-  response = caml_callback_exn(*callback, ocaml_token);
-  if (Is_exception_result(response))
-    CAMLreturnT(int, -1);
-
-  code = halo_handle_runtime_command(stream, client, response);
-  CAMLreturnT(int, code);
-}
-
-static int halo_resume_buffered_request_body(uv_stream_t* stream,
-                                             struct halo_client* client,
-                                             int token) {
-  if (client->request_body_stream_offset < client->request.body_len) {
-    const char* chunk;
-    size_t chunk_len;
-
-    chunk = client->request.body + client->request_body_stream_offset;
-    chunk_len = client->request.body_len - client->request_body_stream_offset;
-    client->request_body_stream_offset = client->request.body_len;
-    return halo_try_resume_dispatch_with_body_chunk(stream,
-                                                    client,
-                                                    token,
-                                                    chunk,
-                                                    chunk_len);
-  }
-
-  if (client->message_complete
-      || (client->request.has_content_length
-          && client->body_bytes_read >= (size_t) client->request.content_length))
-    return halo_try_resume_dispatch_with_body_end(stream, client, token);
-
-  return halo_wait_for_request_body(stream, client, token);
-}
-
 static int halo_wait_for_request_body(uv_stream_t* stream,
-                                      struct halo_client* client,
-                                      int token) {
+                                      struct halo_client* client) {
   if (halo_client_start_request_timeout(client) != 0) {
     halo_close_client(client);
     return 1;
   }
 
   if (client->request.has_content_length
-      && client->body_bytes_read >= (size_t) client->request.content_length
-      && client->request_body_stream_offset >= client->request.body_len)
-    return halo_try_resume_dispatch_with_body_end(stream, client, token);
+      && client->body_bytes_read >= (size_t) client->request.content_length)
+    return halo_bridge_emit_body_end(client);
+  if (client->message_complete)
+    return halo_bridge_emit_body_end(client);
 
-  client->dispatch_resume_token = token;
   client->awaiting_request_body = 1;
   llhttp_resume(&client->parser);
   if (client->paused_data_len > 0) {
@@ -1440,6 +1276,15 @@ static int halo_wait_for_request_body(uv_stream_t* stream,
     return 0;
   }
 
+  if (halo_tls_enabled(client)) {
+    if (halo_tls_drain_plaintext(stream, client) != 0) {
+      halo_close_client(client);
+      return 1;
+    }
+    if (!client->awaiting_request_body)
+      return 0;
+  }
+
   if (uv_is_active((uv_handle_t*) stream))
     return 0;
 
@@ -1451,141 +1296,6 @@ static int halo_wait_for_request_body(uv_stream_t* stream,
   return 0;
 }
 
-static void halo_dispatch_timer_cb(uv_timer_t* timer) {
-  struct halo_client* client;
-  uv_stream_t* stream;
-  int token;
-
-  client = timer != NULL ? (struct halo_client*) timer->data : NULL;
-  if (client == NULL)
-    return;
-
-  client->awaiting_timeout = 0;
-  token = client->dispatch_resume_token;
-  client->dispatch_resume_token = 0;
-  if (token == 0)
-    return;
-
-  stream = (uv_stream_t*) &client->handle;
-  if (halo_try_resume_dispatch(stream, client, token) != 0
-      && halo_write_internal_server_error_response(stream, client) != 0)
-    halo_close_client(client);
-}
-
-static int halo_wait_for_timeout(struct halo_client* client,
-                                 int delay_ms,
-                                 int token) {
-  if (client == NULL || !client->dispatch_timer_initialized)
-    return -1;
-  if (uv_is_closing((uv_handle_t*) &client->dispatch_timer))
-    return -1;
-
-  client->dispatch_resume_token = token;
-  client->awaiting_timeout = 1;
-  uv_timer_stop(&client->dispatch_timer);
-  return uv_timer_start(&client->dispatch_timer,
-                        halo_dispatch_timer_cb,
-                        (uint64_t) delay_ms,
-                        0);
-}
-
-static int halo_handle_runtime_command(uv_stream_t* stream,
-                                       struct halo_client* client,
-                                       value command) {
-  if (Is_long(command)) {
-    if (Int_val(command) == 0)
-      return halo_write_buffer(stream,
-                               client,
-                               "0\r\n\r\n",
-                               5,
-                               HALO_WRITE_RESPONSE_STREAM_FINISH);
-    return -1;
-  }
-
-  if (Tag_val(command) == String_tag)
-    return halo_write_response(stream,
-                               client,
-                               String_val(command),
-                               caml_string_length(command));
-
-  if (Tag_val(command) == 0) {
-    value response_text;
-
-    response_text = Field(command, 0);
-    if (!halo_request_body_complete_for_reuse(client))
-      client->should_keep_alive = 0;
-    return halo_write_response(stream,
-                               client,
-                               String_val(response_text),
-                               caml_string_length(response_text));
-  }
-
-  if (Tag_val(command) == 1) {
-    value response_text;
-    value token_value;
-
-    response_text = Field(command, 0);
-    token_value = Field(command, 1);
-    client->dispatch_resume_token = Int_val(token_value);
-    return halo_write_buffer(stream,
-                             client,
-                             String_val(response_text),
-                             caml_string_length(response_text),
-                             HALO_WRITE_DISPATCH_INTERIM);
-  }
-
-  if (Tag_val(command) == 2) {
-    int token;
-
-    token = Int_val(Field(command, 0));
-    if (client->request_body_stream_offset < client->request.body_len
-        || client->message_complete)
-      return halo_resume_buffered_request_body(stream, client, token);
-    return halo_wait_for_request_body(stream, client, token);
-  }
-
-  if (Tag_val(command) == 3) {
-    int delay_ms;
-    int token;
-
-    delay_ms = Int_val(Field(command, 0));
-    token = Int_val(Field(command, 1));
-    return halo_wait_for_timeout(client, delay_ms, token);
-  }
-
-  if (Tag_val(command) == 4) {
-    value response_text;
-    value token_value;
-
-    response_text = Field(command, 0);
-    token_value = Field(command, 1);
-    if (!halo_request_body_complete_for_reuse(client))
-      client->should_keep_alive = 0;
-    client->dispatch_resume_token = Int_val(token_value);
-    return halo_write_buffer(stream,
-                             client,
-                             String_val(response_text),
-                             caml_string_length(response_text),
-                             HALO_WRITE_RESPONSE_STREAM_START);
-  }
-
-  if (Tag_val(command) == 5) {
-    value response_text;
-    value token_value;
-
-    response_text = Field(command, 0);
-    token_value = Field(command, 1);
-    client->dispatch_resume_token = Int_val(token_value);
-    return halo_write_buffer(stream,
-                             client,
-                             String_val(response_text),
-                             caml_string_length(response_text),
-                             HALO_WRITE_RESPONSE_CHUNK);
-  }
-
-  return -1;
-}
-
 static int halo_write_internal_server_error_response(uv_stream_t* stream,
                                                      struct halo_client* client) {
   client->should_keep_alive = 0;
@@ -1595,104 +1305,11 @@ static int halo_write_internal_server_error_response(uv_stream_t* stream,
                              sizeof(halo_internal_server_error_response) - 1);
 }
 
-static int halo_try_write_serialized_bad_request(uv_stream_t* stream,
-                                                 struct halo_client* client) {
-  CAMLparam0();
-  CAMLlocal1(response);
-  const value* callback;
-  int code;
-
-  callback = caml_named_value("ocaml_halo_serialize_bad_request_response");
-  if (callback == NULL)
-    CAMLreturnT(int, -1);
-
-  response = caml_callback_exn(*callback, Val_unit);
-  if (Is_exception_result(response))
-    CAMLreturnT(int, -1);
-
-  code = halo_client_write_ocaml_response(stream, client, response);
-  CAMLreturnT(int, code);
-}
-
-static int halo_try_write_serialized_error_response(uv_stream_t* stream,
-                                                    struct halo_client* client,
-                                                    int status,
-                                                    const char* body) {
-  CAMLparam0();
-  CAMLlocal3(ocaml_status, ocaml_body, response);
-  value args[2];
-  const value* callback;
-  int code;
-
-  callback = caml_named_value("ocaml_halo_serialize_error_response");
-  if (callback == NULL)
-    CAMLreturnT(int, -1);
-
-  ocaml_status = Val_int(status);
-  ocaml_body = caml_copy_string(body);
-  args[0] = ocaml_status;
-  args[1] = ocaml_body;
-  response = caml_callbackN_exn(*callback, 2, args);
-  if (Is_exception_result(response))
-    CAMLreturnT(int, -1);
-
-  code = halo_client_write_ocaml_response(stream, client, response);
-  CAMLreturnT(int, code);
-}
-
 static int halo_try_dispatch_request(uv_stream_t* stream,
                                      struct halo_client* client) {
-  CAMLparam0();
-  CAMLlocal3(router, ocaml_request, response);
-  value args[5];
-  const value* callback;
-  struct halo_borrowed_request* borrowed;
-  int code;
-
-  callback = caml_named_value("ocaml_halo_dispatch_request");
-  if (callback == NULL)
-    CAMLreturnT(int, -1);
-
+  (void) stream;
   halo_runtime_note_request_started(client);
-  router = client->listener_ref->router;
-  ocaml_request = halo_borrowed_request_alloc(&client->request);
-  borrowed = *halo_borrowed_request_slot(ocaml_request);
-  client->active_borrowed_request = borrowed;
-  client->active_borrowed_request_value = ocaml_request;
-  caml_register_generational_global_root(&client->active_borrowed_request_value);
-  client->active_borrowed_request_rooted = 1;
-  args[0] = router;
-  args[1] = ocaml_request;
-  args[2] = Val_int(client->request.http_major);
-  args[3] = Val_int(client->request.http_minor);
-  args[4] = Val_bool(client->should_keep_alive);
-  response = caml_callbackN_exn(*callback, 5, args);
-  if (Is_exception_result(response))
-    CAMLreturnT(int, -1);
-
-  code = halo_handle_runtime_command(stream, client, response);
-  CAMLreturnT(int, code);
-}
-
-static int halo_try_resume_dispatch(uv_stream_t* stream,
-                                    struct halo_client* client,
-                                    int token) {
-  CAMLparam0();
-  CAMLlocal2(ocaml_token, response);
-  const value* callback;
-  int code;
-
-  callback = caml_named_value("ocaml_halo_resume_dispatch");
-  if (callback == NULL)
-    CAMLreturnT(int, -1);
-
-  ocaml_token = Val_int(token);
-  response = caml_callback_exn(*callback, ocaml_token);
-  if (Is_exception_result(response))
-    CAMLreturnT(int, -1);
-
-  code = halo_handle_runtime_command(stream, client, response);
-  CAMLreturnT(int, code);
+  return halo_bridge_dispatch_request(client);
 }
 
 static int halo_handle_write_kind_complete(uv_stream_t* stream,
@@ -1738,47 +1355,30 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
   }
 
   if (kind == HALO_WRITE_DISPATCH_INTERIM) {
-    int token;
-
     client->interim_response_started = 0;
-    token = client->dispatch_resume_token;
-    client->dispatch_resume_token = 0;
-    if (halo_try_resume_dispatch(stream, client, token) != 0
-        && halo_write_internal_server_error_response(stream, client) != 0)
-      return -1;
-    return 0;
+    return halo_bridge_complete_write(client);
   }
 
   if (kind == HALO_WRITE_RESPONSE_STREAM_START
-      || kind == HALO_WRITE_RESPONSE_CHUNK) {
-    int token;
-
-    token = client->dispatch_resume_token;
-    client->dispatch_resume_token = 0;
-    if (halo_try_resume_dispatch(stream, client, token) != 0
-        && halo_write_internal_server_error_response(stream, client) != 0)
-      return -1;
-    return 0;
-  }
+      || kind == HALO_WRITE_RESPONSE_CHUNK)
+    return halo_bridge_complete_write(client);
 
   if (kind == HALO_WRITE_RESPONSE_STREAM_FINISH) {
     halo_runtime_note_request_finished(client, 1);
 
+    halo_bridge_complete_request(client);
+
     if (!client->should_keep_alive) {
       if (fast_close_parser_error) {
         halo_client_clear_paused_data(client);
-        halo_invalidate_borrowed_request(client);
-        halo_request_release_body(&client->request);
         return -1;
       }
       if (!halo_tls_enabled(client))
         return halo_start_graceful_close(stream, client);
-      halo_invalidate_borrowed_request(client);
       return -1;
     }
 
     halo_client_clear_paused_data(client);
-    halo_invalidate_borrowed_request(client);
     halo_request_clear(&client->request);
     client->message_complete = 0;
     client->response_started = 0;
@@ -1786,14 +1386,11 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
     client->should_keep_alive = 0;
     client->parser_error_status = 0;
     client->pending_continue = 0;
-    client->dispatch_resume_token = 0;
     client->dispatch_started = 0;
     client->dispatch_after_headers = 0;
     client->awaiting_request_body = 0;
-    client->awaiting_timeout = 0;
+    client->body_chunk_delivered = 0;
     client->body_bytes_read = 0;
-    client->request_body_stream_offset = 0;
-    halo_client_stop_dispatch_timer(client);
     llhttp_reset(&client->parser);
     llhttp_set_lenient_version(&client->parser, 1);
     if (uv_read_start(stream, halo_alloc_cb, (uv_read_cb) halo_read_cb) != 0)
@@ -1803,23 +1400,29 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
     return 0;
   }
 
+  if (kind == HALO_WRITE_FINAL) {
+    if (client->bridge_response_in_flight) {
+      client->bridge_response_in_flight = 0;
+      halo_bridge_complete_request(client);
+    }
+    else {
+      halo_bridge_disconnect_request(client);
+    }
+  }
+
   halo_runtime_note_request_finished(client, 1);
 
   if (!client->should_keep_alive) {
     if (fast_close_parser_error) {
       halo_client_clear_paused_data(client);
-      halo_invalidate_borrowed_request(client);
-      halo_request_release_body(&client->request);
       return -1;
     }
     if (!halo_tls_enabled(client))
       return halo_start_graceful_close(stream, client);
-    halo_invalidate_borrowed_request(client);
     return -1;
   }
 
   halo_client_clear_paused_data(client);
-  halo_invalidate_borrowed_request(client);
   halo_request_clear(&client->request);
   client->message_complete = 0;
   client->response_started = 0;
@@ -1827,14 +1430,11 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
   client->should_keep_alive = 0;
   client->parser_error_status = 0;
   client->pending_continue = 0;
-  client->dispatch_resume_token = 0;
   client->dispatch_started = 0;
   client->dispatch_after_headers = 0;
   client->awaiting_request_body = 0;
-  client->awaiting_timeout = 0;
+  client->body_chunk_delivered = 0;
   client->body_bytes_read = 0;
-  client->request_body_stream_offset = 0;
-  halo_client_stop_dispatch_timer(client);
   llhttp_reset(&client->parser);
   llhttp_set_lenient_version(&client->parser, 1);
   if (uv_read_start(stream, halo_alloc_cb, (uv_read_cb) halo_read_cb) != 0)
@@ -2204,6 +1804,154 @@ static int halo_write_response(uv_stream_t* stream,
                            HALO_WRITE_FINAL);
 }
 
+static int halo_write_owned_buffer(uv_stream_t* stream,
+                                   struct halo_client* client,
+                                   char* response,
+                                   size_t response_len,
+                                   enum halo_write_kind kind) {
+  struct halo_write_req* write_req;
+
+  write_req = malloc(sizeof(*write_req));
+  if (write_req == NULL) {
+    free(response);
+    return -1;
+  }
+
+  write_req->buf.base = response;
+  write_req->buf.len = response_len;
+  write_req->kind = kind;
+
+  if (uv_write(&write_req->req,
+               stream,
+               &write_req->buf,
+               1,
+               halo_after_write) != 0) {
+    halo_write_req_destroy(write_req);
+    return -1;
+  }
+
+  if (kind == HALO_WRITE_EXPECT_CONTINUE
+      || kind == HALO_WRITE_DISPATCH_INTERIM)
+    client->interim_response_started = 1;
+  else
+    client->response_started = 1;
+  uv_read_stop(stream);
+  return 0;
+}
+
+int halo_client_bridge_send_response(struct halo_client* client,
+                                     char* response,
+                                     size_t response_len) {
+  int result;
+
+  if (client == NULL || client->bridge_request_id == 0
+      || client->response_started || client->interim_response_started) {
+    free(response);
+    return -1;
+  }
+  if (!halo_request_body_complete_for_reuse(client))
+    client->should_keep_alive = 0;
+  client->bridge_response_in_flight = 1;
+  if (halo_tls_enabled(client)) {
+    result = halo_write_response((uv_stream_t*) &client->handle,
+                                 client,
+                                 response,
+                                 response_len);
+    free(response);
+  }
+  else {
+    result = halo_write_owned_buffer((uv_stream_t*) &client->handle,
+                                     client,
+                                     response,
+                                     response_len,
+                                     HALO_WRITE_FINAL);
+  }
+  if (result != 0) {
+    client->bridge_response_in_flight = 0;
+    return -1;
+  }
+  return 0;
+}
+
+int halo_client_bridge_send_informational(struct halo_client* client,
+                                          const char* response,
+                                          size_t response_len) {
+  if (client == NULL || client->bridge_request_id == 0
+      || client->response_started || client->interim_response_started)
+    return -1;
+  return halo_write_buffer((uv_stream_t*) &client->handle,
+                           client,
+                           response,
+                           response_len,
+                           HALO_WRITE_DISPATCH_INTERIM);
+}
+
+int halo_client_bridge_start_response_stream(struct halo_client* client,
+                                             const char* response,
+                                             size_t response_len) {
+  if (client == NULL || client->bridge_request_id == 0
+      || client->response_started || client->interim_response_started)
+    return -1;
+  if (!halo_request_body_complete_for_reuse(client))
+    client->should_keep_alive = 0;
+  return halo_write_buffer((uv_stream_t*) &client->handle,
+                           client,
+                           response,
+                           response_len,
+                           HALO_WRITE_RESPONSE_STREAM_START);
+}
+
+int halo_client_bridge_write_response_chunk(struct halo_client* client,
+                                            const char* response,
+                                            size_t response_len) {
+  if (client == NULL || client->bridge_request_id == 0
+      || !client->response_started || client->interim_response_started)
+    return -1;
+  return halo_write_buffer((uv_stream_t*) &client->handle,
+                           client,
+                           response,
+                           response_len,
+                           HALO_WRITE_RESPONSE_CHUNK);
+}
+
+int halo_client_bridge_finish_response_stream(struct halo_client* client) {
+  if (client == NULL || client->bridge_request_id == 0
+      || !client->response_started || client->interim_response_started)
+    return -1;
+  return halo_write_buffer((uv_stream_t*) &client->handle,
+                           client,
+                           "0\r\n\r\n",
+                           5,
+                           HALO_WRITE_RESPONSE_STREAM_FINISH);
+}
+
+int halo_client_bridge_reject_busy(struct halo_client* client) {
+  if (client == NULL || client->response_started
+      || client->interim_response_started)
+    return -1;
+  client->should_keep_alive = 0;
+  return halo_write_response((uv_stream_t*) &client->handle,
+                             client,
+                             halo_service_unavailable_response,
+                             sizeof(halo_service_unavailable_response) - 1);
+}
+
+int halo_client_bridge_request_body(struct halo_client* client) {
+  uv_stream_t* stream;
+
+  if (client == NULL || client->bridge_request_id == 0
+      || client->response_started || client->interim_response_started)
+    return -1;
+  if (client->awaiting_request_body)
+    return 0;
+  stream = (uv_stream_t*) &client->handle;
+  return halo_wait_for_request_body(stream, client);
+}
+
+void halo_client_bridge_close(struct halo_client* client) {
+  halo_close_client(client);
+}
+
 static int halo_write_continue_response(uv_stream_t* stream,
                                         struct halo_client* client) {
   return halo_write_buffer(stream,
@@ -2213,9 +1961,72 @@ static int halo_write_continue_response(uv_stream_t* stream,
                            HALO_WRITE_EXPECT_CONTINUE);
 }
 
+static const char* halo_error_reason_phrase(int status) {
+  switch (status) {
+    case 400: return "Bad Request";
+    case 408: return "Request Timeout";
+    case 411: return "Length Required";
+    case 413: return "Content Too Large";
+    case 414: return "URI Too Long";
+    case 417: return "Expectation Failed";
+    case 431: return "Request Header Fields Too Large";
+    case 505: return "HTTP Version Not Supported";
+    default: return "Bad Request";
+  }
+}
+
+static int halo_write_bridge_error_response(uv_stream_t* stream,
+                                            struct halo_client* client,
+                                            int status,
+                                            const char* body) {
+  const char* reason;
+  char* response;
+  int response_len;
+  int result;
+
+  reason = halo_error_reason_phrase(status);
+  if (getenv("HALO_BRIDGE_TRACE") != NULL)
+    fprintf(stderr, "halo parser: sending error status=%d\n", status);
+  response_len = snprintf(NULL,
+                          0,
+                          "HTTP/1.1 %d %s\r\n"
+                          "Content-Length: %zu\r\n"
+                          "Connection: close\r\n"
+                          "Content-Type: text/plain; charset=utf-8\r\n"
+                          "\r\n"
+                          "%s",
+                          status,
+                          reason,
+                          strlen(body),
+                          body);
+  if (response_len < 0)
+    return -1;
+  response = malloc((size_t) response_len + 1);
+  if (response == NULL)
+    return -1;
+  snprintf(response,
+           (size_t) response_len + 1,
+           "HTTP/1.1 %d %s\r\n"
+           "Content-Length: %zu\r\n"
+           "Connection: close\r\n"
+           "Content-Type: text/plain; charset=utf-8\r\n"
+           "\r\n"
+           "%s",
+           status,
+           reason,
+           strlen(body),
+           body);
+  client->should_keep_alive = 0;
+  result = halo_write_response(stream, client, response, (size_t) response_len);
+  free(response);
+  return result;
+}
+
 static void halo_close_with_bad_request(uv_stream_t* stream, struct halo_client* client) {
-  if (halo_try_write_serialized_bad_request(stream, client) != 0
-      && halo_write_internal_server_error_response(stream, client) != 0)
+  if (halo_write_bridge_error_response(stream,
+                                       client,
+                                       400,
+                                       "bad request\n") != 0)
     halo_close_client(client);
 }
 
@@ -2223,8 +2034,7 @@ static void halo_close_with_error_response(uv_stream_t* stream,
                                            struct halo_client* client,
                                            int status,
                                            const char* body) {
-  if (halo_try_write_serialized_error_response(stream, client, status, body) != 0
-      && halo_write_internal_server_error_response(stream, client) != 0)
+  if (halo_write_bridge_error_response(stream, client, status, body) != 0)
     halo_close_client(client);
 }
 
@@ -2285,8 +2095,25 @@ static int halo_capture_paused_remainder(struct halo_client* client,
 static int halo_handle_parser_result(uv_stream_t* stream,
                                      struct halo_client* client,
                                      llhttp_errno_t err) {
+  if (err == HPE_OK
+      && client->awaiting_request_body
+      && client->body_chunk_delivered) {
+    client->awaiting_request_body = 0;
+    client->body_chunk_delivered = 0;
+    uv_read_stop(stream);
+    return 1;
+  }
+
   if (err == HPE_OK)
     return 0;
+
+  if (err != HPE_PAUSED && getenv("HALO_BRIDGE_TRACE") != NULL)
+    fprintf(stderr,
+            "halo parser: error=%s reason=%s body=%zu expected=%" PRIu64 "\n",
+            llhttp_errno_name(err),
+            llhttp_get_error_reason(&client->parser),
+            client->body_bytes_read,
+            client->request.content_length);
 
   if (err == HPE_PAUSED && client->pending_continue) {
     if (halo_client_start_request_timeout(client) != 0) {
@@ -2301,6 +2128,7 @@ static int halo_handle_parser_result(uv_stream_t* stream,
   if (err == HPE_PAUSED && client->dispatch_after_headers) {
     client->dispatch_after_headers = 0;
     client->dispatch_started = 1;
+    uv_read_stop(stream);
     halo_client_stop_timer(client);
     if (halo_try_dispatch_request(stream, client) != 0
         && halo_write_internal_server_error_response(stream, client) != 0)
@@ -2309,13 +2137,9 @@ static int halo_handle_parser_result(uv_stream_t* stream,
   }
 
   if (err == HPE_PAUSED && client->awaiting_request_body) {
-    int token;
-
     client->awaiting_request_body = 0;
-    token = client->dispatch_resume_token;
-    client->dispatch_resume_token = 0;
-    if (halo_resume_buffered_request_body(stream, client, token) != 0
-        && halo_write_internal_server_error_response(stream, client) != 0)
+    client->body_chunk_delivered = 0;
+    if (client->message_complete && halo_bridge_emit_body_end(client) != 0)
       halo_close_client(client);
     return 1;
   }
@@ -2325,6 +2149,7 @@ static int halo_handle_parser_result(uv_stream_t* stream,
       return 1;
     }
 
+    uv_read_stop(stream);
     halo_client_stop_timer(client);
     if (halo_try_dispatch_request(stream, client) != 0
         && halo_write_internal_server_error_response(stream, client) != 0)
@@ -2342,6 +2167,16 @@ static int halo_handle_parser_result(uv_stream_t* stream,
   }
 
   halo_client_stop_timer(client);
+  if (getenv("HALO_BRIDGE_TRACE") != NULL)
+    fprintf(stderr,
+            "halo parser: unhandled state error=%s pending=%d dispatch=%d "
+            "awaiting=%d delivered=%d complete=%d\n",
+            llhttp_errno_name(err),
+            client->pending_continue,
+            client->dispatch_after_headers,
+            client->awaiting_request_body,
+            client->body_chunk_delivered,
+            client->message_complete);
   halo_close_with_bad_request(stream, client);
   return 1;
 }
@@ -2454,28 +2289,18 @@ static void halo_connection_cb(uv_stream_t* server, int status) {
     return;
   }
 
-  if (uv_timer_init(server->loop, &client->dispatch_timer) != 0) {
-    uv_close((uv_handle_t*) &client->timer, halo_on_handle_closed);
-    uv_close((uv_handle_t*) &client->handle, halo_on_handle_closed);
-    return;
-  }
-
   llhttp_init(&client->parser, HTTP_REQUEST, halo_http_settings());
   llhttp_set_lenient_version(&client->parser, 1);
   client->parser.data = client;
   client->handle.data = client;
   client->timer.data = client;
-  client->dispatch_timer.data = client;
   client->timer_initialized = 1;
-  client->dispatch_timer_initialized = 1;
   client->dispatch_started = 0;
   client->dispatch_after_headers = 0;
   client->awaiting_request_body = 0;
-  client->awaiting_timeout = 0;
-  client->request_body_stream_offset = 0;
-  client->active_borrowed_request = NULL;
-  client->active_borrowed_request_value = Val_unit;
-  client->active_borrowed_request_rooted = 0;
+  client->body_chunk_delivered = 0;
+  client->bridge_request_id = 0;
+  client->bridge_response_in_flight = 0;
   client->tls_conn = NULL;
 
   if (uv_accept(server, (uv_stream_t*) &client->handle) != 0) {
@@ -2552,8 +2377,7 @@ CAMLprim value ocaml_halo_create_server(value runtime,
                                         value tls_session_ticket_decrypt_lifetime_secs,
                                         value tls_session_ticket_initial_count,
                                         value tls_server_keying_material_lifetime_secs,
-                                        value tls_max_early_data_size,
-                                        value router) {
+                                        value tls_max_early_data_size) {
   CAMLparam5(runtime, host, port, backlog, max_request_size);
   CAMLxparam5(request_timeout_ms,
               idle_timeout_ms,
@@ -2570,11 +2394,10 @@ CAMLprim value ocaml_halo_create_server(value runtime,
               tls_session_tickets_enabled,
               tls_session_ticket_keys_path,
               tls_session_ticket_encrypt_decrypt_lifetime_secs);
-  CAMLxparam5(tls_session_ticket_decrypt_lifetime_secs,
+  CAMLxparam4(tls_session_ticket_decrypt_lifetime_secs,
               tls_session_ticket_initial_count,
               tls_server_keying_material_lifetime_secs,
-              tls_max_early_data_size,
-              router);
+              tls_max_early_data_size);
   CAMLlocal1(listener_value);
   struct halo_listener_pair pair;
   struct halo_runtime* rt;
@@ -2591,7 +2414,7 @@ CAMLprim value ocaml_halo_create_server(value runtime,
 
   rt = halo_runtime_get(runtime);
   if (halo_listener_pair_create(&pair,
-                                router,
+                                rt,
                                 max_request_size,
                                 request_timeout_ms,
                                 idle_timeout_ms,
@@ -2699,25 +2522,5 @@ CAMLprim value ocaml_halo_create_server_bytecode(value* argv, int argn) {
                                   argv[20],
                                   argv[21],
                                   argv[22],
-                                  argv[23],
-                                  argv[24]);
-}
-
-CAMLprim value ocaml_halo_server_close(value server) {
-  CAMLparam1(server);
-  struct halo_listener_ref** slot;
-  struct halo_listener_ref* ref;
-  struct halo_listener* listener;
-
-  slot = halo_listener_slot(server);
-  ref = *slot;
-  if (ref == NULL || ref->handle == NULL)
-    CAMLreturn(halo_option_none());
-
-  listener = halo_listener_get(server);
-  *slot = NULL;
-  ref->ocaml_alive = 0;
-  uv_close((uv_handle_t*) &listener->server, halo_on_handle_closed);
-  halo_listener_ref_release(ref);
-  CAMLreturn(halo_option_none());
+                                  argv[23]);
 }

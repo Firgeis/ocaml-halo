@@ -1,6 +1,3 @@
-type _ Effect.t += Drain_request_body : string Effect.t
-type _ Effect.t += Drain_request_body_with_prefix : string -> string Effect.t
-
 module Http_method : sig
   type t =
     | GET
@@ -53,13 +50,12 @@ type request = {
 type response = {
   status : int;
   headers : (string * string) list;
-  body : string;
+  body : response_body;
 }
 
-type response_head = {
-  status : int;
-  headers : (string * string) list;
-}
+and response_body =
+  | Fixed_body of string
+  | Stream_body of (yield:(string -> unit) -> unit)
 
 type informational_response = {
   status : int;
@@ -80,7 +76,11 @@ module Request : sig
   val request_method : t -> http_method option
   val raw_target : t -> string
   val target : t -> request_target
-  val body : t -> string
+  val body : t -> Body.t
+  val switch : t -> Eio.Switch.t
+  val id : t -> int64
+  val send_informational : t -> informational_response -> unit
+  val on_disconnect : t -> (unit -> unit) -> unit
   val header : t -> string -> string option
   val headers : t -> string -> string list
   val fold_headers : t -> init:'a -> f:('a -> string -> string -> 'a) -> 'a
@@ -132,29 +132,29 @@ val use : middleware -> t -> t
 val empty : t
 val or_else : t -> t -> t
 val ( <|> ) : t -> t -> t
-val response_head : int -> (string * string) list -> response_head
 val dispatch : t -> request -> response
+
+module Runtime : sig
+  val dispatch :
+    t ->
+    request ->
+    raw_headers:(string * string) list ->
+    body:Body.t ->
+    request_id:int64 ->
+    request_switch:Eio.Switch.t ->
+    send_informational:(informational_response -> unit) ->
+    on_disconnect:((unit -> unit) -> unit) ->
+    response
+end
+
 val with_header : string -> string -> response -> response
 val informational : int -> (string * string) list -> informational_response
 val with_content_type : string -> response -> response
 val text : int -> string -> response
 val html : int -> string -> response
 val json : int -> string -> response
-
-module Borrowed : sig
-  type borrowed_request
-
-  val request_method_text : borrowed_request -> string
-  val request_method : borrowed_request -> http_method option
-  val target : borrowed_request -> string
-  val body : borrowed_request -> string
-  val full_body : borrowed_request -> string
-  val header : borrowed_request -> string -> string option
-  val headers : borrowed_request -> string -> string list
-  val fold_headers :
-    borrowed_request -> init:'a -> f:('a -> string -> string -> 'a) -> 'a
-  val copy_headers : borrowed_request -> (string * string) list
-  val copy_raw_headers : borrowed_request -> (string * string) list
-  val materialize : borrowed_request -> request
-  val dispatch_borrowed : t -> borrowed_request -> response
-end
+val stream :
+  ?headers:(string * string) list ->
+  status:int ->
+  (yield:(string -> unit) -> unit) ->
+  response

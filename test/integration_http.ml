@@ -263,16 +263,6 @@ let server_path () =
         path
   | None -> fail "expected HALO_SERVER_BIN in the test environment"
 
-let borrow_violation_server_path () =
-  match Sys.getenv_opt "HALO_BORROW_VIOLATION_SERVER_BIN" with
-  | Some path ->
-      if Filename.is_relative path then
-        Filename.concat (Sys.getcwd ()) path
-      else
-        path
-  | None ->
-      fail "expected HALO_BORROW_VIOLATION_SERVER_BIN in the test environment"
-
 let tls_cert_fixture_path () =
   match Sys.getenv_opt "HALO_TLS_CERT_FIXTURE" with
   | Some path -> path
@@ -334,9 +324,13 @@ let assert_response ?connection ?content_length ~status ~body response =
     | Some parts -> parts
     | None -> fail "response did not contain a header/body separator"
   in
-  Alcotest.(check bool) "status line"
-    true
-    (String.starts_with ~prefix:status response);
+  if not (String.starts_with ~prefix:status response) then (
+    let actual =
+      match String.index_opt response '\n' with
+      | Some index -> String.sub response 0 index |> String.trim
+      | None -> response
+    in
+    fail "expected status line %S, received %S" status actual);
   (match content_length with
   | None -> ()
   | Some expected ->
@@ -452,7 +446,7 @@ let short_timeout_env =
   [("HALO_REQUEST_TIMEOUT_MS", "100"); ("HALO_IDLE_TIMEOUT_MS", "100")]
 
 let with_server_capture_log path f =
-  let log_path = Filename.temp_file "ocaml-halo-borrow-violation" ".log" in
+  let log_path = Filename.temp_file "ocaml-halo-server" ".log" in
   let devnull = Unix.openfile "/dev/null" [Unix.O_RDWR] 0 in
   let log_fd =
     Unix.openfile log_path [Unix.O_CREAT; Unix.O_TRUNC; Unix.O_RDWR] 0o600
@@ -468,14 +462,11 @@ let with_server_capture_log path f =
         ~finally:(fun () ->
           (try Unix.kill pid Sys.sigint with
           | Unix.Unix_error (Unix.ESRCH, _, _) -> ());
-          (try
-             ignore (wait_for_exit pid ~timeout:2.0)
-           with
+          (try ignore (wait_for_exit pid ~timeout:2.0) with
           | Unix.Unix_error (Unix.ECHILD, _, _) -> ()))
         (fun () ->
           wait_until_listening ~timeout:2.0;
-          let result = f pid log_path in
-          result))
+          f pid log_path))
 
 let test_fixed_response () =
   with_server (fun () ->
@@ -496,6 +487,24 @@ let test_tls_https_response () =
       assert_response ~connection:"close" ~content_length:12
         ~status:"HTTP/1.1 200 OK"
         ~body:"hello world\n" response)
+
+let test_tls_large_request_body () =
+  with_server
+    ~env:(
+      ("HALO_MAX_REQUEST_SIZE", string_of_int (256 * 1024))
+      :: tls_server_env ())
+    (fun () ->
+      let body = String.make (128 * 1024) 't' in
+      let request =
+        Printf.sprintf
+          "POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
+          (String.length body) body
+      in
+      let response = tls_request_response request in
+      let response_body = "submitted:" ^ body in
+      assert_response ~connection:"close"
+        ~content_length:(String.length response_body)
+        ~status:"HTTP/1.1 200 OK" ~body:response_body response)
 
 let test_tls_rejects_plaintext_http () =
   with_server ~env:(tls_server_env () @ short_timeout_env) (fun () ->
@@ -549,27 +558,6 @@ let test_accepts_body_request () =
       assert_response ~connection:"close" ~content_length:15
         ~status:"HTTP/1.1 200 OK"
         ~body:"submitted:hello" response)
-
-let test_borrow_violation_returns_500 () =
-  let path = borrow_violation_server_path () in
-  with_server_capture_log path (fun _pid log_path ->
-      let first_response =
-        request_response
-          "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-      in
-      assert_response ~connection:"close" ~content_length:3
-        ~status:"HTTP/1.1 200 OK"
-        ~body:"ok\n" first_response;
-      let second_response =
-        request_response
-          "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-      in
-      assert_response ~connection:"close" ~content_length:22
-        ~status:"HTTP/1.1 500 Internal Server Error"
-        ~body:"internal server error\n" second_response;
-      let log = In_channel.with_open_bin log_path In_channel.input_all in
-      Alcotest.(check bool) "borrow violation exception not logged" false
-        (contains "Invalid_argument(\"borrowed request escaped its scope\")" log))
 
 let test_head_suppresses_response_body () =
   with_server (fun () ->
@@ -1434,12 +1422,12 @@ let () =
         [
           timed_test_case "fixed HTTP response" `Quick test_fixed_response;
           timed_test_case "TLS HTTPS response" `Quick test_tls_https_response;
+          timed_test_case "TLS streams a large request body" `Quick
+            test_tls_large_request_body;
           timed_test_case "TLS rejects plaintext HTTP" `Quick
             test_tls_rejects_plaintext_http;
           timed_test_case "TLS rejects malformed ticket key file on startup"
             `Quick test_tls_rejects_malformed_ticket_key_file_on_startup;
-          timed_test_case "borrow violation returns 500" `Quick
-            test_borrow_violation_returns_500;
           timed_test_case "rejects absolute-form target" `Quick
             test_rejects_absolute_target;
           timed_test_case "accepts request body" `Quick test_accepts_body_request;

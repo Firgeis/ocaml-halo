@@ -122,7 +122,7 @@ let write_disconnect_marker () =
       Out_channel.with_open_bin path (fun channel ->
           output_string channel "client disconnected\n")
 
-let run_server runtime =
+let run_server clock =
   let router =
     Halo.Router.(
       route
@@ -130,10 +130,10 @@ let run_server runtime =
           let+ () = request_method_is GET
           and+ () = path_segment "early"
           and+ () = path_end in
-          fun _request ->
-            Halo.Server_effects.send_informational
+          fun request ->
+            Request.send_informational request
               (informational 102 [("X-Phase", "processing")]);
-            Halo.Server_effects.send_informational
+            Request.send_informational request
               (informational 103
                  [("Link", "</style.css>; rel=preload; as=style")]);
             text 200 "hello world\n")
@@ -175,7 +175,7 @@ let run_server runtime =
               ~headers:[("Content-Type", "text/plain; charset=utf-8")]
               (fun ~yield ->
                 yield "hello ";
-                Halo.Server_effects.sleep_ms 150;
+                Eio.Time.sleep clock 0.15;
                 yield "world\n"))
       <|>
       route
@@ -201,7 +201,7 @@ let run_server runtime =
                 send
                   (Halo.Sse.event ~event:"message" ~id:"1"
                      ["hello"; "world"]);
-                Halo.Server_effects.sleep_ms 150;
+                Eio.Time.sleep clock 0.15;
                 send (Halo.Sse.comment "keep-alive");
                 send (Halo.Sse.event ~retry_ms:1500 ["done"])))
       <|>
@@ -212,13 +212,13 @@ let run_server runtime =
           and+ () = path_segment "disconnect"
           and+ () = path_end
           and+ () = require_body in
-          fun _request ->
-            Halo.Server_effects.on_client_disconnect write_disconnect_marker;
+          fun request ->
+            Request.on_disconnect request write_disconnect_marker;
             Halo.Stream.respond ~status:200
               ~headers:[("Content-Type", "text/plain; charset=utf-8")]
               (fun ~yield ->
                 yield "hello ";
-                ignore (Halo.Server_effects.await_request_body ())))
+                ignore (Halo.Body.read (Request.body request))))
       <|>
       route
         Matcher.(
@@ -290,7 +290,9 @@ let run_server runtime =
           and+ () = path_end
           and+ () = require_body in
           fun (request : Halo.Router.Request.t) ->
-            text 200 ("submitted:" ^ Halo.Router.Request.body request))
+            text 200
+              ("submitted:"
+              ^ Halo.Body.read_all (Halo.Router.Request.body request)))
       <|>
       route
         Matcher.(
@@ -299,7 +301,9 @@ let run_server runtime =
           and+ () = path_end
           and+ () = require_body in
           fun (request : Halo.Router.Request.t) ->
-            text 200 ("patched:" ^ Halo.Router.Request.body request)))
+            text 200
+              ("patched:"
+              ^ Halo.Body.read_all (Halo.Router.Request.body request))))
   in
   let request_timeout_ms =
     int_env_or_default "HALO_REQUEST_TIMEOUT_MS" 30000
@@ -317,23 +321,12 @@ let run_server runtime =
       ?tls:(tls_config_from_env ())
       router
   in
-  let server =
-    Halo.Server.listen runtime config
-    |> Halo.Server_effects.or_fail_runtime
-  in
-  Halo.Server_effects.finalize_runtime (fun () ->
-      Halo.Server_effects.or_fail_runtime_status (Halo.Server.close_server server));
   Printf.printf "server on %s:%d using %s\n%!" config.host config.port
     (Halo.Server.runtime_backend_name ());
-  Halo.Server.run runtime;
-  Ok ()
-
-let run () = Halo.Server.with_runtime run_server
+  Halo.Server.run [config]
 
 let () =
-  Sys.catch_break true;
-  match run () with
-  | Error error ->
-      prerr_endline (Halo.Error.to_string error);
-      exit 1
-  | Ok () -> ()
+  try Eio_main.run @@ fun env -> run_server (Eio.Stdenv.clock env)
+  with Halo.Server.Runtime_error message ->
+    prerr_endline message;
+    exit 1
