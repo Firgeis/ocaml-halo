@@ -13,6 +13,9 @@ let float_env_or_default name default =
 let test_timeout_seconds =
   float_env_or_default "HALO_TEST_TIMEOUT_SECONDS" 10.0
 
+let server_shutdown_timeout_seconds =
+  float_env_or_default "HALO_SERVER_SHUTDOWN_TIMEOUT_SECONDS" 5.0
+
 let with_test_timeout name f =
   let previous_signal = Sys.signal Sys.sigalrm (Sys.Signal_handle (fun _ ->
       raise (Test_timeout name)))
@@ -241,18 +244,44 @@ let request_response ?(body_expected = true) request =
       write_all fd request 0 (String.length request);
       read_response ~body_expected fd)
 
-let wait_for_exit pid ~timeout =
+let wait_for_exit_status pid ~timeout =
   let deadline = Unix.gettimeofday () +. timeout in
   let rec loop () =
     match Unix.waitpid [Unix.WNOHANG] pid with
     | 0, _ ->
         if Unix.gettimeofday () >= deadline then
-          fail "server process %d did not exit after SIGINT" pid;
-        Unix.sleepf 0.05;
-        loop ()
-    | _, status -> status
+          None
+        else (
+          Unix.sleepf 0.05;
+          loop ())
+    | _, status -> Some status
   in
   loop ()
+
+let wait_for_exit pid ~timeout =
+  match wait_for_exit_status pid ~timeout with
+  | Some status -> status
+  | None -> fail "server process %d did not exit after SIGINT" pid
+
+let kill_process pid signal =
+  try Unix.kill pid signal with Unix.Unix_error (Unix.ESRCH, _, _) -> ()
+
+let rec reap_process pid =
+  try ignore (Unix.waitpid [] pid) with
+  | Unix.Unix_error (Unix.EINTR, _, _) -> reap_process pid
+  | Unix.Unix_error (Unix.ECHILD, _, _) -> ()
+
+let stop_server pid log_path =
+  kill_process pid Sys.sigint;
+  match wait_for_exit_status pid ~timeout:server_shutdown_timeout_seconds with
+  | Some status -> status
+  | None ->
+      kill_process pid Sys.sigkill;
+      reap_process pid;
+      let log = In_channel.with_open_bin log_path In_channel.input_all in
+      fail
+        "server process %d did not exit %.1fs after SIGINT and was killed\n%s"
+        pid server_shutdown_timeout_seconds log
 
 let server_path () =
   match Sys.getenv_opt "HALO_SERVER_BIN" with
@@ -363,9 +392,7 @@ let with_server ?(env = []) f =
       in
       Fun.protect
         ~finally:(fun () ->
-          (try Unix.kill pid Sys.sigint with
-          | Unix.Unix_error (Unix.ESRCH, _, _) -> ());
-          match wait_for_exit pid ~timeout:2.0 with
+          match stop_server pid log_path with
           | Unix.WEXITED 0 ->
               ()
           | Unix.WSIGNALED signal when signal = Sys.sigint ->
