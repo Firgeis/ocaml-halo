@@ -1,7 +1,8 @@
 type listener
 type t
 
-val listener : Router.t -> listener
+val listener :
+  early_data_policy:Server_config.early_data_policy -> Router.t -> listener
 
 val create :
   runtime:Server_backend.t ->

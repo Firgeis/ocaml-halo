@@ -87,7 +87,7 @@ let run_process ?input ?(close_stdin = true) command =
       { stdout; stderr; status })
 
 let run_s2nc ?ticket_out ?ticket_in ?early_data_file ?send_file ?input
-    ?(close_stdin = false) () =
+    ?(echo = false) ?(close_stdin = false) () =
   let args =
     [
       Filename.quote (s2nc_bin_path ());
@@ -112,6 +112,7 @@ let run_s2nc ?ticket_out ?ticket_in ?early_data_file ?send_file ?input
     (match send_file with
     | None -> []
     | Some path -> ["--send-file"; Filename.quote path])
+    @ (if echo then ["--echo"] else [])
     @ ["127.0.0.1"; "8443"]
   in
   run_process ?input ~close_stdin (String.concat " " args)
@@ -136,20 +137,24 @@ let assert_process_success result =
       fail "process stopped by signal %d\nstdout:\n%s\nstderr:\n%s" signal
         result.stdout result.stderr
 
-let with_live_server ?tls f =
+let with_live_server ?tls ?early_data_policy ?router f =
   let router =
-    Halo.Router.(
-      route
-        Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_end in
-          fun _request -> text Status.ok "hello world\n"))
+    Option.value router
+      ~default:
+        Halo.Router.(
+          route
+            Matcher.(
+              let+ () = request_method_is GET
+              and+ () = path_end in
+              fun _request -> text Status.ok "hello world\n"))
   in
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let shutdown = Halo.Server.Shutdown.create () in
   let started, notify_started = Eio.Promise.create () in
-  let config = Halo.Server.Config.create ~port:8443 ?tls router in
+  let config =
+    Halo.Server.Config.create ~port:8443 ?tls ?early_data_policy router
+  in
   let server =
     Eio.Fiber.fork_promise ~sw (fun () ->
         Halo.Server.run ~shutdown ~handle_sigint:false
@@ -184,6 +189,17 @@ let tls_resumption_config ?session_ticket_keys_path () =
       | Some _ -> Some (10 * 365 * 24 * 60 * 60)
       | None -> None)
     ?session_ticket_keys_path ()
+
+let tls_early_data_config () =
+  Halo.Server.Config.tls
+    ~cert_chain_path:(tls_cert_fixture_path ())
+    ~private_key_path:(tls_key_fixture_path ())
+    ~minimum_protocol_version:Halo.Server.TLS13
+    ~session_tickets_enabled:true
+    ~session_ticket_keys_path:(tls_ticket_keys_fixture_path ())
+    ~session_ticket_encrypt_decrypt_lifetime_secs:(10 * 365 * 24 * 60 * 60)
+    ~session_ticket_decrypt_lifetime_secs:(10 * 365 * 24 * 60 * 60)
+    ~max_early_data_size:4096 ()
 
 let test_runtime_metrics_defaults () =
   let metrics = with_live_server (fun () -> ()) in
@@ -276,7 +292,7 @@ let test_tls_metrics_count_ephemeral_resumption_and_restart_invalidation () =
           assert_int64_equal "restart invalidates saved session resumed handshakes" 0L
             metrics_second_run.tls_resumed_handshakes))
 
-let test_tls_early_data_accepts_first_use_and_rejects_replay () =
+let test_tls_early_data_defaults_to_425_and_rejects_replay () =
   with_temp_path "halo-session" ".bin" (fun session_path ->
       with_temp_file_contents "halo-early" ".txt"
         "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
@@ -284,19 +300,7 @@ let test_tls_early_data_accepts_first_use_and_rejects_replay () =
           let ticket_request =
             "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
           in
-          let tls =
-            Halo.Server.Config.tls
-              ~cert_chain_path:(tls_cert_fixture_path ())
-              ~private_key_path:(tls_key_fixture_path ())
-              ~minimum_protocol_version:Halo.Server.TLS13
-              ~session_tickets_enabled:true
-              ~session_ticket_keys_path:(tls_ticket_keys_fixture_path ())
-              ~session_ticket_encrypt_decrypt_lifetime_secs:
-                (10 * 365 * 24 * 60 * 60)
-              ~session_ticket_decrypt_lifetime_secs:
-                (10 * 365 * 24 * 60 * 60)
-              ~max_early_data_size:4096 ()
-          in
+          let tls = tls_early_data_config () in
           let metrics =
             with_live_tls_server tls (fun () ->
                 let prime =
@@ -307,11 +311,15 @@ let test_tls_early_data_accepts_first_use_and_rejects_replay () =
                 assert_nonempty_file session_path;
                 let first_early =
                   run_s2nc ~ticket_in:session_path
-                    ~early_data_file:early_data_path ~close_stdin:true ()
+                    ~early_data_file:early_data_path ~echo:true ~close_stdin:false
+                    ()
                 in
                 assert_process_success first_early;
                 Alcotest.(check bool) "early data accepted" true
                   (contains "Early Data status: ACCEPTED" first_early.stdout);
+                if not (contains "HTTP/1.1 425 Too Early" first_early.stdout) then
+                  fail "expected 425 response\nstdout:\n%s\nstderr:\n%s"
+                    first_early.stdout first_early.stderr;
                 let replay =
                   run_s2nc ~ticket_in:session_path
                     ~early_data_file:early_data_path ~close_stdin:true ()
@@ -326,6 +334,49 @@ let test_tls_early_data_accepts_first_use_and_rejects_replay () =
           assert_int64_equal "0-rtt handshake failures" 0L
             metrics.tls_handshake_failures))
 
+let test_tls_early_data_policy_opts_in_and_marks_request () =
+  with_temp_path "halo-session" ".bin" (fun session_path ->
+      with_temp_file_contents "halo-early" ".txt"
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        (fun early_data_path ->
+          let router =
+            Halo.Router.(
+              route
+                Matcher.(
+                  let+ () = request_method_is GET
+                  and+ () = path_end in
+                  fun request ->
+                    text Status.ok
+                      (if Request.is_early_data request then "early\n"
+                       else "regular\n")))
+          in
+          let early_data_policy ~method_text ~target ~headers:_ =
+            String.equal method_text "GET" && String.equal target "/"
+          in
+          let tls = tls_early_data_config () in
+          ignore
+            (with_live_server ~tls ~early_data_policy ~router (fun () ->
+                 let prime =
+                   run_s2nc ~ticket_out:session_path
+                     ~input:"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                     ~close_stdin:false ()
+                 in
+                 assert_process_success prime;
+                 assert_nonempty_file session_path;
+                 Alcotest.(check bool) "ordinary request marker" true
+                   (contains "regular\n" prime.stdout);
+                 let early =
+                   run_s2nc ~ticket_in:session_path
+                     ~early_data_file:early_data_path ~echo:true ~close_stdin:false
+                     ()
+                 in
+                 assert_process_success early;
+                 Alcotest.(check bool) "early data accepted" true
+                   (contains "Early Data status: ACCEPTED" early.stdout);
+                 if not (contains "early\n" early.stdout) then
+                   fail "expected early response marker\nstdout:\n%s\nstderr:\n%s"
+                     early.stdout early.stderr))))
+
 let () =
   Alcotest.run "runtime"
     [
@@ -339,7 +390,9 @@ let () =
           Alcotest.test_case
             "ephemeral keys resume within a process and invalidate after restart"
             `Slow test_tls_metrics_count_ephemeral_resumption_and_restart_invalidation;
-          Alcotest.test_case "early data accepts first use and rejects replay"
-            `Slow test_tls_early_data_accepts_first_use_and_rejects_replay;
+          Alcotest.test_case "early data defaults to 425 and rejects replay"
+            `Slow test_tls_early_data_defaults_to_425_and_rejects_replay;
+          Alcotest.test_case "early data policy opts in and marks request" `Slow
+            test_tls_early_data_policy_opts_in_and_marks_request;
         ] );
     ]

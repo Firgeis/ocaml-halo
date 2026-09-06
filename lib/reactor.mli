@@ -12,6 +12,7 @@ type request_event = {
   http_minor : int;
   keep_alive : bool;
   body_expected : bool;
+  is_early_data : bool;
 }
 
 type body_chunk_event = { request_id : int64; chunk : string }

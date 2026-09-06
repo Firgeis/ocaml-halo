@@ -1164,9 +1164,11 @@ static int halo_start_graceful_close(uv_stream_t* stream, struct halo_client* cl
   client->parser_error_status = 0;
   client->pending_continue = 0;
   client->dispatch_started = 0;
+  client->dispatch_pending_until_handshake = 0;
   client->dispatch_after_headers = 0;
   client->awaiting_request_body = 0;
   client->body_chunk_delivered = 0;
+  client->request_is_early_data = 0;
   client->body_bytes_read = 0;
 
   if (!client->shutdown_started) {
@@ -1311,7 +1313,16 @@ static int halo_write_internal_server_error_response(uv_stream_t* stream,
 
 static int halo_try_dispatch_request(uv_stream_t* stream,
                                      struct halo_client* client) {
-  (void) stream;
+  if (halo_tls_enabled(client)
+      && client->request_is_early_data
+      && !client->tls_handshake_complete) {
+    if (!uv_is_active((uv_handle_t*) stream)
+        && uv_read_start(stream, halo_alloc_cb, halo_read_cb) != 0) {
+      return -1;
+    }
+    client->dispatch_pending_until_handshake = 1;
+    return 0;
+  }
   halo_runtime_note_request_started(client);
   return halo_bridge_dispatch_request(client);
 }
@@ -1391,9 +1402,11 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
     client->parser_error_status = 0;
     client->pending_continue = 0;
     client->dispatch_started = 0;
+    client->dispatch_pending_until_handshake = 0;
     client->dispatch_after_headers = 0;
     client->awaiting_request_body = 0;
     client->body_chunk_delivered = 0;
+    client->request_is_early_data = 0;
     client->body_bytes_read = 0;
     llhttp_reset(&client->parser);
     llhttp_set_lenient_version(&client->parser, 1);
@@ -1435,9 +1448,11 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
   client->parser_error_status = 0;
   client->pending_continue = 0;
   client->dispatch_started = 0;
+  client->dispatch_pending_until_handshake = 0;
   client->dispatch_after_headers = 0;
   client->awaiting_request_body = 0;
   client->body_chunk_delivered = 0;
+  client->request_is_early_data = 0;
   client->body_bytes_read = 0;
   llhttp_reset(&client->parser);
   llhttp_set_lenient_version(&client->parser, 1);
@@ -1585,26 +1600,33 @@ static int halo_tls_drain_early_plaintext(uv_stream_t* stream, struct halo_clien
     if (client->tls_write_in_flight)
       return 0;
 
+    if (result == S2N_SUCCESS) {
+      if (s2n_connection_get_early_data_status(client->tls_conn, &early_status) != S2N_SUCCESS)
+        return -1;
+      if (early_status != S2N_EARLY_DATA_STATUS_OK)
+        client->tls_early_data_complete = 1;
+    }
+
     if (data_received > 0) {
       int parse_result;
 
+      client->request_is_early_data = 1;
       if (halo_client_start_request_timeout(client) != 0)
         return -1;
       parse_result =
         halo_feed_plaintext(stream, client, (const char*) plaintext, (size_t) data_received);
-      if (parse_result != 0)
-        return parse_result > 0 ? 0 : -1;
+      if (parse_result < 0)
+        return -1;
+      if (parse_result > 0 && !client->dispatch_pending_until_handshake)
+        return 0;
     }
 
     if (result == S2N_SUCCESS) {
-      if (s2n_connection_get_early_data_status(client->tls_conn, &early_status) != S2N_SUCCESS)
-        return -1;
       if (early_status == S2N_EARLY_DATA_STATUS_OK) {
         if (data_received == 0)
           return 0;
         continue;
       }
-      client->tls_early_data_complete = 1;
       return 0;
     }
 
@@ -1647,6 +1669,12 @@ static int halo_tls_drive_handshake(uv_stream_t* stream, struct halo_client* cli
         return -1;
       client->tls_handshake_complete = 1;
       halo_runtime_note_tls_handshake(client, resumed != 0);
+      if (client->dispatch_pending_until_handshake) {
+        client->dispatch_pending_until_handshake = 0;
+        if (halo_try_dispatch_request(stream, client) != 0
+            && halo_write_internal_server_error_response(stream, client) != 0)
+          return -1;
+      }
       if (halo_tls_flush_pending(stream, client) != 0)
         return -1;
       if (client->tls_write_in_flight)

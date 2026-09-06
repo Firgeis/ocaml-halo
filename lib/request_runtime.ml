@@ -106,6 +106,8 @@ module Http = struct
   let internal_server_error =
     Router.text Router.Status.internal_server_error "internal server error\n"
 
+  let too_early = Router.text Router.Status.too_early "too early\n"
+
   let not_implemented =
     Router.text Router.Status.not_implemented "not implemented\n"
 
@@ -144,7 +146,10 @@ type request_state = {
   mutable disconnect_cleanups : (unit -> unit) list;
 }
 
-type listener = { router : Router.t }
+type listener = {
+  router : Router.t;
+  early_data_policy : Server_config.early_data_policy;
+}
 
 type t = {
   runtime : Server_backend.t;
@@ -157,7 +162,7 @@ type t = {
   on_error : int64 -> exn -> unit;
 }
 
-let listener router = { router }
+let listener ~early_data_policy router = { router; early_data_policy }
 
 let create ~runtime ~listeners ~bridge_switch ~on_error =
   {
@@ -214,26 +219,40 @@ let await_write state =
   if state.disconnected then raise Client_disconnected;
   Eio.Stream.take state.write_completions
 
+let with_early_data_policy listener (event : Reactor.request_event) next =
+  if
+    event.is_early_data
+    && not
+         (listener.early_data_policy ~method_text:event.method_text
+            ~target:event.target ~headers:event.headers)
+  then Http.too_early
+  else next ()
+
+let dispatch_request listener (event : Reactor.request_event) state body
+    ~send_informational =
+  match Router.Http_method.of_string event.method_text with
+  | None -> Http.not_implemented
+  | Some Router.CONNECT -> Http.connect_not_implemented
+  | Some Router.OPTIONS when String.equal event.target "*" -> Http.options_star
+  | Some Router.TRACE -> Http.trace_response event (Body.read_all body)
+  | Some request_method ->
+      let request = Http.make_request event request_method in
+      Eio.Cancel.sub @@ fun request_cancel ->
+      state.request_cancel <- Some request_cancel;
+      Eio.Switch.run ~name:"halo-request" @@ fun request_switch ->
+      Router.Runtime.dispatch listener.router request
+        ~raw_headers:event.raw_headers ~body
+        ~is_early_data:event.is_early_data ~request_id:event.request_id
+        ~request_switch ~send_informational
+        ~on_disconnect:(on_disconnect state)
+
 let handle_request listener (event : Reactor.request_event) state body
     ~send_informational ~send_response ~send_fixed ~completed ~sent ~on_error () =
   try
     if state.disconnected then raise Client_disconnected;
-    let request_method = Router.Http_method.of_string event.method_text in
     let response =
-      match request_method with
-      | None -> Http.not_implemented
-      | Some Router.CONNECT -> Http.connect_not_implemented
-      | Some Router.OPTIONS when String.equal event.target "*" -> Http.options_star
-      | Some Router.TRACE -> Http.trace_response event (Body.read_all body)
-      | Some request_method ->
-          let request = Http.make_request event request_method in
-          Eio.Cancel.sub @@ fun request_cancel ->
-          state.request_cancel <- Some request_cancel;
-          Eio.Switch.run ~name:"halo-request" @@ fun request_switch ->
-          Router.Runtime.dispatch listener.router request
-            ~raw_headers:event.raw_headers ~body ~request_id:event.request_id
-            ~request_switch ~send_informational
-            ~on_disconnect:(on_disconnect state)
+      with_early_data_policy listener event @@ fun () ->
+      dispatch_request listener event state body ~send_informational
     in
     state.request_cancel <- None;
     send_response response

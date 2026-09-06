@@ -191,6 +191,11 @@ certificates, explicit session-ticket keys, ticket lifetimes, TLS 1.3 early
 data, and server keying-material lifetime limits. See `Halo.Server.Config` for
 the complete typed configuration surface.
 
+Early-data requests are rejected with `425 Too Early` by default. Applications
+that enable `~max_early_data_size` must explicitly opt replay-safe requests in
+with `Server.Config.create ~early_data_policy`. Accepted handlers can use
+`Router.Request.is_early_data` to distinguish early data from ordinary traffic.
+
 ## Development
 
 From a configured local switch:

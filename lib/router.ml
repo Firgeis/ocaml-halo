@@ -348,6 +348,7 @@ type request_patch = {
 
 type request_context = {
   body : Body.t;
+  is_early_data : bool;
   request_id : int64 option;
   request_switch : Eio.Switch.t option;
   send_informational : informational_response -> unit;
@@ -602,6 +603,8 @@ module Request = struct
     Req.eval request Req.Target
 
   let body request = request.context.body
+
+  let is_early_data request = request.context.is_early_data
 
   let switch request =
     match request.context.request_switch with
@@ -912,6 +915,7 @@ let dispatch router (request : request) =
   let context =
     {
       body = Body.Private.of_string request.body;
+      is_early_data = false;
       request_id = None;
       request_switch = None;
       send_informational =
@@ -939,8 +943,8 @@ let dispatch router (request : request) =
     }
 
 module Runtime = struct
-  let dispatch router (request : request) ~raw_headers ~body ~request_id ~request_switch
-      ~send_informational ~on_disconnect =
+  let dispatch router (request : request) ~raw_headers ~body ~is_early_data
+      ~request_id ~request_switch ~send_informational ~on_disconnect =
     let request_view =
       {
         request_method_text = string_of_http_method request.request_method;
@@ -952,6 +956,7 @@ module Runtime = struct
         context =
           {
             body;
+            is_early_data;
             request_id = Some request_id;
             request_switch = Some request_switch;
             send_informational;

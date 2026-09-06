@@ -23,6 +23,14 @@ type tls_client_auth_config = {
   ca_cert_dir : string option;
 }
 
+type early_data_policy =
+  method_text:string ->
+  target:string ->
+  headers:(string * string) list ->
+  bool
+(** Decide whether a TLS 1.3 early-data request may be dispatched. The request
+    body has not been consumed when this function runs. *)
+
 type tls_config = {
   cert_chain_path : string;
   private_key_path : string;
@@ -49,6 +57,7 @@ type t = {
   max_body_size : int;
   request_timeout_ms : int;
   idle_timeout_ms : int;
+  early_data_policy : early_data_policy;
   tls : tls_config option;
   controller : controller_config;
   router : Router.t;
@@ -101,6 +110,7 @@ val create :
   ?max_body_size:int ->
   ?request_timeout_ms:int ->
   ?idle_timeout_ms:int ->
+  ?early_data_policy:early_data_policy ->
   ?tls:tls_config ->
   ?controller:controller_config ->
   port:int ->
@@ -108,6 +118,7 @@ val create :
   t
 (** Build a listener configuration. Request-line, header, and body limits are
     independent and are enforced cumulatively within their respective request
-    sections. *)
+    sections. TLS 1.3 early-data requests receive 425 unless
+    [early_data_policy] explicitly accepts them. *)
 
 val validate : t -> string option

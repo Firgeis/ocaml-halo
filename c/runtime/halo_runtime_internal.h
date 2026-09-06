@@ -176,6 +176,7 @@ struct halo_client {
   int parser_error_status;
   int pending_continue;
   int dispatch_started;
+  int dispatch_pending_until_handshake;
   int dispatch_after_headers;
   int awaiting_request_body;
   int body_chunk_delivered;
@@ -186,6 +187,7 @@ struct halo_client {
   int tls_handshake_accounted;
   int tls_close_started;
   int tls_early_data_complete;
+  int request_is_early_data;
   size_t body_bytes_read;
   uint64_t bridge_request_id;
   int bridge_response_in_flight;

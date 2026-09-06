@@ -204,6 +204,9 @@ module Request : sig
   val raw_target : t -> string
   val target : t -> request_target
   val body : t -> Body.t
+  val is_early_data : t -> bool
+  (** Whether any bytes of this request arrived as TLS 1.3 early data. *)
+
   val switch : t -> Eio.Switch.t
   val id : t -> int64
   val send_informational : t -> informational_response -> unit
@@ -267,6 +270,7 @@ module Runtime : sig
     request ->
     raw_headers:(string * string) list ->
     body:Body.t ->
+    is_early_data:bool ->
     request_id:int64 ->
     request_switch:Eio.Switch.t ->
     send_informational:(informational_response -> unit) ->

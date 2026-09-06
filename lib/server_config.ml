@@ -23,6 +23,12 @@ type tls_client_auth_config = {
   ca_cert_dir : string option;
 }
 
+type early_data_policy =
+  method_text:string ->
+  target:string ->
+  headers:(string * string) list ->
+  bool
+
 type tls_config = {
   cert_chain_path : string;
   private_key_path : string;
@@ -49,6 +55,7 @@ type t = {
   max_body_size : int;
   request_timeout_ms : int;
   idle_timeout_ms : int;
+  early_data_policy : early_data_policy;
   tls : tls_config option;
   controller : controller_config;
   router : Router.t;
@@ -75,6 +82,7 @@ let default_max_header_size = 32 * 1024
 let default_max_body_size = 1024 * 1024
 let default_request_timeout_ms = 30000
 let default_idle_timeout_ms = 5000
+let default_early_data_policy ~method_text:_ ~target:_ ~headers:_ = false
 
 let default_controller =
   {
@@ -399,6 +407,7 @@ let create
     ?(max_body_size = default_max_body_size)
     ?(request_timeout_ms = default_request_timeout_ms)
     ?(idle_timeout_ms = default_idle_timeout_ms)
+    ?(early_data_policy = default_early_data_policy)
     ?tls
     ?(controller = default_controller)
     ~port
@@ -412,6 +421,7 @@ let create
     max_body_size;
     request_timeout_ms;
     idle_timeout_ms;
+    early_data_policy;
     tls;
     controller;
     router;

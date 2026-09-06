@@ -94,7 +94,7 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   method_text = halo_bridge_alloc_string(event->method_text, event->method_len);
   target = halo_bridge_alloc_string(event->target, event->target_len);
   payload = halo_bridge_alloc_string(event->payload, event->payload_len);
-  record = caml_alloc(12, 0);
+  record = caml_alloc(13, 0);
   Store_field(record, 0, Val_int(event->kind));
   Store_field(record, 1, request_id);
   Store_field(record, 2, listener_id);
@@ -106,7 +106,8 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   Store_field(record, 8, Val_int(event->http_minor));
   Store_field(record, 9, Val_bool(event->keep_alive));
   Store_field(record, 10, Val_bool(event->body_expected));
-  Store_field(record, 11, payload);
+  Store_field(record, 11, Val_bool(event->is_early_data));
+  Store_field(record, 12, payload);
   option = caml_alloc(1, 0);
   Store_field(option, 0, record);
   halo_bridge_event_destroy(event);

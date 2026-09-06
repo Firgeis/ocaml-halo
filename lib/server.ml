@@ -79,7 +79,8 @@ let listen runtime configs =
           let listener_id = Reactor.listener_id raw in
           Server_backend.release_server raw;
           Hashtbl.add listeners listener_id
-            (Request_runtime.listener config.router))
+            (Request_runtime.listener
+               ~early_data_policy:config.early_data_policy config.router))
     configs;
   listeners
 

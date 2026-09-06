@@ -566,6 +566,21 @@ let test_response_header_validation () =
         (Halo.Router.text Status.ok "ok"
         |> Halo.Router.with_header "X-Test" "safe\r\nInjected: yes"))
 
+let test_detached_request_is_not_early_data () =
+  let router =
+    Halo.Router.(
+      route
+        Matcher.(
+          let+ () = request_method_is GET
+          and+ () = path_end in
+          fun request ->
+            text Status.ok
+              (string_of_bool (Request.is_early_data request))))
+  in
+  check_response "detached request early-data marker"
+    (text Status.ok "false")
+    (Halo.Router.dispatch router (request GET "/"))
+
 let () =
   Alcotest.run "router"
     [
@@ -627,5 +642,7 @@ let () =
             test_response_status_classes_are_enforced;
           Alcotest.test_case "response header validation" `Quick
             test_response_header_validation;
+          Alcotest.test_case "detached request is not early data" `Quick
+            test_detached_request_is_not_early_data;
         ] );
     ]

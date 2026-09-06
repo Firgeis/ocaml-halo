@@ -21,6 +21,7 @@ type raw_event = {
   http_minor : int;
   keep_alive : bool;
   body_expected : bool;
+  is_early_data : bool;
   payload : string;
 }
 
@@ -35,6 +36,7 @@ type request_event = {
   http_minor : int;
   keep_alive : bool;
   body_expected : bool;
+  is_early_data : bool;
 }
 
 type body_chunk_event = { request_id : int64; chunk : string }
@@ -126,6 +128,7 @@ let event_of_raw (raw : raw_event) =
           http_minor = raw.http_minor;
           keep_alive = raw.keep_alive;
           body_expected = raw.body_expected;
+          is_early_data = raw.is_early_data;
         }
   | 1 -> Body_chunk { request_id = raw.request_id; chunk = raw.payload }
   | 2 -> Body_end raw.request_id

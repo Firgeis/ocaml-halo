@@ -192,6 +192,7 @@ int halo_bridge_dispatch_request(struct halo_client* client) {
   event->keep_alive = client->should_keep_alive;
   event->body_expected = request->content_length > 0
     || (client->parser.flags & F_CHUNKED) != 0;
+  event->is_early_data = client->request_is_early_data;
   if ((request->method_len > 0 && event->method_text == NULL)
       || (request->url_len > 0 && event->target == NULL)) {
     halo_bridge_event_destroy(event);

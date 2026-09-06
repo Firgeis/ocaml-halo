@@ -57,6 +57,7 @@ struct halo_bridge_event {
   int http_minor;
   int keep_alive;
   int body_expected;
+  int is_early_data;
   char* payload;
   size_t payload_len;
   struct halo_bridge_event* next;
