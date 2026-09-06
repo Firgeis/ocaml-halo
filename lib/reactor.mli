@@ -1,19 +1,7 @@
 exception Client_disconnected
 exception Runtime_error of string
 
-type event_kind =
-  | Request
-  | Body_chunk
-  | Body_end
-  | Response_complete
-  | Disconnected
-  | Stopped
-  | Write_complete
-  | Metrics
-  | Unknown of int
-
-type event = {
-  kind : event_kind;
+type request_event = {
   request_id : int64;
   listener_id : int64;
   method_text : string;
@@ -24,8 +12,27 @@ type event = {
   http_minor : int;
   keep_alive : bool;
   body_expected : bool;
+}
+
+type body_chunk_event = { request_id : int64; chunk : string }
+type metrics_event = { query_id : int64; payload : string }
+
+type unknown_event = {
+  kind : int;
+  request_id : int64;
   payload : string;
 }
+
+type event =
+  | Request of request_event
+  | Body_chunk of body_chunk_event
+  | Body_end of int64
+  | Response_complete of int64
+  | Disconnected of int64
+  | Stopped
+  | Write_complete of int64
+  | Metrics of metrics_event
+  | Unknown of unknown_event
 
 val create_runtime : unit -> (Server_backend.t, string) result
 val close_runtime : Server_backend.t -> string option

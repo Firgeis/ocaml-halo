@@ -24,19 +24,7 @@ type raw_event = {
   payload : string;
 }
 
-type event_kind =
-  | Request
-  | Body_chunk
-  | Body_end
-  | Response_complete
-  | Disconnected
-  | Stopped
-  | Write_complete
-  | Metrics
-  | Unknown of int
-
-type event = {
-  kind : event_kind;
+type request_event = {
   request_id : int64;
   listener_id : int64;
   method_text : string;
@@ -47,8 +35,27 @@ type event = {
   http_minor : int;
   keep_alive : bool;
   body_expected : bool;
+}
+
+type body_chunk_event = { request_id : int64; chunk : string }
+type metrics_event = { query_id : int64; payload : string }
+
+type unknown_event = {
+  kind : int;
+  request_id : int64;
   payload : string;
 }
+
+type event =
+  | Request of request_event
+  | Body_chunk of body_chunk_event
+  | Body_end of int64
+  | Response_complete of int64
+  | Disconnected of int64
+  | Stopped
+  | Write_complete of int64
+  | Metrics of metrics_event
+  | Unknown of unknown_event
 
 type command_status = Enqueued | Full | Closed | Unknown_status of int
 
@@ -104,32 +111,30 @@ external listener_id : Server_backend.server -> int64
 let enable runtime ~max_in_flight_requests ~command_capacity =
   enable_raw runtime max_in_flight_requests command_capacity
 
-let event_kind = function
-  | 0 -> Request
-  | 1 -> Body_chunk
-  | 2 -> Body_end
-  | 3 -> Response_complete
-  | 4 -> Disconnected
-  | 5 -> Stopped
-  | 6 -> Write_complete
-  | 7 -> Metrics
-  | kind -> Unknown kind
-
 let event_of_raw (raw : raw_event) =
-  {
-    kind = event_kind raw.kind;
-    request_id = raw.request_id;
-    listener_id = raw.listener_id;
-    method_text = raw.method_text;
-    target = raw.target;
-    headers = raw.headers;
-    raw_headers = raw.raw_headers;
-    http_major = raw.http_major;
-    http_minor = raw.http_minor;
-    keep_alive = raw.keep_alive;
-    body_expected = raw.body_expected;
-    payload = raw.payload;
-  }
+  match raw.kind with
+  | 0 ->
+      Request
+        {
+          request_id = raw.request_id;
+          listener_id = raw.listener_id;
+          method_text = raw.method_text;
+          target = raw.target;
+          headers = raw.headers;
+          raw_headers = raw.raw_headers;
+          http_major = raw.http_major;
+          http_minor = raw.http_minor;
+          keep_alive = raw.keep_alive;
+          body_expected = raw.body_expected;
+        }
+  | 1 -> Body_chunk { request_id = raw.request_id; chunk = raw.payload }
+  | 2 -> Body_end raw.request_id
+  | 3 -> Response_complete raw.request_id
+  | 4 -> Disconnected raw.request_id
+  | 5 -> Stopped
+  | 6 -> Write_complete raw.request_id
+  | 7 -> Metrics { query_id = raw.request_id; payload = raw.payload }
+  | kind -> Unknown { kind; request_id = raw.request_id; payload = raw.payload }
 
 let poll_event runtime = Option.map event_of_raw (poll_event_raw runtime)
 

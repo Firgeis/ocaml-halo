@@ -94,7 +94,7 @@ module Http = struct
       invalid_arg "streamed response chunks must not be empty";
     Printf.sprintf "%x\r\n%s\r\n" (String.length chunk) chunk
 
-  let make_request (event : Reactor.event) request_method =
+  let make_request (event : Reactor.request_event) request_method =
     {
       Router.request_method;
       raw_target = event.target;
@@ -117,7 +117,7 @@ module Http = struct
     |> Router.with_header "Allow"
          "GET, HEAD, POST, PATCH, PUT, DELETE, OPTIONS, TRACE"
 
-  let trace_response (event : Reactor.event) body =
+  let trace_response (event : Reactor.request_event) body =
     let request_line =
       Printf.sprintf "%s %s HTTP/%d.%d\r\n" event.method_text event.target
         event.http_major event.http_minor
@@ -206,29 +206,48 @@ let make_body runtime state ~body_expected =
 let resolve_completion state result =
   ignore (Eio.Promise.try_resolve state.complete result)
 
-let handle_terminal_event requests (event : Reactor.event) =
-  Reactor.trace "terminal event request=%Ld" event.request_id;
-  match Hashtbl.find_opt requests event.request_id with
-  | None -> ()
-  | Some state -> (
-      match event.kind with
-      | Response_complete -> resolve_completion state (Ok ())
-      | Disconnected ->
-          state.disconnected <- true;
-          run_disconnect_cleanups state;
-          Eio.Stream.add state.body_events Body_disconnected;
-          resolve_completion state (Error Client_disconnected);
-          Option.iter
-            (fun cancel -> Eio.Cancel.cancel cancel Client_disconnected)
-            state.request_cancel
-      | _ -> assert false)
+let handle_terminal_event requests request_id handle =
+  Reactor.trace "terminal event request=%Ld" request_id;
+  Option.iter handle (Hashtbl.find_opt requests request_id)
 
 let await_write state =
   if state.disconnected then raise Client_disconnected;
   Eio.Stream.take state.write_completions
 
-let run_handler runtime requests listener (event : Reactor.event) state on_error
-    =
+let handle_request listener (event : Reactor.request_event) state body
+    ~send_informational ~send_response ~send_fixed ~completed ~sent ~on_error () =
+  try
+    if state.disconnected then raise Client_disconnected;
+    let request_method = Router.Http_method.of_string event.method_text in
+    let response =
+      match request_method with
+      | None -> Http.not_implemented
+      | Some Router.CONNECT -> Http.connect_not_implemented
+      | Some Router.OPTIONS when String.equal event.target "*" -> Http.options_star
+      | Some Router.TRACE -> Http.trace_response event (Body.read_all body)
+      | Some request_method ->
+          let request = Http.make_request event request_method in
+          Eio.Cancel.sub @@ fun request_cancel ->
+          state.request_cancel <- Some request_cancel;
+          Eio.Switch.run ~name:"halo-request" @@ fun request_switch ->
+          Router.Runtime.dispatch listener.router request
+            ~raw_headers:event.raw_headers ~body ~request_id:event.request_id
+            ~request_switch ~send_informational
+            ~on_disconnect:(on_disconnect state)
+    in
+    state.request_cancel <- None;
+    send_response response
+  with
+  | exn when is_disconnect_exception exn -> completed := true
+  | exn ->
+      on_error event.request_id exn;
+      if not !sent then
+        (try send_fixed Http.internal_server_error
+         with disconnect when is_disconnect_exception disconnect ->
+           completed := true)
+
+let run_handler runtime requests listener (event : Reactor.request_event) state
+    on_error =
   Reactor.trace "handler start request=%Ld" event.request_id;
   let completed = ref false in
   let sent = ref false in
@@ -296,39 +315,10 @@ let run_handler runtime requests listener (event : Reactor.event) state on_error
         Eio.Cancel.protect (fun () ->
             try Reactor.close_request runtime event.request_id
             with Client_disconnected -> ()))
-    (fun () ->
-      try
-        if state.disconnected then raise Client_disconnected;
-        let request_method = Router.Http_method.of_string event.method_text in
-        let response =
-          match request_method with
-          | None -> Http.not_implemented
-          | Some Router.CONNECT -> Http.connect_not_implemented
-          | Some Router.OPTIONS when String.equal event.target "*" ->
-              Http.options_star
-          | Some Router.TRACE -> Http.trace_response event (Body.read_all body)
-          | Some request_method ->
-              let request = Http.make_request event request_method in
-              Eio.Cancel.sub @@ fun request_cancel ->
-              state.request_cancel <- Some request_cancel;
-              Eio.Switch.run ~name:"halo-request" @@ fun request_switch ->
-              Router.Runtime.dispatch listener.router request
-                ~raw_headers:event.raw_headers ~body ~request_id:event.request_id
-                ~request_switch ~send_informational
-                ~on_disconnect:(on_disconnect state)
-        in
-        state.request_cancel <- None;
-        send_response response
-      with
-      | exn when is_disconnect_exception exn -> completed := true
-      | exn ->
-          on_error event.request_id exn;
-          if not !sent then
-            (try send_fixed Http.internal_server_error
-             with disconnect when is_disconnect_exception disconnect ->
-               completed := true))
+    (handle_request listener event state body ~send_informational ~send_response
+       ~send_fixed ~completed ~sent ~on_error)
 
-let start_request t (event : Reactor.event) =
+let start_request t (event : Reactor.request_event) =
   Reactor.trace "request event request=%Ld listener=%Ld" event.request_id
     event.listener_id;
   match Hashtbl.find_opt t.listeners event.listener_id with
@@ -351,33 +341,42 @@ let start_request t (event : Reactor.event) =
       Eio.Fiber.fork ~sw:t.bridge_switch (fun () ->
           run_handler t.runtime t.requests listener event state t.on_error)
 
-let dispatch_event t (event : Reactor.event) =
-  match event.kind with
-  | Request -> start_request t event
-  | Body_chunk ->
+let dispatch_event t = function
+  | Reactor.Request event -> start_request t event
+  | Reactor.Body_chunk { request_id; chunk } ->
       Option.iter
-        (fun state ->
-          Eio.Stream.add state.body_events (Body_chunk event.payload))
-        (Hashtbl.find_opt t.requests event.request_id)
-  | Body_end ->
+        (fun state -> Eio.Stream.add state.body_events (Body_chunk chunk))
+        (Hashtbl.find_opt t.requests request_id)
+  | Reactor.Body_end request_id ->
       Option.iter
         (fun state -> Eio.Stream.add state.body_events Body_end)
-        (Hashtbl.find_opt t.requests event.request_id)
-  | Write_complete ->
+        (Hashtbl.find_opt t.requests request_id)
+  | Reactor.Write_complete request_id ->
       Option.iter
         (fun state -> Eio.Stream.add state.write_completions ())
-        (Hashtbl.find_opt t.requests event.request_id)
-  | Response_complete | Disconnected -> handle_terminal_event t.requests event
-  | Metrics ->
+        (Hashtbl.find_opt t.requests request_id)
+  | Reactor.Response_complete request_id ->
+      handle_terminal_event t.requests request_id (fun state ->
+          resolve_completion state (Ok ()))
+  | Reactor.Disconnected request_id ->
+      handle_terminal_event t.requests request_id (fun state ->
+          state.disconnected <- true;
+          run_disconnect_cleanups state;
+          Eio.Stream.add state.body_events Body_disconnected;
+          resolve_completion state (Error Client_disconnected);
+          Option.iter
+            (fun cancel -> Eio.Cancel.cancel cancel Client_disconnected)
+            state.request_cancel)
+  | Reactor.Metrics { query_id; payload } ->
       Option.iter
         (fun resolve ->
-          Hashtbl.remove t.metrics_waiters event.request_id;
+          Hashtbl.remove t.metrics_waiters query_id;
           let result =
-            try Ok (Reactor.metrics_of_payload event.payload) with exn -> Error exn
+            try Ok (Reactor.metrics_of_payload payload) with exn -> Error exn
           in
           ignore (Eio.Promise.try_resolve resolve result))
-        (Hashtbl.find_opt t.metrics_waiters event.request_id)
-  | Stopped ->
+        (Hashtbl.find_opt t.metrics_waiters query_id)
+  | Reactor.Stopped ->
       Hashtbl.iter
         (fun _ resolve ->
           ignore
@@ -385,8 +384,8 @@ let dispatch_event t (event : Reactor.event) =
                (Error (Reactor.Runtime_error "reactor stopped"))))
         t.metrics_waiters;
       Hashtbl.clear t.metrics_waiters
-  | Unknown kind ->
-      t.on_error event.request_id
+  | Reactor.Unknown { kind; request_id; payload = _ } ->
+      t.on_error request_id
         (Failure (Printf.sprintf "unknown bridge event %d" kind))
 
 let rec drain_events t stopped =
@@ -394,8 +393,8 @@ let rec drain_events t stopped =
   | None -> stopped
   | Some event ->
       let stopped =
-        match event.kind with
-        | Stopped ->
+        match event with
+        | Reactor.Stopped ->
             dispatch_event t event;
             true
         | _ ->
