@@ -178,8 +178,7 @@ let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router f 
         Halo.Router.(
           route
             Matcher.(
-              let+ () = request_method_is GET
-              and+ () = path_end in
+              let+ () = request_method_is GET *> path_end in
               fun _request -> text Status.ok "hello world\n"))
   in
   let config =
@@ -359,8 +358,7 @@ let test_tls_early_data_policy_opts_in_and_marks_request () =
             Halo.Router.(
               route
                 Matcher.(
-                  let+ () = request_method_is GET
-                  and+ () = path_end in
+                  let+ () = request_method_is GET *> path_end in
                   fun request ->
                     text Status.ok
                       (if Request.is_early_data request then "early\n"
@@ -402,8 +400,7 @@ let test_tls_early_data_replay_is_atomic_across_runtimes () =
             Halo.Router.(
               route
                 Matcher.(
-                  let+ () = request_method_is GET
-                  and+ () = path_end in
+                  let+ () = request_method_is GET *> path_end in
                   fun _request -> text Status.ok "hello world\n"))
           in
           let tls = tls_early_data_config () in

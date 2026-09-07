@@ -4,7 +4,7 @@ let router body =
   let open Halo.Router in
   let open Matcher in
   route
-    (let+ () = request_method_is GET and+ () = path_end in
+    (let+ () = request_method_is GET *> path_end in
      fun _request -> text Status.ok body)
 
 let run_runtime ~port ~body shutdown =

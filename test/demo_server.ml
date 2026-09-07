@@ -149,9 +149,7 @@ let run_server clock =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "early"
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_segment "early" *> path_end in
           fun request ->
             respond_with_headers informational_headers
               (fun (processing_headers, early_hints_headers) ->
@@ -163,36 +161,29 @@ let run_server clock =
       <|>
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "explode"
-          and+ () = path_end in
+          let+ () =
+            request_method_is GET *> path_segment "explode" *> path_end
+          in
           fun _request -> failwith "boom")
       <|>
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "empty"
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_segment "empty" *> path_end in
           fun _request -> text Status.no_content "should not be sent")
       <|>
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "cached"
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_segment "cached" *> path_end in
           fun _request -> text Status.not_modified "should not be sent")
       <|>
       route
         Matcher.(
-          let+ () = request_method_is HEAD
-          and+ () = path_end in
+          let+ () = request_method_is HEAD *> path_end in
           fun _request -> text Status.ok "hello world\n")
       <|>
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "stream"
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_segment "stream" *> path_end in
           fun _request ->
             respond_with_headers plain_text_headers (fun headers ->
                 Halo.Stream.respond ~status:Status.ok ~headers (fun ~yield ->
@@ -202,10 +193,12 @@ let run_server clock =
       <|>
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "stream"
-          and+ () = path_segment "explode"
-          and+ () = path_end in
+          let+ () =
+            request_method_is GET
+            *> path_segment "stream"
+            *> path_segment "explode"
+            *> path_end
+          in
           fun _request ->
             respond_with_headers plain_text_headers (fun headers ->
                 Halo.Stream.respond ~status:Status.ok ~headers (fun ~yield ->
@@ -214,9 +207,7 @@ let run_server clock =
       <|>
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "sse"
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_segment "sse" *> path_end in
           fun _request ->
             Halo.Sse.respond (fun ~send ->
                 send
@@ -228,11 +219,13 @@ let run_server clock =
       <|>
       route
         Matcher.(
-          let+ () = request_method_is POST
-          and+ () = path_segment "stream"
-          and+ () = path_segment "disconnect"
-          and+ () = path_end
-          and+ () = require_body in
+          let+ () =
+            request_method_is POST
+            *> path_segment "stream"
+            *> path_segment "disconnect"
+            *> path_end
+            *> require_body
+          in
           fun request ->
             Request.on_disconnect request write_disconnect_marker;
             respond_with_headers plain_text_headers (fun headers ->
@@ -242,9 +235,7 @@ let run_server clock =
       <|>
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "headers"
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_segment "headers" *> path_end in
           fun _request ->
             text Status.ok "headers\n"
             |> with_content_type "text/custom"
@@ -253,27 +244,33 @@ let run_server clock =
       <|>
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "inspect"
-          and+ () = path_segment "parse-only"
-          and+ () = path_end in
+          let+ () =
+            request_method_is GET
+            *> path_segment "inspect"
+            *> path_segment "parse-only"
+            *> path_end
+          in
           fun _request -> text Status.ok "ok\n")
       <|>
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "inspect"
-          and+ () = path_segment "headers"
-          and+ () = path_end in
+          let+ () =
+            request_method_is GET
+            *> path_segment "inspect"
+            *> path_segment "headers"
+            *> path_end
+          in
           fun request -> text Status.ok (visible_header_names request))
       <|>
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "inspect"
-          and+ () = path_segment "header"
-          and+ name = string_parameter
-          and+ () = path_end in
+          let+ name =
+            request_method_is GET
+            *> path_segment "inspect"
+            *> path_segment "header"
+            *> string_parameter
+            <* path_end
+          in
           fun request ->
             let body =
               match Halo.Router.Request.header request name with
@@ -284,31 +281,28 @@ let run_server clock =
       <|>
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "html"
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_segment "html" *> path_end in
           fun _request -> html Status.ok "<h1>hello world</h1>\n")
       <|>
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "json"
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_segment "json" *> path_end in
           fun _request -> json Status.ok "{\"message\":\"hello world\"}")
       <|>
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_end in
           fun _request -> text Status.ok "hello world\n")
       |> use_pre rewrite_legacy
       <|>
       route
         Matcher.(
-          let+ () = request_method_is POST
-          and+ () = path_segment "submit"
-          and+ () = path_end
-          and+ () = require_body in
+          let+ () =
+            request_method_is POST
+            *> path_segment "submit"
+            *> path_end
+            *> require_body
+          in
           fun (request : Halo.Router.Request.t) ->
             text Status.ok
               ("submitted:"
@@ -316,10 +310,12 @@ let run_server clock =
       <|>
       route
         Matcher.(
-          let+ () = request_method_is PATCH
-          and+ () = path_segment "submit"
-          and+ () = path_end
-          and+ () = require_body in
+          let+ () =
+            request_method_is PATCH
+            *> path_segment "submit"
+            *> path_end
+            *> require_body
+          in
           fun (request : Halo.Router.Request.t) ->
             text Status.ok
               ("patched:"

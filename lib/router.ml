@@ -668,6 +668,22 @@ module Matcher = struct
   let ( and+ ) left right = both left right
   let ( <*> ) = apply
 
+  let ( *> ) left right input =
+    match left input with
+    | Match (_, next) -> right next
+    | Reject response -> Reject response
+    | No_match -> No_match
+
+  let ( <* ) left right input =
+    match left input with
+    | Match (value, next) -> (
+        match right next with
+        | Match (_, final) -> Match (value, final)
+        | Reject response -> Reject response
+        | No_match -> No_match)
+    | Reject response -> Reject response
+    | No_match -> No_match
+
   let request_method_is expected input =
     if input.request_method = Some expected then
       Match ((), input)
@@ -799,23 +815,27 @@ let rec run_pre_middleware middleware request_view rewritten =
           run_pre_middleware rest rewritten_request true)
 
 let run_router router input =
-  let pre_result, request_view, rewritten =
-    run_pre_middleware (List.rev router.pre_middleware) input.request_view false
-  in
-  let effective_input =
-    if rewritten then
-      input_of_request_view request_view
-    else
-      input
-  in
-  match pre_result with
-  | Pre_respond response ->
-      {
-        route_match = Route_rejected (response, router.middleware);
-        effective_input;
-      }
-  | Pre_continue ->
-      router.run effective_input |> attach_middleware_eval router.middleware
+  match router.pre_middleware, router.middleware with
+  | [], [] -> router.run input
+  | _ ->
+      let pre_result, request_view, rewritten =
+        run_pre_middleware (List.rev router.pre_middleware) input.request_view
+          false
+      in
+      let effective_input =
+        if rewritten then
+          input_of_request_view request_view
+        else
+          input
+      in
+      match pre_result with
+      | Pre_respond response ->
+          {
+            route_match = Route_rejected (response, router.middleware);
+            effective_input;
+          }
+      | Pre_continue ->
+          router.run effective_input |> attach_middleware_eval router.middleware
 
 let scope prefix_matcher router =
   let run input =

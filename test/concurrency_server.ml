@@ -4,24 +4,24 @@ let router clock =
   let open Halo.Router in
   let open Matcher in
   route
-    (let+ () = request_method_is GET and+ () = path_end in
+    (let+ () = request_method_is GET *> path_end in
      fun _request -> text Status.ok "hello\n")
   <|> route
-        (let+ () = request_method_is GET
-         and+ () = path_segment "fast"
-         and+ () = path_end in
+        (let+ () =
+           request_method_is GET *> path_segment "fast" *> path_end
+         in
          fun _request -> text Status.ok "fast\n")
   <|> route
-        (let+ () = request_method_is GET
-         and+ () = path_segment "slow"
-         and+ () = path_end in
+        (let+ () =
+           request_method_is GET *> path_segment "slow" *> path_end
+         in
          fun _request ->
            Eio.Time.sleep clock 0.30;
            text Status.ok "slow\n")
   <|> route
-        (let+ () = request_method_is GET
-         and+ () = path_segment "child"
-         and+ () = path_end in
+        (let+ () =
+           request_method_is GET *> path_segment "child" *> path_end
+         in
          fun _request ->
            let value, set_value = Eio.Promise.create () in
            Eio.Fiber.fork ~sw:(Request.switch _request) (fun () ->
@@ -29,16 +29,20 @@ let router clock =
                Eio.Promise.resolve set_value "child\n");
            text Status.ok (Eio.Promise.await value))
   <|> route
-        (let+ () = request_method_is POST
-         and+ () = path_segment "echo"
-         and+ () = path_end
-         and+ () = require_body in
+        (let+ () =
+           request_method_is POST
+           *> path_segment "echo"
+           *> path_end
+           *> require_body
+         in
          fun request -> text Status.ok (Halo.Body.read_all (Request.body request)))
   <|> route
-        (let+ () = request_method_is POST
-         and+ () = path_segment "stream-length"
-         and+ () = path_end
-         and+ () = require_body in
+        (let+ () =
+           request_method_is POST
+           *> path_segment "stream-length"
+           *> path_end
+           *> require_body
+         in
          fun _request ->
            let rec consume total =
              match Halo.Body.read (Request.body _request) with

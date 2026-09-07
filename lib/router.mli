@@ -241,6 +241,14 @@ module Matcher : sig
   val ( let+ ) : 'a t -> ('a -> 'b) -> 'b t
   val ( and+ ) : 'a t -> 'b t -> ('a * 'b) t
   val ( <*> ) : ('a -> 'b) t -> 'a t -> 'b t
+
+  (** [left *> right] runs [left], discards its value, then runs [right]. *)
+  val ( *> ) : 'a t -> 'b t -> 'b t
+
+  (** [left <* right] runs [left], then [right], and discards the value from
+      [right]. *)
+  val ( <* ) : 'a t -> 'b t -> 'a t
+
   val request_method_is : http_method -> unit t
   val path_segment : string -> unit t
   val string_parameter : string t

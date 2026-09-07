@@ -31,29 +31,27 @@ let check_response label (expected : Halo.Router.response) actual =
     (fixed_body (Halo.Router.Response.body response))
 
 let health_router =
-    Halo.Router.route
+  Halo.Router.route
     Halo.Router.Matcher.(
-      let+ () = request_method_is GET
-      and+ () = path_segment "health"
-      and+ () = path_end in
+      let+ () = request_method_is GET *> path_segment "health" *> path_end in
       fun _request -> text Status.ok "ok\n")
 
 let user_router =
-    Halo.Router.route
+  Halo.Router.route
     Halo.Router.Matcher.(
-      let+ () = request_method_is GET
-      and+ () = path_segment "users"
-      and+ id = int_parameter
-      and+ () = path_end in
+      let+ id =
+        request_method_is GET *> path_segment "users" *> int_parameter
+        <* path_end
+      in
       fun _request -> text Status.ok (string_of_int id))
 
 let echo_router =
-    Halo.Router.route
+  Halo.Router.route
     Halo.Router.Matcher.(
-      let+ () = request_method_is POST
-      and+ () = path_segment "echo"
-      and+ name = string_parameter
-      and+ () = path_end in
+      let+ name =
+        request_method_is POST *> path_segment "echo" *> string_parameter
+        <* path_end
+      in
       fun _request -> text Status.ok ("echo:" ^ name))
 
 let routes =
@@ -80,6 +78,27 @@ let test_int_capture () =
   check_response "int capture" (text Status.ok "42")
     (Halo.Router.dispatch routes (request GET "/users/42"))
 
+let test_applicative_sequencing_operators () =
+  let router =
+    Halo.Router.route
+      Halo.Router.Matcher.(
+        let+ user_id =
+          (pure "discarded"
+          *> request_method_is GET
+          *> path_segment "users"
+          *> int_parameter)
+          <* (path_segment "profile" *> pure "discarded")
+          <* path_end
+        in
+        fun _request -> text Status.ok (string_of_int user_id))
+  in
+  check_response "sequencing operators preserve selected value"
+    (text Status.ok "42")
+    (Halo.Router.dispatch router (request GET "/users/42/profile"));
+  check_response "sequencing operators thread matcher state"
+    (text Status.not_found "not found\n")
+    (Halo.Router.dispatch router (request GET "/users/42"))
+
 let test_query_ignored () =
   check_response "query ignored" (text Status.ok "ok\n")
     (Halo.Router.dispatch routes (request GET "/health?verbose=1"))
@@ -88,10 +107,12 @@ let test_queryparam_optional () =
   let router =
     Halo.Router.route
       Halo.Router.Matcher.(
-        let+ () = request_method_is GET
-        and+ () = path_segment "search"
-        and+ () = path_end
-        and+ query = queryparam "q" in
+        let+ query =
+          request_method_is GET
+          *> path_segment "search"
+          *> path_end
+          *> queryparam "q"
+        in
         fun _request ->
           text Status.ok
             (match query with
@@ -107,10 +128,12 @@ let test_queryparam_required () =
   let router =
     Halo.Router.route
       Halo.Router.Matcher.(
-        let+ () = request_method_is GET
-        and+ () = path_segment "search"
-        and+ () = path_end
-        and+ query = queryparam_required "q" in
+        let+ query =
+          request_method_is GET
+          *> path_segment "search"
+          *> path_end
+          *> queryparam_required "q"
+        in
         fun _request -> text Status.ok ("q=" ^ query))
   in
   check_response "queryparam required present" (text Status.ok "q=halo")
@@ -122,10 +145,12 @@ let test_int_queryparam () =
   let router =
     Halo.Router.route
       Halo.Router.Matcher.(
-        let+ () = request_method_is GET
-        and+ () = path_segment "search"
-        and+ () = path_end
-        and+ page = int_queryparam "page" in
+        let+ page =
+          request_method_is GET
+          *> path_segment "search"
+          *> path_end
+          *> int_queryparam "page"
+        in
         fun _request ->
           text Status.ok
             (match page with
@@ -143,10 +168,12 @@ let test_int_queryparam_required () =
   let router =
     Halo.Router.route
       Halo.Router.Matcher.(
-        let+ () = request_method_is GET
-        and+ () = path_segment "search"
-        and+ () = path_end
-        and+ page = int_queryparam_required "page" in
+        let+ page =
+          request_method_is GET
+          *> path_segment "search"
+          *> path_end
+          *> int_queryparam_required "page"
+        in
         fun _request -> text Status.ok ("page=" ^ string_of_int page))
   in
   check_response "int queryparam required present" (text Status.ok "page=2")
@@ -160,10 +187,12 @@ let test_queryparams_repeated () =
   let router =
     Halo.Router.route
       Halo.Router.Matcher.(
-        let+ () = request_method_is GET
-        and+ () = path_segment "search"
-        and+ () = path_end
-        and+ tags = queryparams "tag" in
+        let+ tags =
+          request_method_is GET
+          *> path_segment "search"
+          *> path_end
+          *> queryparams "tag"
+        in
         fun _request -> text Status.ok (String.concat "," tags))
   in
   check_response "queryparams repeated" (text Status.ok "ocaml,http")
@@ -179,19 +208,21 @@ let test_static_before_dynamic () =
   let static_user_me =
     Halo.Router.route
       Halo.Router.Matcher.(
-        let+ () = request_method_is GET
-        and+ () = path_segment "users"
-        and+ () = path_segment "me"
-        and+ () = path_end in
+        let+ () =
+          request_method_is GET
+          *> path_segment "users"
+          *> path_segment "me"
+          *> path_end
+        in
         fun _request -> text Status.ok "self")
   in
   let dynamic_user =
     Halo.Router.route
       Halo.Router.Matcher.(
-        let+ () = request_method_is GET
-        and+ () = path_segment "users"
-        and+ name = string_parameter
-        and+ () = path_end in
+        let+ name =
+          request_method_is GET *> path_segment "users" *> string_parameter
+          <* path_end
+        in
         fun _request -> text Status.ok name)
   in
   let router = Halo.Router.(static_user_me <|> dynamic_user) in
@@ -207,23 +238,17 @@ let test_scoped_routes () =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ user_id = int_parameter
-          and+ () = path_end in
+          let+ user_id = request_method_is GET *> int_parameter <* path_end in
           fun _request -> text Status.ok ("user:" ^ string_of_int user_id))
       <|>
       route
         Matcher.(
-          let+ () = request_method_is POST
-          and+ () = path_end in
+          let+ () = request_method_is POST *> path_end in
           fun _request -> text Status.created "create-user"))
   in
   let routes =
     let users_prefix =
-      Halo.Router.Matcher.(
-        let+ () = path_segment "api"
-        and+ () = path_segment "users" in
-        ())
+      Halo.Router.Matcher.(path_segment "api" *> path_segment "users")
     in
     Halo.Router.scope users_prefix users_routes
   in
@@ -236,9 +261,7 @@ let test_scope_path_segment () =
   let users_routes =
     Halo.Router.route
       Halo.Router.Matcher.(
-        let+ () = request_method_is GET
-        and+ user_name = string_parameter
-        and+ () = path_end in
+        let+ user_name = request_method_is GET *> string_parameter <* path_end in
         fun _request -> text Status.ok ("name:" ^ user_name))
   in
   let routes =
@@ -251,9 +274,7 @@ let test_request_headers_and_body () =
   let router =
     Halo.Router.route
       Halo.Router.Matcher.(
-        let+ () = request_method_is POST
-        and+ () = path_segment "inspect"
-        and+ () = path_end in
+        let+ () = request_method_is POST *> path_segment "inspect" *> path_end in
         fun (request : Halo.Router.Request.t) ->
           let host =
             match Halo.Router.Request.header request "host" with
@@ -272,9 +293,7 @@ let test_request_multiple_headers () =
   let router =
     Halo.Router.route
       Halo.Router.Matcher.(
-        let+ () = request_method_is GET
-        and+ () = path_segment "cookies"
-        and+ () = path_end in
+        let+ () = request_method_is GET *> path_segment "cookies" *> path_end in
         fun (request : Halo.Router.Request.t) ->
           let cookies =
             Halo.Router.Request.headers request "set-cookie"
@@ -293,9 +312,7 @@ let test_response_headers () =
   let router =
     Halo.Router.route
       Halo.Router.Matcher.(
-        let+ () = request_method_is GET
-        and+ () = path_segment "headers"
-        and+ () = path_end in
+        let+ () = request_method_is GET *> path_segment "headers" *> path_end in
         fun _request ->
           Halo.Router.text Status.ok "ok\n"
           |> Halo.Router.with_header "Content-Type" "text/plain"
@@ -350,9 +367,7 @@ let test_middleware_can_modify_response () =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "hello"
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_segment "hello" *> path_end in
           fun _request -> text Status.ok "ok\n")
       |> use add_trace_header)
   in
@@ -376,9 +391,7 @@ let test_middleware_can_short_circuit () =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "private"
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_segment "private" *> path_end in
           fun _request -> text Status.ok "secret\n")
       |> use require_auth)
   in
@@ -398,9 +411,7 @@ let test_middleware_wraps_not_found_and_method_not_allowed () =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "health"
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_segment "health" *> path_end in
           fun _request -> text Status.ok "ok\n")
       |> use add_trace_header)
   in
@@ -441,9 +452,7 @@ let test_pre_middleware_can_rewrite_before_route_matching () =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "health"
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_segment "health" *> path_end in
           fun request -> text Status.ok (Halo.Router.Request.raw_target request))
       |> use_pre rewrite_legacy)
   in
@@ -461,9 +470,9 @@ let test_pre_middleware_can_respond_early () =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "forbidden"
-          and+ () = path_end in
+          let+ () =
+            request_method_is GET *> path_segment "forbidden" *> path_end
+          in
           fun _request -> text Status.ok "should not run\n")
       |> use_pre block_forbidden)
   in
@@ -488,9 +497,7 @@ let test_pre_middleware_can_rewrite_method () =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_segment "override"
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_segment "override" *> path_end in
           fun _request -> text Status.ok "rewritten\n")
       |> use_pre method_override)
   in
@@ -571,8 +578,7 @@ let test_detached_request_is_not_early_data () =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET
-          and+ () = path_end in
+          let+ () = request_method_is GET *> path_end in
           fun request ->
             text Status.ok
               (string_of_bool (Request.is_early_data request))))
@@ -589,6 +595,8 @@ let () =
           Alcotest.test_case "exact route" `Quick test_exact_route;
           Alcotest.test_case "method mismatch" `Quick test_method_mismatch;
           Alcotest.test_case "int capture" `Quick test_int_capture;
+          Alcotest.test_case "applicative sequencing operators" `Quick
+            test_applicative_sequencing_operators;
           Alcotest.test_case "query ignored" `Quick test_query_ignored;
           Alcotest.test_case "queryparam optional" `Quick
             test_queryparam_optional;

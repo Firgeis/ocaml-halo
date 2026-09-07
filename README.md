@@ -11,8 +11,7 @@ let router =
   let open Halo.Router in
   let open Matcher in
   route
-    (let+ () = request_method_is GET
-     and+ () = path_end in
+    (let+ () = request_method_is GET *> path_end in
      fun _request -> text Status.ok "hello world\n")
 
 let () =
@@ -49,17 +48,20 @@ let users =
   let open Halo.Router in
   let open Matcher in
   route
-    (let+ () = request_method_is GET
-     and+ () = path_segment "users"
-     and+ id = int_parameter
-     and+ verbose = queryparam "verbose"
-     and+ () = path_end in
+    (let+ id =
+       request_method_is GET *> path_segment "users" *> int_parameter
+       <* path_end
+     and+ verbose = queryparam "verbose" in
      fun request ->
        let agent = Request.header request "user-agent" in
        json Status.ok
          (Printf.sprintf {|{"id":%d,"verbose":%S,"agent":%S}|}
             id verbose agent))
 ```
+
+Use `*>` and `<*` to sequence matchers while keeping the value on the side
+indicated by the angle bracket. Reserve `let+` and `and+` bindings for values
+used by the handler.
 
 `Router.Request` exposes request metadata:
 
@@ -86,10 +88,12 @@ including chunks already returned by `read`.
 ```ocaml
 route
   Matcher.(
-    let+ () = request_method_is POST
-    and+ () = path_segment "echo"
-    and+ () = path_end
-    and+ () = require_body in
+    let+ () =
+      request_method_is POST
+      *> path_segment "echo"
+      *> path_end
+      *> require_body
+    in
     fun request ->
       text Status.ok (Halo.Body.read_all (Request.body request)))
 ```

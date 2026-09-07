@@ -43,6 +43,7 @@ VENDORED_RUNTIME_ENV = \
 	run \
 	release-run \
 	body-stress \
+	router-bench \
 	test \
 	runtest \
 	clean \
@@ -124,6 +125,9 @@ release-run: release-build
 
 body-stress: vendor-build
 	$(VENDORED_RUNTIME_ENV) bash ./scripts/body_stress.sh
+
+router-bench: vendor-build
+	$(VENDORED_RUNTIME_ENV) $(DUNE) exec --profile release ./scripts/router_bench.exe
 
 asan-run: asan-build
 	DYLD_LIBRARY_PATH=$(vendored_runtime_library_path) \
