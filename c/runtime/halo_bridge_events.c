@@ -147,6 +147,47 @@ static void halo_bridge_unregister_client(struct halo_bridge* bridge,
   }
 }
 
+static int halo_bridge_register_replay_claim(struct halo_bridge* bridge,
+                                             struct halo_client* client,
+                                             uint64_t claim_id) {
+  struct halo_bridge_replay_claim_entry* entry;
+  size_t bucket_index;
+
+  entry = malloc(sizeof(*entry));
+  if (entry == NULL)
+    return -1;
+  bucket_index = claim_id % HALO_BRIDGE_REPLAY_CLAIM_BUCKET_COUNT;
+  entry->claim_id = claim_id;
+  entry->client = client;
+  entry->next = bridge->replay_claims[bucket_index];
+  bridge->replay_claims[bucket_index] = entry;
+  return 0;
+}
+
+static struct halo_client* halo_bridge_unregister_replay_claim(
+    struct halo_bridge* bridge,
+    uint64_t claim_id) {
+  struct halo_bridge_replay_claim_entry** cursor;
+  size_t bucket_index;
+
+  bucket_index = claim_id % HALO_BRIDGE_REPLAY_CLAIM_BUCKET_COUNT;
+  cursor = &bridge->replay_claims[bucket_index];
+  while (*cursor != NULL) {
+    struct halo_bridge_replay_claim_entry* entry;
+    struct halo_client* client;
+
+    entry = *cursor;
+    if (entry->claim_id == claim_id) {
+      client = entry->client;
+      *cursor = entry->next;
+      free(entry);
+      return client;
+    }
+    cursor = &entry->next;
+  }
+  return NULL;
+}
+
 static struct halo_bridge_event* halo_bridge_simple_event(
   enum halo_bridge_event_kind kind,
   uint64_t request_id
@@ -159,6 +200,88 @@ static struct halo_bridge_event* halo_bridge_simple_event(
   event->kind = kind;
   event->request_id = request_id;
   return event;
+}
+
+int halo_bridge_dispatch_replay_claim(struct halo_client* client,
+                                      const uint8_t* identity,
+                                      size_t identity_len,
+                                      uint64_t ttl_secs) {
+  struct halo_runtime* runtime;
+  struct halo_bridge* bridge;
+  struct halo_bridge_event* event;
+  uint64_t claim_id;
+
+  if (client == NULL || client->listener_ref == NULL
+      || client->handle.loop == NULL || identity == NULL || identity_len == 0
+      || ttl_secs == 0
+      || client->bridge_replay_claim_id != 0)
+    return -1;
+  runtime = client->handle.loop->data;
+  bridge = runtime != NULL ? runtime->bridge : NULL;
+  if (bridge == NULL)
+    return -1;
+
+  event = halo_bridge_simple_event(HALO_BRIDGE_REPLAY_CLAIM, 0);
+  if (event == NULL)
+    return -1;
+  event->listener_id = client->listener_ref->bridge_listener_id;
+  event->replay_ttl_secs = ttl_secs;
+  event->payload = halo_bridge_copy_bytes((const char*) identity, identity_len);
+  event->payload_len = identity_len;
+  if (event->payload == NULL) {
+    halo_bridge_event_destroy(event);
+    return -1;
+  }
+
+  claim_id = ++bridge->next_replay_claim_id;
+  if (claim_id == 0)
+    claim_id = ++bridge->next_replay_claim_id;
+  event->request_id = claim_id;
+  if (halo_bridge_register_replay_claim(bridge, client, claim_id) != 0) {
+    halo_bridge_event_destroy(event);
+    return -1;
+  }
+  client->bridge_replay_claim_id = claim_id;
+  if (halo_bridge_push_event(bridge, event) != 0) {
+    client->bridge_replay_claim_id = 0;
+    (void) halo_bridge_unregister_replay_claim(bridge, claim_id);
+    halo_bridge_event_destroy(event);
+    return -1;
+  }
+  return 0;
+}
+
+void halo_bridge_cancel_replay_claim(struct halo_client* client) {
+  struct halo_runtime* runtime;
+  struct halo_bridge* bridge;
+
+  if (client == NULL || client->bridge_replay_claim_id == 0
+      || client->handle.loop == NULL)
+    return;
+  runtime = client->handle.loop->data;
+  bridge = runtime != NULL ? runtime->bridge : NULL;
+  if (bridge != NULL)
+    (void) halo_bridge_unregister_replay_claim(
+      bridge, client->bridge_replay_claim_id);
+  client->bridge_replay_claim_id = 0;
+  client->tls_pending_early_data = NULL;
+}
+
+int halo_bridge_resolve_replay_claim(struct halo_bridge* bridge,
+                                    uint64_t claim_id,
+                                    int accept) {
+  struct halo_client* client;
+
+  if (bridge == NULL || claim_id == 0)
+    return -1;
+  client = halo_bridge_unregister_replay_claim(bridge, claim_id);
+  if (client == NULL)
+    return 0;
+  if (halo_client_bridge_resolve_replay_claim(client, claim_id, accept) != 0) {
+    halo_client_bridge_close(client);
+    return -1;
+  }
+  return 0;
 }
 
 int halo_bridge_dispatch_request(struct halo_client* client) {

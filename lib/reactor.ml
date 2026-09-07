@@ -22,6 +22,7 @@ type raw_event = {
   keep_alive : bool;
   body_expected : bool;
   is_early_data : bool;
+  replay_ttl_secs : int64;
   payload : string;
 }
 
@@ -42,6 +43,13 @@ type request_event = {
 type body_chunk_event = { request_id : int64; chunk : string }
 type metrics_event = { query_id : int64; payload : string }
 
+type replay_claim_event = {
+  claim_id : int64;
+  listener_id : int64;
+  identity : string;
+  ttl_secs : int64;
+}
+
 type unknown_event = {
   kind : int;
   request_id : int64;
@@ -57,6 +65,7 @@ type event =
   | Stopped
   | Write_complete of int64
   | Metrics of metrics_event
+  | Replay_claim of replay_claim_event
   | Unknown of unknown_event
 
 type command_status = Enqueued | Full | Closed | Unknown_status of int
@@ -104,6 +113,9 @@ external finish_response_stream_raw : Server_backend.t -> int64 -> int
 external request_metrics_raw : Server_backend.t -> int64 -> int
   = "ocaml_halo_bridge_read_metrics"
 
+external resolve_replay_claim_raw : Server_backend.t -> int64 -> bool -> int
+  = "ocaml_halo_bridge_resolve_replay_claim"
+
 external run : Server_backend.t -> (unit, string) result
   = "ocaml_halo_bridge_start"
 
@@ -137,6 +149,14 @@ let event_of_raw (raw : raw_event) =
   | 5 -> Stopped
   | 6 -> Write_complete raw.request_id
   | 7 -> Metrics { query_id = raw.request_id; payload = raw.payload }
+  | 8 ->
+      Replay_claim
+        {
+          claim_id = raw.request_id;
+          listener_id = raw.listener_id;
+          identity = raw.payload;
+          ttl_secs = raw.replay_ttl_secs;
+        }
   | kind -> Unknown { kind; request_id = raw.request_id; payload = raw.payload }
 
 let poll_event runtime = Option.map event_of_raw (poll_event_raw runtime)
@@ -172,6 +192,9 @@ let finish_response_stream_status runtime request_id =
 
 let request_metrics_status runtime query_id =
   command_status (request_metrics_raw runtime query_id)
+
+let resolve_replay_claim_status runtime claim_id accept =
+  command_status (resolve_replay_claim_raw runtime claim_id accept)
 
 let rec enqueue command =
   match command () with
@@ -210,6 +233,9 @@ let finish_response_stream runtime request_id =
 
 let request_metrics runtime query_id =
   enqueue (fun () -> request_metrics_status runtime query_id)
+
+let resolve_replay_claim runtime claim_id ~accept =
+  enqueue (fun () -> resolve_replay_claim_status runtime claim_id accept)
 
 let controller_state_of_int = function
   | 0 -> Server_backend.Normal

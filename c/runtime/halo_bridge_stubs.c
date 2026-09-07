@@ -53,7 +53,7 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   CAMLparam1(runtime_value);
   CAMLlocal5(option, record, headers, cell, pair);
   CAMLlocal5(name, header_value, method_text, target, payload);
-  CAMLlocal2(request_id, listener_id);
+  CAMLlocal3(request_id, listener_id, replay_ttl_secs);
   CAMLlocal1(raw_headers);
   struct halo_runtime* runtime;
   struct halo_bridge_event* event;
@@ -91,10 +91,11 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
 
   request_id = caml_copy_int64((int64_t) event->request_id);
   listener_id = caml_copy_int64((int64_t) event->listener_id);
+  replay_ttl_secs = caml_copy_int64((int64_t) event->replay_ttl_secs);
   method_text = halo_bridge_alloc_string(event->method_text, event->method_len);
   target = halo_bridge_alloc_string(event->target, event->target_len);
   payload = halo_bridge_alloc_string(event->payload, event->payload_len);
-  record = caml_alloc(13, 0);
+  record = caml_alloc(14, 0);
   Store_field(record, 0, Val_int(event->kind));
   Store_field(record, 1, request_id);
   Store_field(record, 2, listener_id);
@@ -107,7 +108,8 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   Store_field(record, 9, Val_bool(event->keep_alive));
   Store_field(record, 10, Val_bool(event->body_expected));
   Store_field(record, 11, Val_bool(event->is_early_data));
-  Store_field(record, 12, payload);
+  Store_field(record, 12, replay_ttl_secs);
+  Store_field(record, 13, payload);
   option = caml_alloc(1, 0);
   Store_field(option, 0, record);
   halo_bridge_event_destroy(event);
@@ -239,6 +241,20 @@ CAMLprim value ocaml_halo_bridge_read_metrics(value runtime_value,
                                               HALO_BRIDGE_READ_METRICS,
                                               NULL,
                                               0));
+}
+
+CAMLprim value ocaml_halo_bridge_resolve_replay_claim(value runtime_value,
+                                                       value claim_id,
+                                                       value accept) {
+  CAMLparam3(runtime_value, claim_id, accept);
+  const char decision = Bool_val(accept) ? 1 : 0;
+
+  CAMLreturn(halo_bridge_enqueue_command_stub(
+    runtime_value,
+    claim_id,
+    HALO_BRIDGE_RESOLVE_REPLAY_CLAIM,
+    &decision,
+    sizeof(decision)));
 }
 
 CAMLprim value ocaml_halo_bridge_start(value runtime_value) {

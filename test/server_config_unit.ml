@@ -50,6 +50,43 @@ let test_idle_timeout_must_be_non_negative () =
     "server idle_timeout_ms must be non-negative"
     (Halo.Server.Config.create ~port:8080 ~idle_timeout_ms:(-1) default_router)
 
+let replay_store ?timeout_seconds () =
+  Halo.Server.Config.Early_data_replay_store.create ?timeout_seconds
+    (fun ~identity:_ ~ttl_secs:_ ->
+      Halo.Server.Config.Early_data_replay_store.Unavailable)
+
+let test_replay_store_timeout_must_be_positive () =
+  Alcotest.check_raises "replay store timeout validation"
+    (Invalid_argument
+       "early-data replay-store timeout must be finite and positive")
+    (fun () -> ignore (replay_store ~timeout_seconds:0.0 ()))
+
+let test_blocking_replay_store_max_in_flight_must_be_positive () =
+  let module Store = Halo.Server.Config.Early_data_replay_store in
+  Alcotest.check_raises "blocking replay store concurrency validation"
+    (Invalid_argument
+       "early-data blocking replay-store max_in_flight must be positive")
+    (fun () ->
+      ignore
+        (Store.create_blocking ~max_in_flight:0 (fun ~identity:_ ~ttl_secs:_ ->
+             Store.Unavailable)))
+
+let test_replay_store_requires_early_data () =
+  check_invalid "replay store requires early data"
+    "server early_data_replay_store requires TLS max_early_data_size to be positive"
+    (Halo.Server.Config.create ~port:8080
+       ~early_data_replay_store:(replay_store ()) default_router)
+
+let test_replay_store_with_early_data_is_valid () =
+  let tls =
+    Halo.Server.Config.tls
+      ~cert_chain_path:"cert.pem" ~private_key_path:"key.pem"
+      ~session_tickets_enabled:true ~max_early_data_size:1024 ()
+  in
+  check_valid "replay store with early data"
+    (Halo.Server.Config.create ~port:8080 ~tls
+       ~early_data_replay_store:(replay_store ()) default_router)
+
 let test_controller_busy_threshold_range () =
   let controller =
     {
@@ -218,6 +255,15 @@ let () =
             test_request_timeout_must_be_non_negative;
           Alcotest.test_case "idle timeout must be non-negative" `Quick
             test_idle_timeout_must_be_non_negative;
+          Alcotest.test_case "replay store timeout must be positive" `Quick
+            test_replay_store_timeout_must_be_positive;
+          Alcotest.test_case
+            "blocking replay store max in flight must be positive" `Quick
+            test_blocking_replay_store_max_in_flight_must_be_positive;
+          Alcotest.test_case "replay store requires early data" `Quick
+            test_replay_store_requires_early_data;
+          Alcotest.test_case "replay store with early data is valid" `Quick
+            test_replay_store_with_early_data_is_valid;
           Alcotest.test_case "controller busy threshold range" `Quick
             test_controller_busy_threshold_range;
           Alcotest.test_case "controller threshold ordering" `Quick

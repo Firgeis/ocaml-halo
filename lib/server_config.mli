@@ -31,6 +31,40 @@ type early_data_policy =
 (** Decide whether a TLS 1.3 early-data request may be dispatched. The request
     body has not been consumed when this function runs. *)
 
+module Early_data_replay_store : sig
+  type claim = Fresh | Already_seen | Unavailable
+  type t
+
+  val create :
+    ?timeout_seconds:float ->
+    (identity:string -> ttl_secs:int64 -> claim) ->
+    t
+  (** Build a shared replay-store adapter. [identity] is an opaque 32-byte
+      SHA-256 digest and must be claimed atomically for at least [ttl_secs].
+      The callback runs in an Eio fiber and must use cooperative Eio I/O.
+      Exceptions, timeouts, and [Unavailable] reject early data without
+      aborting the TLS handshake. *)
+
+  val create_blocking :
+    ?timeout_seconds:float ->
+    ?max_in_flight:int ->
+    (identity:string -> ttl_secs:int64 -> claim) ->
+    t
+  (** Build an adapter for a blocking replay-store client. Each callback runs
+      in a system thread so it cannot block Halo's Eio domain. At most
+      [max_in_flight] callbacks may run at once (64 by default); excess claims
+      return [Unavailable]. A callback may continue after Halo's timeout, so
+      the client must also configure a finite I/O timeout. *)
+
+  val claim : t -> identity:string -> ttl_secs:int64 -> claim
+  val timeout_seconds : t -> float
+
+  val process_local : t
+  (** The bounded, process-wide reference implementation. It is shared by all
+      Halo listeners and runtimes in this process, but not by other processes
+      or instances. *)
+end
+
 type tls_config = {
   cert_chain_path : string;
   private_key_path : string;
@@ -58,6 +92,7 @@ type t = {
   request_timeout_ms : int;
   idle_timeout_ms : int;
   early_data_policy : early_data_policy;
+  early_data_replay_store : Early_data_replay_store.t option;
   tls : tls_config option;
   controller : controller_config;
   router : Router.t;
@@ -111,6 +146,7 @@ val create :
   ?request_timeout_ms:int ->
   ?idle_timeout_ms:int ->
   ?early_data_policy:early_data_policy ->
+  ?early_data_replay_store:Early_data_replay_store.t ->
   ?tls:tls_config ->
   ?controller:controller_config ->
   port:int ->
@@ -119,6 +155,7 @@ val create :
 (** Build a listener configuration. Request-line, header, and body limits are
     independent and are enforced cumulatively within their respective request
     sections. TLS 1.3 early-data requests receive 425 unless
-    [early_data_policy] explicitly accepts them. *)
+    [early_data_policy] explicitly accepts them. [early_data_replay_store]
+    replaces the process-wide replay cache for this listener. *)
 
 val validate : t -> string option

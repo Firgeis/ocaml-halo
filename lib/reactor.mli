@@ -18,6 +18,13 @@ type request_event = {
 type body_chunk_event = { request_id : int64; chunk : string }
 type metrics_event = { query_id : int64; payload : string }
 
+type replay_claim_event = {
+  claim_id : int64;
+  listener_id : int64;
+  identity : string;
+  ttl_secs : int64;
+}
+
 type unknown_event = {
   kind : int;
   request_id : int64;
@@ -33,6 +40,7 @@ type event =
   | Stopped
   | Write_complete of int64
   | Metrics of metrics_event
+  | Replay_claim of replay_claim_event
   | Unknown of unknown_event
 
 val create_runtime : unit -> (Server_backend.t, string) result
@@ -56,6 +64,7 @@ val start_response_stream : Server_backend.t -> int64 -> string -> unit
 val write_response_chunk : Server_backend.t -> int64 -> string -> unit
 val finish_response_stream : Server_backend.t -> int64 -> unit
 val request_metrics : Server_backend.t -> int64 -> unit
+val resolve_replay_claim : Server_backend.t -> int64 -> accept:bool -> unit
 val metrics_of_payload : string -> Server_backend.runtime_metrics
 val run : Server_backend.t -> (unit, string) result
 val listener_id : Server_backend.server -> int64

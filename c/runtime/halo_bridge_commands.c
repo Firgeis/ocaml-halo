@@ -90,6 +90,11 @@ void halo_bridge_command_async_cb(uv_async_t* async) {
       case HALO_BRIDGE_READ_METRICS:
         (void) halo_bridge_emit_metrics(bridge->runtime, command->request_id);
         break;
+      case HALO_BRIDGE_RESOLVE_REPLAY_CLAIM:
+        if (command->payload_len == 1)
+          (void) halo_bridge_resolve_replay_claim(
+            bridge, command->request_id, command->payload[0] != 0);
+        break;
       default:
         break;
     }

@@ -94,6 +94,8 @@ void halo_bridge_destroy(struct halo_runtime* runtime) {
   struct halo_bridge_event* event;
   struct halo_bridge_command* command;
   struct halo_bridge_request_entry* entry;
+  struct halo_bridge_replay_claim_entry* claim;
+  size_t bucket_index;
 
   if (runtime == NULL || runtime->bridge == NULL)
     return;
@@ -111,6 +113,14 @@ void halo_bridge_destroy(struct halo_runtime* runtime) {
   while ((entry = bridge->requests) != NULL) {
     bridge->requests = entry->next;
     free(entry);
+  }
+  for (bucket_index = 0;
+       bucket_index < HALO_BRIDGE_REPLAY_CLAIM_BUCKET_COUNT;
+       bucket_index++) {
+    while ((claim = bridge->replay_claims[bucket_index]) != NULL) {
+      bridge->replay_claims[bucket_index] = claim->next;
+      free(claim);
+    }
   }
   if (bridge->event_pipe[0] >= 0)
     close(bridge->event_pipe[0]);

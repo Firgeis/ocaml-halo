@@ -6,6 +6,8 @@
 
 #include <pthread.h>
 
+#define HALO_BRIDGE_REPLAY_CLAIM_BUCKET_COUNT 1024U
+
 enum halo_bridge_event_kind {
   HALO_BRIDGE_REQUEST = 0,
   HALO_BRIDGE_BODY_CHUNK = 1,
@@ -14,7 +16,8 @@ enum halo_bridge_event_kind {
   HALO_BRIDGE_DISCONNECTED = 4,
   HALO_BRIDGE_STOPPED = 5,
   HALO_BRIDGE_WRITE_COMPLETE = 6,
-  HALO_BRIDGE_METRICS = 7
+  HALO_BRIDGE_METRICS = 7,
+  HALO_BRIDGE_REPLAY_CLAIM = 8
 };
 
 enum halo_bridge_command_kind {
@@ -26,7 +29,8 @@ enum halo_bridge_command_kind {
   HALO_BRIDGE_START_RESPONSE_STREAM = 5,
   HALO_BRIDGE_WRITE_RESPONSE_CHUNK = 6,
   HALO_BRIDGE_FINISH_RESPONSE_STREAM = 7,
-  HALO_BRIDGE_READ_METRICS = 8
+  HALO_BRIDGE_READ_METRICS = 8,
+  HALO_BRIDGE_RESOLVE_REPLAY_CLAIM = 9
 };
 
 enum halo_bridge_command_status {
@@ -58,6 +62,7 @@ struct halo_bridge_event {
   int keep_alive;
   int body_expected;
   int is_early_data;
+  uint64_t replay_ttl_secs;
   char* payload;
   size_t payload_len;
   struct halo_bridge_event* next;
@@ -75,6 +80,12 @@ struct halo_bridge_request_entry {
   uint64_t request_id;
   struct halo_client* client;
   struct halo_bridge_request_entry* next;
+};
+
+struct halo_bridge_replay_claim_entry {
+  uint64_t claim_id;
+  struct halo_client* client;
+  struct halo_bridge_replay_claim_entry* next;
 };
 
 /* The event side is produced by the reactor and consumed by Eio. The command
@@ -104,6 +115,9 @@ struct halo_bridge {
   struct halo_bridge_command* command_tail;
   uint64_t next_request_id;
   struct halo_bridge_request_entry* requests;
+  uint64_t next_replay_claim_id;
+  struct halo_bridge_replay_claim_entry*
+    replay_claims[HALO_BRIDGE_REPLAY_CLAIM_BUCKET_COUNT];
 };
 
 char* halo_bridge_copy_bytes(const char* source, size_t length);
@@ -123,6 +137,9 @@ int halo_bridge_enqueue_command(struct halo_bridge* bridge,
 
 struct halo_client* halo_bridge_find_client(struct halo_bridge* bridge,
                                             uint64_t request_id);
+int halo_bridge_resolve_replay_claim(struct halo_bridge* bridge,
+                                    uint64_t claim_id,
+                                    int accept);
 int halo_bridge_run_reactor(struct halo_runtime* runtime);
 
 #endif

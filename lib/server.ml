@@ -78,9 +78,15 @@ let listen runtime configs =
       | Ok raw ->
           let listener_id = Reactor.listener_id raw in
           Server_backend.release_server raw;
+          let early_data_replay_store =
+            Option.value config.early_data_replay_store
+              ~default:Config.Early_data_replay_store.process_local
+          in
           Hashtbl.add listeners listener_id
             (Request_runtime.listener
-               ~early_data_policy:config.early_data_policy config.router))
+               ~early_data_policy:config.early_data_policy
+               ~early_data_replay_store
+               config.router))
     configs;
   listeners
 

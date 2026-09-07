@@ -263,49 +263,6 @@ value halo_option_some_uv(const char* operation, int code) {
   CAMLreturn(halo_option_some_message(buffer));
 }
 
-struct halo_tls_replay_entry* halo_tls_replay_entry_create(const uint8_t* identity,
-                                                           uint16_t identity_len,
-                                                           uint64_t expires_at_secs) {
-  struct halo_tls_replay_entry* entry;
-
-  if (identity == NULL || identity_len == 0)
-    return NULL;
-
-  entry = malloc(sizeof(*entry));
-  if (entry == NULL)
-    return NULL;
-
-  entry->identity = malloc(identity_len);
-  if (entry->identity == NULL) {
-    free(entry);
-    return NULL;
-  }
-
-  memcpy(entry->identity, identity, identity_len);
-  entry->identity_len = identity_len;
-  entry->expires_at_secs = expires_at_secs;
-  entry->next = NULL;
-  return entry;
-}
-
-void halo_tls_replay_entry_destroy(struct halo_tls_replay_entry* entry) {
-  if (entry == NULL)
-    return;
-
-  free(entry->identity);
-  free(entry);
-}
-
-void halo_tls_replay_entry_list_destroy(struct halo_tls_replay_entry* entry) {
-  while (entry != NULL) {
-    struct halo_tls_replay_entry* next;
-
-    next = entry->next;
-    halo_tls_replay_entry_destroy(entry);
-    entry = next;
-  }
-}
-
 void halo_listener_ref_release(struct halo_listener_ref* ref) {
   if (ref == NULL)
     return;
@@ -319,8 +276,6 @@ void halo_listener_ref_release(struct halo_listener_ref* ref) {
     s2n_config_free(ref->tls_config);
     ref->tls_config = NULL;
   }
-  halo_tls_replay_entry_list_destroy(ref->tls_replay_entries);
-  ref->tls_replay_entries = NULL;
   free(ref);
 }
 

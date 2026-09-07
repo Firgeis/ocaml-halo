@@ -87,7 +87,7 @@ let run_process ?input ?(close_stdin = true) command =
       { stdout; stderr; status })
 
 let run_s2nc ?ticket_out ?ticket_in ?early_data_file ?send_file ?input
-    ?(echo = false) ?(close_stdin = false) () =
+    ?(echo = false) ?(close_stdin = false) ?(port = 8443) () =
   let args =
     [
       Filename.quote (s2nc_bin_path ());
@@ -113,7 +113,7 @@ let run_s2nc ?ticket_out ?ticket_in ?early_data_file ?send_file ?input
     | None -> []
     | Some path -> ["--send-file"; Filename.quote path])
     @ (if echo then ["--echo"] else [])
-    @ ["127.0.0.1"; "8443"]
+    @ ["127.0.0.1"; string_of_int port]
   in
   run_process ?input ~close_stdin (String.concat " " args)
 
@@ -137,7 +137,41 @@ let assert_process_success result =
       fail "process stopped by signal %d\nstdout:\n%s\nstderr:\n%s" signal
         result.stdout result.stderr
 
-let with_live_server ?tls ?early_data_policy ?router f =
+let with_live_config_groups config_groups f =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let servers =
+    List.map
+      (fun configs ->
+        let shutdown = Halo.Server.Shutdown.create () in
+        let started, notify_started = Eio.Promise.create () in
+        let server =
+          Eio.Fiber.fork_promise ~sw (fun () ->
+              Halo.Server.run ~shutdown ~handle_sigint:false
+                ~on_ready:(fun running ->
+                  Eio.Promise.resolve notify_started running)
+                configs)
+        in
+        (started, server))
+      config_groups
+  in
+  let runnings = List.map (fun (started, _) -> Eio.Promise.await started) servers in
+  let outcome =
+    try
+      Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) f;
+      Ok (List.map Halo.Server.metrics runnings)
+    with exn -> Error exn
+  in
+  List.iter Halo.Server.shutdown runnings;
+  List.iter (fun (_, server) -> Eio.Promise.await_exn server) servers;
+  match outcome with Ok metrics -> metrics | Error exn -> raise exn
+
+let with_live_configs configs f =
+  match with_live_config_groups [ configs ] f with
+  | [ metrics ] -> metrics
+  | _ -> assert false
+
+let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router f =
   let router =
     Option.value router
       ~default:
@@ -148,29 +182,11 @@ let with_live_server ?tls ?early_data_policy ?router f =
               and+ () = path_end in
               fun _request -> text Status.ok "hello world\n"))
   in
-  Eio_main.run @@ fun env ->
-  Eio.Switch.run @@ fun sw ->
-  let shutdown = Halo.Server.Shutdown.create () in
-  let started, notify_started = Eio.Promise.create () in
   let config =
-    Halo.Server.Config.create ~port:8443 ?tls ?early_data_policy router
+    Halo.Server.Config.create ~port:8443 ?tls ?early_data_policy
+      ?early_data_replay_store router
   in
-  let server =
-    Eio.Fiber.fork_promise ~sw (fun () ->
-        Halo.Server.run ~shutdown ~handle_sigint:false
-          ~on_ready:(fun running -> Eio.Promise.resolve notify_started running)
-          [ config ])
-  in
-  let running = Eio.Promise.await started in
-  let outcome =
-    try
-      Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) f;
-      Ok (Halo.Server.metrics running)
-    with exn -> Error exn
-  in
-  Halo.Server.shutdown running;
-  Eio.Promise.await_exn server;
-  match outcome with Ok metrics -> metrics | Error exn -> raise exn
+  with_live_configs [ config ] f
 
 let with_live_tls_server tls = with_live_server ~tls
 
@@ -377,6 +393,190 @@ let test_tls_early_data_policy_opts_in_and_marks_request () =
                    fail "expected early response marker\nstdout:\n%s\nstderr:\n%s"
                      early.stdout early.stderr))))
 
+let test_tls_early_data_replay_is_atomic_across_runtimes () =
+  with_temp_path "halo-session" ".bin" (fun session_path ->
+      with_temp_file_contents "halo-early" ".txt"
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        (fun early_data_path ->
+          let router =
+            Halo.Router.(
+              route
+                Matcher.(
+                  let+ () = request_method_is GET
+                  and+ () = path_end in
+                  fun _request -> text Status.ok "hello world\n"))
+          in
+          let tls = tls_early_data_config () in
+          let config port = Halo.Server.Config.create ~port ~tls router in
+          ignore
+            (with_live_config_groups [ [ config 8443 ]; [ config 8444 ] ]
+               (fun () ->
+                 let prime =
+                   run_s2nc ~port:8443 ~ticket_out:session_path
+                     ~input:"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                     ~close_stdin:false ()
+                 in
+                 assert_process_success prime;
+                 assert_nonempty_file session_path;
+                 let second =
+                   Domain.spawn (fun () ->
+                       run_s2nc ~port:8444 ~ticket_in:session_path
+                         ~early_data_file:early_data_path ~close_stdin:true ())
+                 in
+                 let first =
+                   run_s2nc ~port:8443 ~ticket_in:session_path
+                     ~early_data_file:early_data_path ~close_stdin:true ()
+                 in
+                 let second = Domain.join second in
+                 assert_process_success first;
+                 assert_process_success second;
+                 let results = [ first; second ] in
+                 let count_status status =
+                   List.fold_left
+                     (fun count result ->
+                       if contains status result.stdout then count + 1 else count)
+                     0 results
+                 in
+                 Alcotest.(check int) "one runtime accepts early data" 1
+                   (count_status "Early Data status: ACCEPTED");
+                 Alcotest.(check int) "one runtime rejects the replay" 1
+                   (count_status "Early Data status: REJECTED")))))
+
+let test_tls_custom_replay_store_contract () =
+  with_temp_path "halo-session" ".bin" (fun session_path ->
+      with_temp_file_contents "halo-early" ".txt"
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        (fun early_data_path ->
+          let module Store = Halo.Server.Config.Early_data_replay_store in
+          let calls = Atomic.make 0 in
+          let first_identity = Atomic.make None in
+          let identities_match = Atomic.make true in
+          let observed_ttl = Atomic.make 0L in
+          let claim ~identity ~ttl_secs =
+            (match Atomic.get first_identity with
+            | None -> Atomic.set first_identity (Some identity)
+            | Some first ->
+                if not (String.equal first identity) then
+                  Atomic.set identities_match false);
+            Atomic.set observed_ttl ttl_secs;
+            match Atomic.fetch_and_add calls 1 with
+            | 0 -> Store.Unavailable
+            | 1 ->
+                Eio_unix.sleep 0.05;
+                Store.Fresh
+            | 2 -> failwith "replay store failure"
+            | 3 -> Store.Fresh
+            | _ -> Store.Already_seen
+          in
+          let replay_store = Store.create ~timeout_seconds:0.01 claim in
+          let tls = tls_early_data_config () in
+          ignore
+            (with_live_server ~tls ~early_data_replay_store:replay_store
+               (fun () ->
+                 let prime =
+                   run_s2nc ~ticket_out:session_path
+                     ~input:"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                     ~close_stdin:false ()
+                 in
+                 assert_process_success prime;
+                 assert_nonempty_file session_path;
+                 let offer ?(echo = false) ~close_stdin () =
+                   let result =
+                     run_s2nc ~ticket_in:session_path
+                       ~early_data_file:early_data_path ~echo ~close_stdin ()
+                   in
+                   assert_process_success result;
+                   result
+                 in
+                 let unavailable = offer ~close_stdin:true () in
+                 Alcotest.(check bool) "unavailable rejects early data" true
+                   (contains "Early Data status: REJECTED" unavailable.stdout);
+                 let timed_out = offer ~close_stdin:true () in
+                 Alcotest.(check bool) "timeout rejects early data" true
+                   (contains "Early Data status: REJECTED" timed_out.stdout);
+                 let failed = offer ~close_stdin:true () in
+                 Alcotest.(check bool) "exception rejects early data" true
+                   (contains "Early Data status: REJECTED" failed.stdout);
+                 let fresh = offer ~echo:true ~close_stdin:false () in
+                 Alcotest.(check bool) "fresh claim accepts early data" true
+                   (contains "Early Data status: ACCEPTED" fresh.stdout);
+                 let duplicate = offer ~close_stdin:true () in
+                 Alcotest.(check bool) "duplicate rejects early data" true
+                   (contains "Early Data status: REJECTED" duplicate.stdout)));
+          Alcotest.(check int) "claim callback count" 5 (Atomic.get calls);
+          Alcotest.(check bool) "all offers use the same digest" true
+            (Atomic.get identities_match);
+          (match Atomic.get first_identity with
+          | None -> fail "expected the replay store to receive an identity"
+          | Some identity ->
+              Alcotest.(check int) "SHA-256 identity length" 32
+                (String.length identity));
+          assert_int64_equal "maximum TLS 1.3 ticket TTL" 604800L
+            (Atomic.get observed_ttl)))
+
+let test_tls_blocking_replay_store_does_not_block_timeout () =
+  with_temp_path "halo-session" ".bin" (fun session_path ->
+      with_temp_file_contents "halo-early" ".txt"
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        (fun early_data_path ->
+          let module Store = Halo.Server.Config.Early_data_replay_store in
+          let callback_started = Atomic.make false in
+          let callback_finished = Atomic.make false in
+          let replay_store =
+            Store.create_blocking ~timeout_seconds:0.01
+              (fun ~identity:_ ~ttl_secs:_ ->
+                Atomic.set callback_started true;
+                Thread.delay 0.5;
+                Atomic.set callback_finished true;
+                Store.Fresh)
+          in
+          let tls = tls_early_data_config () in
+          ignore
+            (with_live_server ~tls ~early_data_replay_store:replay_store
+               (fun () ->
+                 let prime =
+                   run_s2nc ~ticket_out:session_path
+                     ~input:"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                     ~close_stdin:false ()
+                 in
+                 assert_process_success prime;
+                 assert_nonempty_file session_path;
+                 let early =
+                   run_s2nc ~ticket_in:session_path
+                     ~early_data_file:early_data_path ~close_stdin:true ()
+                 in
+                 assert_process_success early;
+                 Alcotest.(check bool) "blocking callback started" true
+                   (Atomic.get callback_started);
+                 Alcotest.(check bool)
+                   "timeout completes before blocking callback" false
+                   (Atomic.get callback_finished);
+                 Alcotest.(check bool) "timeout rejects early data" true
+                   (contains "Early Data status: REJECTED" early.stdout)))))
+
+let test_blocking_replay_store_deadline_and_capacity () =
+  let module Store = Halo.Server.Config.Early_data_replay_store in
+  let callback_finished = Atomic.make false in
+  let store =
+    Store.create_blocking ~max_in_flight:1 (fun ~identity:_ ~ttl_secs:_ ->
+        Thread.delay 0.5;
+        Atomic.set callback_finished true;
+        Store.Fresh)
+  in
+  Eio_main.run @@ fun _env ->
+  let result =
+    Eio.Fiber.first
+      (fun () ->
+        Eio_unix.sleep 0.01;
+        Store.Unavailable)
+      (fun () -> Store.claim store ~identity:"identity" ~ttl_secs:1L)
+  in
+  Alcotest.(check bool) "timeout wins" true (result = Store.Unavailable);
+  Alcotest.(check bool) "callback remains isolated" false
+    (Atomic.get callback_finished);
+  Alcotest.(check bool) "occupied capacity rejects another claim" true
+    (Store.claim store ~identity:"other" ~ttl_secs:1L = Store.Unavailable)
+
 let () =
   Alcotest.run "runtime"
     [
@@ -394,5 +594,13 @@ let () =
             `Slow test_tls_early_data_defaults_to_425_and_rejects_replay;
           Alcotest.test_case "early data policy opts in and marks request" `Slow
             test_tls_early_data_policy_opts_in_and_marks_request;
+          Alcotest.test_case "early data replay is atomic across runtimes" `Slow
+            test_tls_early_data_replay_is_atomic_across_runtimes;
+          Alcotest.test_case "custom replay store contract" `Slow
+            test_tls_custom_replay_store_contract;
+          Alcotest.test_case "blocking replay store preserves timeout" `Slow
+            test_tls_blocking_replay_store_does_not_block_timeout;
+          Alcotest.test_case "blocking replay store deadline and capacity"
+            `Quick test_blocking_replay_store_deadline_and_capacity;
         ] );
     ]

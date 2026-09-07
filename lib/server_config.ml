@@ -29,6 +29,96 @@ type early_data_policy =
   headers:(string * string) list ->
   bool
 
+module Early_data_replay_store = struct
+  type claim = Fresh | Already_seen | Unavailable
+
+  type blocking_state = {
+    max_in_flight : int;
+    in_flight : int Atomic.t;
+  }
+
+  type execution = Cooperative | Blocking of blocking_state
+
+  type t = {
+    claim_callback : identity:string -> ttl_secs:int64 -> claim;
+    timeout_seconds : float;
+    execution : execution;
+  }
+
+  let validate_timeout timeout_seconds =
+    if
+      timeout_seconds <= 0.0
+      || not
+           (match classify_float timeout_seconds with
+           | FP_normal | FP_subnormal -> true
+           | FP_zero | FP_infinite | FP_nan -> false)
+    then invalid_arg "early-data replay-store timeout must be finite and positive"
+
+  let create ?(timeout_seconds = 0.1) claim_callback =
+    validate_timeout timeout_seconds;
+    { claim_callback; timeout_seconds; execution = Cooperative }
+
+  let create_blocking ?(timeout_seconds = 0.1) ?(max_in_flight = 64)
+      claim_callback =
+    validate_timeout timeout_seconds;
+    if max_in_flight <= 0 then
+      invalid_arg
+        "early-data blocking replay-store max_in_flight must be positive";
+    {
+      claim_callback;
+      timeout_seconds;
+      execution = Blocking { max_in_flight; in_flight = Atomic.make 0 };
+    }
+
+  let rec reserve_slot state =
+    let current = Atomic.get state.in_flight in
+    if current >= state.max_in_flight then false
+    else if Atomic.compare_and_set state.in_flight current (current + 1) then true
+    else reserve_slot state
+
+  let release_slot state =
+    ignore (Atomic.fetch_and_add state.in_flight (-1))
+
+  let run_blocking state claim_callback ~identity ~ttl_secs =
+    if not (reserve_slot state) then Unavailable
+    else
+      let result, resolve = Eio.Promise.create () in
+      let run () =
+        let outcome =
+          try Ok (claim_callback ~identity ~ttl_secs)
+          with exn -> Error (exn, Printexc.get_raw_backtrace ())
+        in
+        release_slot state;
+        ignore (Eio.Promise.try_resolve resolve outcome)
+      in
+      (try ignore (Thread.create run ())
+       with exn ->
+         release_slot state;
+         raise exn);
+      match Eio.Promise.await result with
+      | Ok claim -> claim
+      | Error (exn, backtrace) -> Printexc.raise_with_backtrace exn backtrace
+
+  let claim t ~identity ~ttl_secs =
+    match t.execution with
+    | Cooperative -> t.claim_callback ~identity ~ttl_secs
+    | Blocking state ->
+        run_blocking state t.claim_callback ~identity ~ttl_secs
+
+  let timeout_seconds t = t.timeout_seconds
+
+  external process_local_claim_raw : string -> int64 -> int
+    = "ocaml_halo_tls_replay_cache_claim"
+
+  let process_local =
+    create (fun ~identity ~ttl_secs ->
+        match process_local_claim_raw identity ttl_secs with
+        | 1 -> Fresh
+        | 0 -> Already_seen
+        | -1 -> Unavailable
+        | _ -> Unavailable)
+end
+
 type tls_config = {
   cert_chain_path : string;
   private_key_path : string;
@@ -56,6 +146,7 @@ type t = {
   request_timeout_ms : int;
   idle_timeout_ms : int;
   early_data_policy : early_data_policy;
+  early_data_replay_store : Early_data_replay_store.t option;
   tls : tls_config option;
   controller : controller_config;
   router : Router.t;
@@ -133,6 +224,14 @@ let idle_timeout_error (config : t) =
     Some "server idle_timeout_ms must be non-negative"
   else
     None
+
+let early_data_replay_store_error (config : t) =
+  match config.early_data_replay_store, config.tls with
+  | None, _ -> None
+  | Some _, Some { max_early_data_size = Some size; _ } when size > 0 -> None
+  | Some _, _ ->
+      Some
+        "server early_data_replay_store requires TLS max_early_data_size to be positive"
 
 let tls_cert_chain_path_error (tls : tls_config) =
   if String.length tls.cert_chain_path = 0 then
@@ -408,6 +507,7 @@ let create
     ?(request_timeout_ms = default_request_timeout_ms)
     ?(idle_timeout_ms = default_idle_timeout_ms)
     ?(early_data_policy = default_early_data_policy)
+    ?early_data_replay_store
     ?tls
     ?(controller = default_controller)
     ~port
@@ -422,6 +522,7 @@ let create
     request_timeout_ms;
     idle_timeout_ms;
     early_data_policy;
+    early_data_replay_store;
     tls;
     controller;
     router;
@@ -434,6 +535,7 @@ let validate (config : t) =
   let*? () = max_body_size_error config in
   let*? () = request_timeout_error config in
   let*? () = idle_timeout_error config in
+  let*? () = early_data_replay_store_error config in
   let*? () =
     match config.tls with
     | None -> None

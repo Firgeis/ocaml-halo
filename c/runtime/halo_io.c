@@ -2,8 +2,11 @@
 #include "halo_runtime_internal.h"
 #include "halo_utils.h"
 #include <inttypes.h>
+#include <openssl/sha.h>
 #include <signal.h>
 #include "s2n_connection.h"
+
+#define HALO_TLS13_REPLAY_TTL_SECS (7ULL * 24ULL * 60ULL * 60ULL)
 
 static const char halo_http_continue_response[] =
   "HTTP/1.1 100 Continue\r\n"
@@ -182,8 +185,6 @@ static void halo_listener_pair_release(struct halo_listener_pair* pair) {
       s2n_config_free(pair->ref->tls_config);
       pair->ref->tls_config = NULL;
     }
-    halo_tls_replay_entry_list_destroy(pair->ref->tls_replay_entries);
-    pair->ref->tls_replay_entries = NULL;
     free(pair->ref);
     pair->ref = NULL;
   }
@@ -230,7 +231,6 @@ static int halo_listener_pair_create(struct halo_listener_pair* pair,
   pair->ref->tls_replay_ttl_secs = 0;
   pair->ref->tls_config = NULL;
   pair->ref->tls_cert_chain = NULL;
-  pair->ref->tls_replay_entries = NULL;
   pair->ref->bridge_listener_id = ++runtime->next_listener_id;
   return 0;
 }
@@ -675,13 +675,10 @@ static int halo_tls_build_server_config(value tls_cert_chain_path,
   *out_tls_cert_chain = tls_cert_chain;
   *out_max_early_data_size = max_early_data_size;
   *out_server_keying_material_lifetime_secs = server_keying_material_lifetime_secs;
-  if (session_ticket_decrypt_lifetime_secs >= 0)
-    *out_replay_ttl_secs = (uint64_t) session_ticket_decrypt_lifetime_secs;
-  else if (session_ticket_encrypt_decrypt_lifetime_secs >= 0)
-    *out_replay_ttl_secs =
-      (uint64_t) session_ticket_encrypt_decrypt_lifetime_secs;
-  else
-    *out_replay_ttl_secs = 13ULL * 60ULL * 60ULL;
+  /* TLS 1.3 caps ticket lifetimes at seven days. Retaining a claim for that
+   * full interval from the offer is conservative even when the ticket was
+   * already partly expired, and avoids underestimating combined key phases. */
+  *out_replay_ttl_secs = HALO_TLS13_REPLAY_TTL_SECS;
   return 0;
 
 error:
@@ -693,70 +690,12 @@ error:
   return -1;
 }
 
-static void halo_tls_replay_evict(struct halo_listener_ref* ref, uint64_t now_secs) {
-  struct halo_tls_replay_entry* current;
-  struct halo_tls_replay_entry* previous;
-
-  if (ref == NULL)
-    return;
-
-  previous = NULL;
-  current = ref->tls_replay_entries;
-  while (current != NULL) {
-    if (current->expires_at_secs <= now_secs) {
-      struct halo_tls_replay_entry* next;
-
-      next = current->next;
-      if (previous == NULL)
-        ref->tls_replay_entries = next;
-      else
-        previous->next = next;
-      halo_tls_replay_entry_destroy(current);
-      current = next;
-      continue;
-    }
-    previous = current;
-    current = current->next;
-  }
-}
-
-static int halo_tls_replay_register(struct halo_listener_ref* ref,
-                                    const uint8_t* identity,
-                                    uint16_t identity_len) {
-  struct halo_tls_replay_entry* entry;
-  uint64_t now_secs;
-  uint64_t ttl_secs;
-
-  if (ref == NULL || identity == NULL || identity_len == 0)
-    return -1;
-
-  now_secs = halo_now_seconds();
-  halo_tls_replay_evict(ref, now_secs);
-
-  entry = ref->tls_replay_entries;
-  while (entry != NULL) {
-    if (entry->identity_len == identity_len
-        && memcmp(entry->identity, identity, identity_len) == 0) {
-      return 0;
-    }
-    entry = entry->next;
-  }
-
-  ttl_secs = ref->tls_replay_ttl_secs == 0 ? 1 : ref->tls_replay_ttl_secs;
-  entry = halo_tls_replay_entry_create(identity, identity_len, now_secs + ttl_secs);
-  if (entry == NULL)
-    return -1;
-  entry->next = ref->tls_replay_entries;
-  ref->tls_replay_entries = entry;
-  return 1;
-}
-
 static int halo_tls_early_data_cb(struct s2n_connection* conn,
                                   struct s2n_offered_early_data* early_data) {
   struct halo_client* client;
   uint16_t identity_len;
   uint8_t* identity;
-  int decision;
+  uint8_t identity_digest[SHA256_DIGEST_LENGTH];
   int result;
 
   if (conn == NULL || early_data == NULL)
@@ -774,7 +713,7 @@ static int halo_tls_early_data_cb(struct s2n_connection* conn,
 
   identity = malloc(identity_len);
   if (identity == NULL)
-    return S2N_FAILURE;
+    return s2n_offered_early_data_reject(early_data);
 
   result = s2n_connection_get_negotiated_psk_identity(conn, identity, identity_len);
   if (result != S2N_SUCCESS) {
@@ -782,14 +721,21 @@ static int halo_tls_early_data_cb(struct s2n_connection* conn,
     return S2N_FAILURE;
   }
 
-  decision = halo_tls_replay_register(client->listener_ref, identity, identity_len);
-  free(identity);
-
-  if (decision < 0)
-    return S2N_FAILURE;
-  if (decision == 0)
+  if (SHA256(identity, identity_len, identity_digest) == NULL) {
+    free(identity);
     return s2n_offered_early_data_reject(early_data);
-  return s2n_offered_early_data_accept(early_data);
+  }
+  free(identity);
+  client->tls_pending_early_data = early_data;
+  if (halo_bridge_dispatch_replay_claim(
+        client,
+        identity_digest,
+        sizeof(identity_digest),
+        client->listener_ref->tls_replay_ttl_secs) != 0) {
+    client->tls_pending_early_data = NULL;
+    return s2n_offered_early_data_reject(early_data);
+  }
+  return S2N_SUCCESS;
 }
 
 static int halo_load_file(const char* path, char** contents, size_t* length) {
@@ -1105,6 +1051,8 @@ void halo_client_stop_timer(struct halo_client* client) {
 void halo_close_client(struct halo_client* client) {
   if (client == NULL)
     return;
+
+  halo_bridge_cancel_replay_claim(client);
 
   if (client->listener_ref != NULL
       && client->listener_ref->tls_enabled
@@ -1955,6 +1903,27 @@ int halo_client_bridge_finish_response_stream(struct halo_client* client) {
                            "0\r\n\r\n",
                            5,
                            HALO_WRITE_RESPONSE_STREAM_FINISH);
+}
+
+int halo_client_bridge_resolve_replay_claim(struct halo_client* client,
+                                            uint64_t claim_id,
+                                            int accept) {
+  struct s2n_offered_early_data* early_data;
+
+  if (client == NULL || claim_id == 0
+      || client->bridge_replay_claim_id != claim_id
+      || client->tls_pending_early_data == NULL
+      || client->tls_handshake_complete)
+    return -1;
+
+  early_data = client->tls_pending_early_data;
+  client->bridge_replay_claim_id = 0;
+  client->tls_pending_early_data = NULL;
+  if ((accept
+         ? s2n_offered_early_data_accept(early_data)
+         : s2n_offered_early_data_reject(early_data)) != S2N_SUCCESS)
+    return -1;
+  return halo_tls_drive_handshake((uv_stream_t*) &client->handle, client);
 }
 
 int halo_client_bridge_reject_busy(struct halo_client* client) {

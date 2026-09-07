@@ -80,7 +80,6 @@ struct halo_runtime {
 
 struct halo_listener_ref;
 struct halo_tls_write_chunk;
-struct halo_tls_replay_entry;
 
 struct halo_listener {
   enum halo_handle_kind kind;
@@ -188,6 +187,8 @@ struct halo_client {
   int tls_close_started;
   int tls_early_data_complete;
   int request_is_early_data;
+  uint64_t bridge_replay_claim_id;
+  struct s2n_offered_early_data* tls_pending_early_data;
   size_t body_bytes_read;
   uint64_t bridge_request_id;
   int bridge_response_in_flight;
@@ -251,15 +252,7 @@ struct halo_listener_ref {
   uint64_t tls_replay_ttl_secs;
   struct s2n_config* tls_config;
   struct s2n_cert_chain_and_key* tls_cert_chain;
-  struct halo_tls_replay_entry* tls_replay_entries;
   uint64_t bridge_listener_id;
-};
-
-struct halo_tls_replay_entry {
-  uint8_t* identity;
-  uint16_t identity_len;
-  uint64_t expires_at_secs;
-  struct halo_tls_replay_entry* next;
 };
 
 struct halo_runtime** halo_runtime_slot(value runtime);
@@ -280,11 +273,10 @@ value halo_option_some_uv(const char* operation, int code);
 value halo_listener_alloc(struct halo_listener_ref* ref);
 
 void halo_listener_ref_release(struct halo_listener_ref* ref);
-struct halo_tls_replay_entry* halo_tls_replay_entry_create(const uint8_t* identity,
-                                                           uint16_t identity_len,
-                                                           uint64_t expires_at_secs);
-void halo_tls_replay_entry_destroy(struct halo_tls_replay_entry* entry);
-void halo_tls_replay_entry_list_destroy(struct halo_tls_replay_entry* entry);
+/* Returns -1 when unavailable, 0 when already seen, and 1 when claimed. */
+int halo_tls_replay_cache_claim(const uint8_t* identity,
+                                size_t identity_len,
+                                uint64_t ttl_secs);
 int halo_request_store_header(struct halo_request* request,
                               const char* name,
                               size_t name_len,

@@ -149,6 +149,7 @@ type request_state = {
 type listener = {
   router : Router.t;
   early_data_policy : Server_config.early_data_policy;
+  early_data_replay_store : Server_config.Early_data_replay_store.t;
 }
 
 type t = {
@@ -162,7 +163,8 @@ type t = {
   on_error : int64 -> exn -> unit;
 }
 
-let listener ~early_data_policy router = { router; early_data_policy }
+let listener ~early_data_policy ~early_data_replay_store router =
+  { router; early_data_policy; early_data_replay_store }
 
 let create ~runtime ~listeners ~bridge_switch ~on_error =
   {
@@ -360,6 +362,31 @@ let start_request t (event : Reactor.request_event) =
       Eio.Fiber.fork ~sw:t.bridge_switch (fun () ->
           run_handler t.runtime t.requests listener event state t.on_error)
 
+let replay_claim store (event : Reactor.replay_claim_event) =
+  let module Store = Server_config.Early_data_replay_store in
+  try
+    Eio.Fiber.first
+      (fun () ->
+        Eio_unix.sleep (Store.timeout_seconds store);
+        Store.Unavailable)
+      (fun () -> Store.claim store ~identity:event.identity ~ttl_secs:event.ttl_secs)
+  with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
+  | exn ->
+    Reactor.trace "replay store failed claim=%Ld: %s" event.claim_id
+      (Printexc.to_string exn);
+    Store.Unavailable
+
+let start_replay_claim t (event : Reactor.replay_claim_event) =
+  let accept =
+    match Hashtbl.find_opt t.listeners event.listener_id with
+    | Some { early_data_replay_store = store; _ } ->
+        replay_claim store event = Server_config.Early_data_replay_store.Fresh
+    | None -> false
+  in
+  try Reactor.resolve_replay_claim t.runtime event.claim_id ~accept
+  with Client_disconnected -> ()
+
 let dispatch_event t = function
   | Reactor.Request event -> start_request t event
   | Reactor.Body_chunk { request_id; chunk } ->
@@ -395,6 +422,8 @@ let dispatch_event t = function
           in
           ignore (Eio.Promise.try_resolve resolve result))
         (Hashtbl.find_opt t.metrics_waiters query_id)
+  | Reactor.Replay_claim event ->
+      Eio.Fiber.fork ~sw:t.bridge_switch (fun () -> start_replay_claim t event)
   | Reactor.Stopped ->
       Hashtbl.iter
         (fun _ resolve ->

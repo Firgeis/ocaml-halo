@@ -192,9 +192,53 @@ data, and server keying-material lifetime limits. See `Halo.Server.Config` for
 the complete typed configuration surface.
 
 Early-data requests are rejected with `425 Too Early` by default. Applications
-that enable `~max_early_data_size` must explicitly opt replay-safe requests in
-with `Server.Config.create ~early_data_policy`. Accepted handlers can use
+that enable `~max_early_data_size` must explicitly allow replay-safe requests
+through `Server.Config.create ~early_data_policy`. Accepted handlers can use
 `Router.Request.is_early_data` to distinguish early data from ordinary traffic.
+The in-process replay cache is shared by all listeners and runtimes, uses a
+bounded hash table, and rejects new early data when its 65,536-entry or 64 MiB
+identity budget is exhausted. Separate processes still require coordinated
+replay protection at the deployment layer. Install a shared adapter with
+`~early_data_replay_store` for those deployments:
+
+```ocaml
+module Replay_store = Halo.Server.Config.Early_data_replay_store
+
+let early_data_tls =
+  Halo.Server.Config.tls
+    ~cert_chain_path:"cert.pem"
+    ~private_key_path:"key.pem"
+    ~minimum_protocol_version:Halo.Server.TLS13
+    ~session_tickets_enabled:true
+    ~max_early_data_size:4096
+    ()
+
+let replay_store =
+  Replay_store.create_blocking ~timeout_seconds:0.1 ~max_in_flight:64
+    (fun ~identity ~ttl_secs ->
+      (* Atomically claim the binary identity for this TTL. For Redis this is
+         equivalent to SET identity 1 NX EX ttl_secs. *)
+      match claim_in_shared_store ~identity ~ttl_secs with
+      | `Claimed -> Replay_store.Fresh
+      | `Exists -> Replay_store.Already_seen
+      | `Unavailable -> Replay_store.Unavailable)
+
+let config =
+  Halo.Server.Config.create ~port:8443 ~tls:early_data_tls
+    ~early_data_replay_store:replay_store router
+```
+
+The identity is an opaque 32-byte SHA-256 digest of the TLS PSK identity. The
+claim must be atomic across every process or instance sharing ticket keys.
+`Already_seen`, `Unavailable`, exceptions, and timeouts reject early data but
+allow the TLS handshake to continue. Without a custom adapter, Halo uses the
+bounded process-wide cache described above, exposed as
+`Early_data_replay_store.process_local`, which is also the reference
+implementation of the contract. Use `Early_data_replay_store.create` for a
+cooperative Eio client, or `create_blocking` for a blocking client. Blocking
+callbacks run in system threads and are bounded by `max_in_flight`; they may
+finish after Halo has rejected early data on timeout, so the store client must
+also have a finite I/O timeout.
 
 ## Development
 
