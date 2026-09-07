@@ -134,7 +134,9 @@ let run_bridge runtime listeners shutdown on_error on_ready =
 let run ?shutdown ?(handle_sigint = true) ?(max_in_flight_requests = 4096)
     ?(command_capacity = 4096)
     ?on_ready
-    ?(on_error = fun _request_id exn -> prerr_endline (Printexc.to_string exn))
+    ?(on_error = fun _request_id exn backtrace ->
+      prerr_endline (Printexc.to_string exn);
+      Printexc.print_raw_backtrace stderr backtrace)
     configs =
   if max_in_flight_requests <= 0 then
     invalid_arg "max_in_flight_requests must be positive";

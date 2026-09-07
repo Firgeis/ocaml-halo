@@ -167,8 +167,12 @@ Halo.Server.run
 ```
 
 In practice, keep `on_ready` short and hand the handle to another fiber before
-waiting for work. Handler exceptions are reported through `on_error` and become
-a 500 response if no response has started. Disconnects raise
+waiting for work. Handler exceptions and their raw backtraces are reported
+through `on_error` and become a 500 response if no response has started. The
+default callback prints both to standard error. Custom reporters receive
+`request_id`, `exn`, and `Printexc.raw_backtrace`; enable backtrace recording
+with `Printexc.record_backtrace true` or `OCAMLRUNPARAM=b` to ensure the
+backtrace is populated. Disconnects raise
 `Halo.Server.Client_disconnected` in the affected request fiber.
 
 The admission bound defaults to 4096 in-flight requests. It can be changed with

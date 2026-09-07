@@ -60,8 +60,14 @@ val run :
   ?max_in_flight_requests:int ->
   ?command_capacity:int ->
   ?on_ready:(running -> unit) ->
-  ?on_error:(int64 -> exn -> unit) ->
+  ?on_error:(int64 -> exn -> Printexc.raw_backtrace -> unit) ->
   Config.t list ->
   unit
 (** Run all configured listeners. Each request handler executes in its own Eio
-    fiber. [on_ready] runs in a child fiber after listeners are bound. *)
+    fiber. [on_ready] runs in a child fiber after listeners are bound.
+
+    [on_error request_id exn backtrace] reports request-processing and response
+    stream failures. If no response has started, Halo sends a 500 response after
+    the callback returns. [backtrace] is empty when OCaml backtrace recording is
+    disabled. The default callback prints the exception and backtrace to standard
+    error. *)

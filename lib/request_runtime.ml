@@ -160,7 +160,7 @@ type t = {
   mutable next_metrics_query : int64;
   listeners : (int64, listener) Hashtbl.t;
   bridge_switch : Eio.Switch.t;
-  on_error : int64 -> exn -> unit;
+  on_error : int64 -> exn -> Printexc.raw_backtrace -> unit;
 }
 
 let listener ~early_data_policy ~early_data_replay_store router =
@@ -261,7 +261,8 @@ let handle_request listener (event : Reactor.request_event) state body
   with
   | exn when is_disconnect_exception exn -> completed := true
   | exn ->
-      on_error event.request_id exn;
+      let backtrace = Printexc.get_raw_backtrace () in
+      on_error event.request_id exn backtrace;
       if not !sent then
         (try send_fixed Http.internal_server_error
          with disconnect when is_disconnect_exception disconnect ->
@@ -317,7 +318,9 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
            await_write state)
      with
     | exn when is_disconnect_exception exn -> raise exn
-    | exn -> on_error event.request_id exn);
+    | exn ->
+        let backtrace = Printexc.get_raw_backtrace () in
+        on_error event.request_id exn backtrace);
     Reactor.finish_response_stream runtime event.request_id;
     await_response_completion ()
   in
@@ -433,8 +436,8 @@ let dispatch_event t = function
         t.metrics_waiters;
       Hashtbl.clear t.metrics_waiters
   | Reactor.Unknown { kind; request_id; payload = _ } ->
-      t.on_error request_id
-        (Failure (Printf.sprintf "unknown bridge event %d" kind))
+      let exn = Failure (Printf.sprintf "unknown bridge event %d" kind) in
+      t.on_error request_id exn (Printexc.get_callstack 32)
 
 let rec drain_events t stopped =
   match Reactor.poll_event t.runtime with

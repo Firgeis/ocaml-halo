@@ -11,7 +11,7 @@ val create :
   runtime:Server_backend.t ->
   listeners:(int64, listener) Hashtbl.t ->
   bridge_switch:Eio.Switch.t ->
-  on_error:(int64 -> exn -> unit) ->
+  on_error:(int64 -> exn -> Printexc.raw_backtrace -> unit) ->
   t
 
 val run : t -> unit

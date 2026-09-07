@@ -137,7 +137,7 @@ let assert_process_success result =
       fail "process stopped by signal %d\nstdout:\n%s\nstderr:\n%s" signal
         result.stdout result.stderr
 
-let with_live_config_groups config_groups f =
+let with_live_config_groups ?on_error config_groups f =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let servers =
@@ -148,6 +148,7 @@ let with_live_config_groups config_groups f =
         let server =
           Eio.Fiber.fork_promise ~sw (fun () ->
               Halo.Server.run ~shutdown ~handle_sigint:false
+                ?on_error
                 ~on_ready:(fun running ->
                   Eio.Promise.resolve notify_started running)
                 configs)
@@ -166,12 +167,13 @@ let with_live_config_groups config_groups f =
   List.iter (fun (_, server) -> Eio.Promise.await_exn server) servers;
   match outcome with Ok metrics -> metrics | Error exn -> raise exn
 
-let with_live_configs configs f =
-  match with_live_config_groups [ configs ] f with
+let with_live_configs ?on_error configs f =
+  match with_live_config_groups ?on_error [ configs ] f with
   | [ metrics ] -> metrics
   | _ -> assert false
 
-let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router f =
+let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router
+    ?on_error f =
   let router =
     Option.value router
       ~default:
@@ -185,9 +187,79 @@ let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router f 
     Halo.Server.Config.create ~port:8443 ?tls ?early_data_policy
       ?early_data_replay_store router
   in
-  with_live_configs [ config ] f
+  with_live_configs ?on_error [ config ] f
 
 let with_live_tls_server tls = with_live_server ~tls
+
+let plaintext_request ~until request =
+  let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close socket)
+    (fun () ->
+      Unix.connect socket
+        (Unix.ADDR_INET (Unix.inet_addr_loopback, 8443));
+      let payload = Bytes.of_string request in
+      let rec write offset =
+        if offset < Bytes.length payload then
+          let count =
+            Unix.write socket payload offset (Bytes.length payload - offset)
+          in
+          write (offset + count)
+      in
+      write 0;
+      let response = Buffer.create 256 in
+      let chunk = Bytes.create 256 in
+      let rec read () =
+        let contents = Buffer.contents response in
+        if contains until contents then
+          contents
+        else
+          match Unix.read socket chunk 0 (Bytes.length chunk) with
+          | 0 -> contents
+          | count ->
+              Buffer.add_subbytes response chunk 0 count;
+              read ()
+      in
+      read ())
+
+let test_handler_error_reports_raw_backtrace () =
+  let previous_backtrace_status = Printexc.backtrace_status () in
+  Printexc.record_backtrace true;
+  Fun.protect
+    ~finally:(fun () -> Printexc.record_backtrace previous_backtrace_status)
+    (fun () ->
+      let reported = Atomic.make None in
+      let on_error request_id exn backtrace =
+        Atomic.set reported
+          (Some
+             ( request_id,
+               Printexc.to_string exn,
+               Printexc.raw_backtrace_length backtrace ))
+      in
+      let router =
+        Halo.Router.(
+          route
+            Matcher.(
+              let+ () = request_method_is GET *> path_end in
+              fun _request -> failwith "handler backtrace marker"))
+      in
+      ignore
+        (with_live_server ~router ~on_error (fun () ->
+             let response =
+               plaintext_request ~until:"internal server error\n"
+                 "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+             in
+             Alcotest.(check bool) "handler failure returns 500" true
+               (contains "HTTP/1.1 500 Internal Server Error" response)));
+      match Atomic.get reported with
+      | None -> fail "expected on_error to be called"
+      | Some (request_id, exn, backtrace_length) ->
+          Alcotest.(check bool) "request id is populated" true
+            (Int64.compare request_id 0L > 0);
+          Alcotest.(check string) "exception is preserved"
+            "Failure(\"handler backtrace marker\")" exn;
+          Alcotest.(check bool) "raw backtrace is populated" true
+            (backtrace_length > 0))
 
 let tls_resumption_config ?session_ticket_keys_path () =
   Halo.Server.Config.tls
@@ -577,6 +649,11 @@ let test_blocking_replay_store_deadline_and_capacity () =
 let () =
   Alcotest.run "runtime"
     [
+      ( "errors",
+        [
+          Alcotest.test_case "handler reports raw backtrace" `Quick
+            test_handler_error_reports_raw_backtrace;
+        ] );
       ( "metrics",
         [
           Alcotest.test_case "default snapshot" `Quick
