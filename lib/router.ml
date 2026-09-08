@@ -324,6 +324,11 @@ type informational_response = {
   headers : Headers.t;
 }
 
+type response_outcome =
+  | Completed
+  | Aborted of exn * Printexc.raw_backtrace
+  | Client_disconnected
+
 module Response = struct
   type t = response
 
@@ -353,6 +358,7 @@ type request_context = {
   request_switch : Eio.Switch.t option;
   send_informational : informational_response -> unit;
   on_disconnect : (unit -> unit) -> unit;
+  on_response_terminated : (response_outcome -> unit) -> unit;
 }
 
 type request_view = {
@@ -620,6 +626,9 @@ module Request = struct
     request.context.send_informational response
 
   let on_disconnect request cleanup = request.context.on_disconnect cleanup
+
+  let on_response_terminated request callback =
+    request.context.on_response_terminated callback
 
   let header request name = header_from_list request.headers name
 
@@ -943,6 +952,9 @@ let dispatch router (request : request) =
           invalid_arg "informational responses require a server handler");
       on_disconnect =
         (fun _ -> invalid_arg "disconnect hooks require a server handler");
+      on_response_terminated =
+        (fun _ ->
+          invalid_arg "response lifecycle hooks require a server handler");
     }
   in
   dispatch_from_input router
@@ -964,7 +976,8 @@ let dispatch router (request : request) =
 
 module Runtime = struct
   let dispatch router (request : request) ~raw_headers ~body ~is_early_data
-      ~request_id ~request_switch ~send_informational ~on_disconnect =
+      ~request_id ~request_switch ~send_informational ~on_disconnect
+      ~on_response_terminated =
     let request_view =
       {
         request_method_text = string_of_http_method request.request_method;
@@ -981,6 +994,7 @@ module Runtime = struct
             request_switch = Some request_switch;
             send_informational;
             on_disconnect;
+            on_response_terminated;
           };
       }
     in

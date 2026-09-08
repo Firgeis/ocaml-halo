@@ -79,6 +79,21 @@ Middleware may wrap matched handlers with `Router.use`. Pre-middleware added
 with `Router.use_pre` can continue, respond immediately, or rewrite the request
 before matching.
 
+Middleware that needs the final transport outcome can register a lifecycle
+callback before calling the next handler:
+
+```ocaml
+let observe next request =
+  Halo.Router.Request.on_response_terminated request (function
+    | Halo.Router.Completed -> log "response completed"
+    | Halo.Router.Aborted (exn, backtrace) -> log_stream_error exn backtrace
+    | Halo.Router.Client_disconnected -> log "client disconnected");
+  next request
+```
+
+The callback runs exactly once for buffered and streamed responses, including
+after the handler has returned.
+
 ## Request bodies
 
 `Body.read` returns the next available chunk, or `None` after the complete body

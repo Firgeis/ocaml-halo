@@ -222,6 +222,139 @@ let plaintext_request ~until request =
       in
       read ())
 
+type observed_response_outcome =
+  | Observed_completed
+  | Observed_aborted of string
+  | Observed_client_disconnected
+
+let observe_response_outcome callback_count observed next request =
+  Halo.Router.Request.on_response_terminated request (fun outcome ->
+      ignore (Atomic.fetch_and_add callback_count 1);
+      Atomic.set observed
+        (Some
+           (match outcome with
+           | Halo.Router.Completed -> Observed_completed
+           | Halo.Router.Aborted (exn, _backtrace) ->
+               Observed_aborted (Printexc.to_string exn)
+           | Halo.Router.Client_disconnected -> Observed_client_disconnected)));
+  next request
+
+let wait_for_response_outcome observed =
+  let deadline = Unix.gettimeofday () +. 1.0 in
+  let rec wait () =
+    match Atomic.get observed with
+    | Some outcome -> outcome
+    | None when Unix.gettimeofday () >= deadline ->
+        fail "timed out waiting for response termination callback"
+    | None ->
+        Unix.sleepf 0.01;
+        wait ()
+  in
+  wait ()
+
+let run_response_outcome_test ?on_error router client =
+  let callback_count = Atomic.make 0 in
+  let observed = Atomic.make None in
+  let router =
+    Halo.Router.use (observe_response_outcome callback_count observed) router
+  in
+  ignore
+    (with_live_server ~router ?on_error (fun () ->
+         client ();
+         ignore (wait_for_response_outcome observed)));
+  Alcotest.(check int) "callback runs exactly once" 1
+    (Atomic.get callback_count);
+  match Atomic.get observed with
+  | Some outcome -> outcome
+  | None -> fail "expected response termination outcome"
+
+let test_fixed_response_reports_completed () =
+  let router =
+    Halo.Router.(
+      route
+        Matcher.(
+          let+ () = request_method_is GET *> path_end in
+          fun _request -> text Status.ok "complete\n"))
+  in
+  let outcome =
+    run_response_outcome_test router (fun () ->
+        ignore
+          (plaintext_request ~until:"complete\n"
+             "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+  in
+  match outcome with
+  | Observed_completed -> ()
+  | _ -> fail "expected completed response outcome"
+
+let test_stream_response_reports_completed () =
+  let router =
+    Halo.Router.(
+      route
+        Matcher.(
+          let+ () = request_method_is GET *> path_end in
+          fun _request ->
+            Halo.Stream.respond ~status:Status.ok (fun ~yield ->
+                yield "complete\n")))
+  in
+  let outcome =
+    run_response_outcome_test router (fun () ->
+        ignore
+          (plaintext_request ~until:"0\r\n\r\n"
+             "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+  in
+  match outcome with
+  | Observed_completed -> ()
+  | _ -> fail "expected completed stream outcome"
+
+let test_failed_stream_reports_aborted () =
+  let router =
+    Halo.Router.(
+      route
+        Matcher.(
+          let+ () = request_method_is GET *> path_end in
+          fun _request ->
+            Halo.Stream.respond ~status:Status.ok (fun ~yield ->
+                yield "partial\n";
+                failwith "stream outcome marker")))
+  in
+  let outcome =
+    run_response_outcome_test ~on_error:(fun _ _ _ -> ()) router (fun () ->
+        let response =
+          plaintext_request ~until:"unreachable response marker"
+            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
+        in
+        Alcotest.(check bool) "partial stream was sent" true
+          (contains "partial\n" response);
+        Alcotest.(check bool) "stream terminator was omitted" false
+          (contains "\r\n0\r\n\r\n" response))
+  in
+  match outcome with
+  | Observed_aborted message ->
+      Alcotest.(check string) "producer exception is preserved"
+        "Failure(\"stream outcome marker\")" message
+  | _ -> fail "expected aborted response outcome"
+
+let test_peer_disconnect_reports_client_disconnected () =
+  let router =
+    Halo.Router.(
+      route
+        Matcher.(
+          let+ () = request_method_is POST *> path_end in
+          fun request ->
+            Halo.Stream.respond ~status:Status.ok (fun ~yield ->
+                yield "partial\n";
+                ignore (Halo.Body.read (Request.body request)))))
+  in
+  let outcome =
+    run_response_outcome_test router (fun () ->
+        ignore
+          (plaintext_request ~until:"partial\n"
+             "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n"))
+  in
+  match outcome with
+  | Observed_client_disconnected -> ()
+  | _ -> fail "expected client-disconnected response outcome"
+
 let test_handler_error_reports_raw_backtrace () =
   let previous_backtrace_status = Printexc.backtrace_status () in
   Printexc.record_backtrace true;
@@ -653,6 +786,17 @@ let () =
         [
           Alcotest.test_case "handler reports raw backtrace" `Quick
             test_handler_error_reports_raw_backtrace;
+        ] );
+      ( "response lifecycle",
+        [
+          Alcotest.test_case "fixed response completes" `Quick
+            test_fixed_response_reports_completed;
+          Alcotest.test_case "stream response completes" `Quick
+            test_stream_response_reports_completed;
+          Alcotest.test_case "failed stream aborts" `Quick
+            test_failed_stream_reports_aborted;
+          Alcotest.test_case "peer disconnects" `Quick
+            test_peer_disconnect_reports_client_disconnected;
         ] );
       ( "metrics",
         [

@@ -67,7 +67,7 @@ val run :
     fiber. [on_ready] runs in a child fiber after listeners are bound.
 
     [on_error request_id exn backtrace] reports request-processing and response
-    stream failures. If no response has started, Halo sends a 500 response after
-    the callback returns. [backtrace] is empty when OCaml backtrace recording is
-    disabled. The default callback prints the exception and backtrace to standard
-    error. *)
+    stream failures, and response lifecycle callback failures. If no response
+    has started, Halo sends a 500 response after the callback returns.
+    [backtrace] is empty when OCaml backtrace recording is disabled. The default
+    callback prints the exception and backtrace to standard error. *)

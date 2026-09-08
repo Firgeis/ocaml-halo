@@ -144,6 +144,10 @@ type request_state = {
   mutable request_cancel : Eio.Cancel.t option;
   mutable disconnected : bool;
   mutable disconnect_cleanups : (unit -> unit) list;
+  mutable response_abort : (exn * Printexc.raw_backtrace) option;
+  mutable response_outcome : Router.response_outcome option;
+  mutable response_termination_callbacks :
+    (Router.response_outcome -> unit) list;
 }
 
 type listener = {
@@ -193,6 +197,35 @@ let run_disconnect_cleanups state =
 let on_disconnect state cleanup =
   if state.disconnected then cleanup ()
   else state.disconnect_cleanups <- cleanup :: state.disconnect_cleanups
+
+let on_response_terminated state callback =
+  match state.response_outcome with
+  | Some outcome -> callback outcome
+  | None ->
+      state.response_termination_callbacks <-
+        callback :: state.response_termination_callbacks
+
+let report_callback_error on_error request_id exn backtrace =
+  try on_error request_id exn backtrace
+  with reporting_exn ->
+    prerr_endline
+      (Printf.sprintf "response lifecycle error reporter failed: %s"
+         (Printexc.to_string reporting_exn))
+
+let terminate_response state on_error outcome =
+  match state.response_outcome with
+  | Some _ -> ()
+  | None ->
+      state.response_outcome <- Some outcome;
+      let callbacks = List.rev state.response_termination_callbacks in
+      state.response_termination_callbacks <- [];
+      List.iter
+        (fun callback ->
+          try callback outcome
+          with exn ->
+            let backtrace = Printexc.get_raw_backtrace () in
+            report_callback_error on_error state.request_id exn backtrace)
+        callbacks
 
 let make_body runtime state ~body_expected =
   if not body_expected then Body.Private.of_string ""
@@ -247,6 +280,7 @@ let dispatch_request listener (event : Reactor.request_event) state body
         ~is_early_data:event.is_early_data ~request_id:event.request_id
         ~request_switch ~send_informational
         ~on_disconnect:(on_disconnect state)
+        ~on_response_terminated:(on_response_terminated state)
 
 let handle_request listener (event : Reactor.request_event) state body
     ~send_informational ~send_response ~send_fixed ~completed ~sent ~on_error () =
@@ -332,6 +366,7 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
         Reactor.finish_response_stream runtime event.request_id;
         await_response_completion ()
     | Some (exn, backtrace) ->
+        state.response_abort <- Some (exn, backtrace);
         on_error event.request_id exn backtrace;
         Reactor.abort_response_stream runtime event.request_id;
         await_response_abort ()
@@ -371,6 +406,9 @@ let start_request t (event : Reactor.request_event) =
           request_cancel = None;
           disconnected = false;
           disconnect_cleanups = [];
+          response_abort = None;
+          response_outcome = None;
+          response_termination_callbacks = [];
         }
       in
       Hashtbl.replace t.requests event.request_id state;
@@ -418,16 +456,23 @@ let dispatch_event t = function
         (Hashtbl.find_opt t.requests request_id)
   | Reactor.Response_complete request_id ->
       handle_terminal_event t.requests request_id (fun state ->
-          resolve_completion state (Ok ()))
+          resolve_completion state (Ok ());
+          terminate_response state t.on_error Router.Completed)
   | Reactor.Disconnected request_id ->
       handle_terminal_event t.requests request_id (fun state ->
+          let response_outcome =
+            match state.response_abort with
+            | Some (exn, backtrace) -> Router.Aborted (exn, backtrace)
+            | None -> Router.Client_disconnected
+          in
           state.disconnected <- true;
           run_disconnect_cleanups state;
           Eio.Stream.add state.body_events Body_disconnected;
           resolve_completion state (Error Client_disconnected);
           Option.iter
             (fun cancel -> Eio.Cancel.cancel cancel Client_disconnected)
-            state.request_cancel)
+            state.request_cancel;
+          terminate_response state t.on_error response_outcome)
   | Reactor.Metrics { query_id; payload } ->
       Option.iter
         (fun resolve ->

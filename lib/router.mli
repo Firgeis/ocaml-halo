@@ -174,6 +174,15 @@ type response
 (** A validated 1xx response. *)
 type informational_response
 
+type response_outcome =
+  | Completed
+  | Aborted of exn * Printexc.raw_backtrace
+  | Client_disconnected
+(** The terminal transport outcome of a response. [Completed] means the final
+    response write completed. [Aborted] means Halo aborted a committed stream
+    after a producer failure. [Client_disconnected] means the peer or transport
+    disappeared before the response completed. *)
+
 module Response : sig
   type t = response
 
@@ -211,6 +220,12 @@ module Request : sig
   val id : t -> int64
   val send_informational : t -> informational_response -> unit
   val on_disconnect : t -> (unit -> unit) -> unit
+
+  val on_response_terminated : t -> (response_outcome -> unit) -> unit
+  (** Register a callback that runs exactly once when the response reaches a
+      terminal transport outcome. This includes buffered responses and
+      streams, and the callback may run after the handler has returned. *)
+
   val header : t -> string -> string option
   val headers : t -> string -> string list
   val fold_headers : t -> init:'a -> f:('a -> string -> string -> 'a) -> 'a
@@ -283,6 +298,7 @@ module Runtime : sig
     request_switch:Eio.Switch.t ->
     send_informational:(informational_response -> unit) ->
     on_disconnect:((unit -> unit) -> unit) ->
+    on_response_terminated:((response_outcome -> unit) -> unit) ->
     response
 end
 
