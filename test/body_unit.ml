@@ -7,14 +7,13 @@ let body_of_chunks chunks =
           remaining := rest;
           Some chunk)
 
-let test_read_all_concatenates_without_losing_read_chunks () =
+let test_read_all_drains_only_unread_chunks () =
   let body = body_of_chunks [ "alpha"; "beta"; "gamma" ] in
   Alcotest.(check (option string)) "first chunk" (Some "alpha")
     (Halo.Body.read body);
-  Alcotest.(check string) "complete body" "alphabetagamma"
+  Alcotest.(check string) "unread body" "betagamma"
     (Halo.Body.read_all body);
-  Alcotest.(check string) "cached complete body" "alphabetagamma"
-    (Halo.Body.read_all body);
+  Alcotest.(check string) "no body remains" "" (Halo.Body.read_all body);
   Alcotest.(check (option string)) "ended body" None (Halo.Body.read body)
 
 let test_empty_body () =
@@ -27,8 +26,8 @@ let () =
     [
       ( "body",
         [
-          Alcotest.test_case "read_all retains chunks returned by read" `Quick
-            test_read_all_concatenates_without_losing_read_chunks;
+          Alcotest.test_case "read_all drains only unread chunks" `Quick
+            test_read_all_drains_only_unread_chunks;
           Alcotest.test_case "empty body" `Quick test_empty_body;
         ] );
     ]

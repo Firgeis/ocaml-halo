@@ -96,9 +96,11 @@ after the handler has returned.
 
 ## Request bodies
 
-`Body.read` returns the next available chunk, or `None` after the complete body
-has been read. `Body.read_all` drains the body and returns the complete value,
-including chunks already returned by `read`.
+`Body.read` consumes and returns the next available chunk, or `None` after the
+complete body has been read. Consumed chunks are released rather than retained.
+`Body.read_all` drains and returns only the unread remainder, so incremental
+consumers use memory proportional to the current chunk instead of the complete
+request body.
 
 ```ocaml
 route

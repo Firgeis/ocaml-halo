@@ -230,6 +230,9 @@ module Request : sig
   val headers : t -> string -> string list
   val fold_headers : t -> init:'a -> f:('a -> string -> string -> 'a) -> 'a
   val copy_headers : t -> (string * string) list
+
+  (** Copy request metadata and consume the unread request body. Body bytes
+      already returned by [Body.read] are not included. *)
   val materialize : t -> request
 end
 

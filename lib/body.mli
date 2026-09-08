@@ -1,12 +1,12 @@
 type t
 
 val read : t -> string option
-(** Read the next request-body chunk, or [None] at end of body. Calls are
-    serialized for each body. *)
+(** Consume and return the next request-body chunk, or [None] at end of body.
+    Consumed chunks are not retained. Calls are serialized for each body. *)
 
 val read_all : t -> string
-(** Read to the end and return the complete body, including chunks previously
-    returned by [read]. *)
+(** Consume and return all unread body data. Bytes previously returned by
+    [read] are not included. Returns the empty string when no data remains. *)
 
 val is_complete : t -> bool
 
