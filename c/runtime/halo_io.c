@@ -1905,6 +1905,15 @@ int halo_client_bridge_finish_response_stream(struct halo_client* client) {
                            HALO_WRITE_RESPONSE_STREAM_FINISH);
 }
 
+int halo_client_bridge_abort_response_stream(struct halo_client* client) {
+  if (client == NULL || client->bridge_request_id == 0
+      || !client->response_started || client->interim_response_started
+      || client->bridge_response_in_flight)
+    return -1;
+  halo_close_client(client);
+  return 0;
+}
+
 int halo_client_bridge_resolve_replay_claim(struct halo_client* client,
                                             uint64_t claim_id,
                                             int accept) {

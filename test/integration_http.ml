@@ -140,15 +140,19 @@ let read_until_contains ?(timeout = 1.0) fd buffer needle =
   in
   loop ()
 
-let read_until_eof fd buffer =
+let read_until_eof ?(timeout = 1.0) fd buffer =
+  let deadline = Unix.gettimeofday () +. timeout in
   let rec loop () =
-    match Unix.select [fd] [] [] 0.2 with
-    | [], _, _ -> Buffer.contents buffer
-    | _ ->
-        if read_into_buffer fd buffer then
-          loop ()
-        else
-          Buffer.contents buffer
+    if Unix.gettimeofday () >= deadline then
+      fail "timed out waiting for the server to close the connection"
+    else
+      match Unix.select [fd] [] [] 0.05 with
+      | [], _, _ -> loop ()
+      | _ ->
+          if read_into_buffer fd buffer then
+            loop ()
+          else
+            Buffer.contents buffer
   in
   loop ()
 
@@ -1188,7 +1192,7 @@ let test_http11_streaming_route_streams_chunks_incrementally () =
           Alcotest.(check bool) "terminating chunk observed" true
             (contains "\r\n0\r\n\r\n" finished)))
 
-let test_streaming_exception_after_start_finishes_stream_without_500 () =
+let test_streaming_exception_after_start_aborts_stream () =
   with_server (fun () ->
       let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
       let buffer = Buffer.create 4096 in
@@ -1197,7 +1201,7 @@ let test_streaming_exception_after_start_finishes_stream_without_500 () =
         (fun () ->
           Unix.connect fd (Unix.ADDR_INET (host, port));
           let request =
-            "GET /stream/explode HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            "GET /stream/explode HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
           in
           write_all fd request 0 (String.length request);
           let response = read_until_eof fd buffer in
@@ -1205,7 +1209,7 @@ let test_streaming_exception_after_start_finishes_stream_without_500 () =
             (String.starts_with ~prefix:"HTTP/1.1 200 OK" response);
           Alcotest.(check bool) "first chunk observed" true
             (contains "6\r\nhello \r\n" response);
-          Alcotest.(check bool) "terminating chunk observed" true
+          Alcotest.(check bool) "terminating chunk absent" false
             (contains "\r\n0\r\n\r\n" response);
           Alcotest.(check bool) "no 500 body emitted" false
             (contains "internal server error\n" response)))
@@ -1601,8 +1605,8 @@ let () =
           timed_test_case "HTTP/1.1 streaming route streams chunks incrementally"
             `Quick test_http11_streaming_route_streams_chunks_incrementally;
           timed_test_case
-            "streaming exception after start finishes stream without 500"
-            `Quick test_streaming_exception_after_start_finishes_stream_without_500;
+            "streaming exception after start aborts stream"
+            `Quick test_streaming_exception_after_start_aborts_stream;
           timed_test_case "SSE route streams expected headers and frames" `Quick
             test_sse_route_streams_expected_headers_and_frames;
           timed_test_case "stream disconnect runs cleanup" `Quick

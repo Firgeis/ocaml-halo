@@ -63,6 +63,7 @@ val send_informational : Server_backend.t -> int64 -> string -> unit
 val start_response_stream : Server_backend.t -> int64 -> string -> unit
 val write_response_chunk : Server_backend.t -> int64 -> string -> unit
 val finish_response_stream : Server_backend.t -> int64 -> unit
+val abort_response_stream : Server_backend.t -> int64 -> unit
 val request_metrics : Server_backend.t -> int64 -> unit
 val resolve_replay_claim : Server_backend.t -> int64 -> accept:bool -> unit
 val metrics_of_payload : string -> Server_backend.runtime_metrics

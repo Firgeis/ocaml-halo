@@ -46,6 +46,7 @@ int halo_client_bridge_write_response_chunk(struct halo_client* client,
                                             const char* response,
                                             size_t response_len);
 int halo_client_bridge_finish_response_stream(struct halo_client* client);
+int halo_client_bridge_abort_response_stream(struct halo_client* client);
 int halo_client_bridge_resolve_replay_claim(struct halo_client* client,
                                             uint64_t claim_id,
                                             int accept);

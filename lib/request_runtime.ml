@@ -280,6 +280,12 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
     | Ok () -> completed := true
     | Error exn -> raise exn
   in
+  let await_response_abort () =
+    match Eio.Promise.await state.completion with
+    | Ok () -> completed := true
+    | Error exn when is_disconnect_exception exn -> completed := true
+    | Error exn -> raise exn
+  in
   let send_fixed response =
     let wire =
       Http.serialize_fixed ~request_method:event.method_text
@@ -311,18 +317,24 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
     Reactor.start_response_stream runtime event.request_id head;
     sent := true;
     await_write state;
-    (try
-       producer ~yield:(fun chunk ->
-           Reactor.write_response_chunk runtime event.request_id
-             (Http.serialize_chunk chunk);
-           await_write state)
-     with
-    | exn when is_disconnect_exception exn -> raise exn
-    | exn ->
-        let backtrace = Printexc.get_raw_backtrace () in
-        on_error event.request_id exn backtrace);
-    Reactor.finish_response_stream runtime event.request_id;
-    await_response_completion ()
+    match
+      try
+        producer ~yield:(fun chunk ->
+            Reactor.write_response_chunk runtime event.request_id
+              (Http.serialize_chunk chunk);
+            await_write state);
+        None
+      with
+      | exn when is_disconnect_exception exn -> raise exn
+      | exn -> Some (exn, Printexc.get_raw_backtrace ())
+    with
+    | None ->
+        Reactor.finish_response_stream runtime event.request_id;
+        await_response_completion ()
+    | Some (exn, backtrace) ->
+        on_error event.request_id exn backtrace;
+        Reactor.abort_response_stream runtime event.request_id;
+        await_response_abort ()
   in
   let send_response (response : Router.response) =
     match Router.Response.body response with

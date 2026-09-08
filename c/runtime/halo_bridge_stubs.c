@@ -233,6 +233,16 @@ CAMLprim value ocaml_halo_bridge_finish_response_stream(value runtime_value,
                                               0));
 }
 
+CAMLprim value ocaml_halo_bridge_abort_response_stream(value runtime_value,
+                                                       value request_id) {
+  CAMLparam2(runtime_value, request_id);
+  CAMLreturn(halo_bridge_enqueue_command_stub(runtime_value,
+                                              request_id,
+                                              HALO_BRIDGE_ABORT_RESPONSE_STREAM,
+                                              NULL,
+                                              0));
+}
+
 CAMLprim value ocaml_halo_bridge_read_metrics(value runtime_value,
                                               value query_id) {
   CAMLparam2(runtime_value, query_id);

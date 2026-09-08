@@ -110,6 +110,9 @@ external write_response_chunk_raw : Server_backend.t -> int64 -> string -> int
 external finish_response_stream_raw : Server_backend.t -> int64 -> int
   = "ocaml_halo_bridge_finish_response_stream"
 
+external abort_response_stream_raw : Server_backend.t -> int64 -> int
+  = "ocaml_halo_bridge_abort_response_stream"
+
 external request_metrics_raw : Server_backend.t -> int64 -> int
   = "ocaml_halo_bridge_read_metrics"
 
@@ -190,6 +193,9 @@ let write_response_chunk_status runtime request_id response =
 let finish_response_stream_status runtime request_id =
   command_status (finish_response_stream_raw runtime request_id)
 
+let abort_response_stream_status runtime request_id =
+  command_status (abort_response_stream_raw runtime request_id)
+
 let request_metrics_status runtime query_id =
   command_status (request_metrics_raw runtime query_id)
 
@@ -230,6 +236,9 @@ let write_response_chunk runtime request_id response =
 
 let finish_response_stream runtime request_id =
   enqueue (fun () -> finish_response_stream_status runtime request_id)
+
+let abort_response_stream runtime request_id =
+  enqueue (fun () -> abort_response_stream_status runtime request_id)
 
 let request_metrics runtime query_id =
   enqueue (fun () -> request_metrics_status runtime query_id)

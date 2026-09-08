@@ -87,6 +87,11 @@ void halo_bridge_command_async_cb(uv_async_t* async) {
             && halo_client_bridge_finish_response_stream(client) != 0)
           halo_client_bridge_close(client);
         break;
+      case HALO_BRIDGE_ABORT_RESPONSE_STREAM:
+        if (client != NULL
+            && halo_client_bridge_abort_response_stream(client) != 0)
+          halo_client_bridge_close(client);
+        break;
       case HALO_BRIDGE_READ_METRICS:
         (void) halo_bridge_emit_metrics(bridge->runtime, command->request_id);
         break;
