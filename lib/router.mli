@@ -265,9 +265,17 @@ module Matcher : sig
   val ( <* ) : 'a t -> 'b t -> 'a t
 
   val request_method_is : http_method -> unit t
+
+  (** Match one path segment. The initial slash is not a segment, while empty
+      segments created by repeated or trailing slashes are significant. The
+      root path [/] has no segments. *)
   val path_segment : string -> unit t
   val string_parameter : string t
   val int_parameter : int t
+
+  (** Query parameter names and values are percent-decoded as URI octets per
+      RFC 3986. A literal [+] remains [+]; form-urlencoded decoding is a
+      separate convention. Invalid URI encoding produces [400 Bad Request]. *)
   val queryparam : string -> string option t
   val queryparams : string -> string list t
   val queryparam_required : string -> string t

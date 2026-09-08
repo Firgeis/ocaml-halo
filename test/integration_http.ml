@@ -509,6 +509,25 @@ let test_fixed_response () =
         ~status:"HTTP/1.1 200 OK"
         ~body:"hello world\n" response)
 
+let test_query_parameters_are_percent_decoded () =
+  with_server (fun () ->
+      let response =
+        request_response
+          "GET /query?q=a%26b%3Dc%25%2F&plus=a+b HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+      in
+      assert_response ~connection:"close" ~content_length:11
+        ~status:"HTTP/1.1 200 OK" ~body:"a&b=c%/|a+b" response)
+
+let test_invalid_uri_encoding_returns_bad_request () =
+  with_server (fun () ->
+      let response =
+        request_response
+          "GET /?q=%GG HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+      in
+      assert_response ~connection:"close" ~content_length:12
+        ~status:"HTTP/1.1 400 Bad Request"
+        ~body:"bad request\n" response)
+
 let test_forbidden_reason_phrase () =
   with_server (fun () ->
       let response =
@@ -1508,6 +1527,10 @@ let () =
       ( "integration",
         [
           timed_test_case "fixed HTTP response" `Quick test_fixed_response;
+          timed_test_case "query parameters are percent-decoded" `Quick
+            test_query_parameters_are_percent_decoded;
+          timed_test_case "invalid URI encoding returns bad request" `Quick
+            test_invalid_uri_encoding_returns_bad_request;
           timed_test_case "403 uses the Forbidden reason phrase" `Quick
             test_forbidden_reason_phrase;
           timed_test_case "TLS HTTPS response" `Quick test_tls_https_response;

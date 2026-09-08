@@ -63,6 +63,52 @@ let test_exact_route () =
   check_response "exact route" (text Status.ok "ok\n")
     (Halo.Router.dispatch routes (request GET "/health"))
 
+let test_empty_path_segments_are_significant () =
+  let plain_route =
+    Halo.Router.route
+      Halo.Router.Matcher.(
+        let+ () =
+          request_method_is GET *> path_segment "a" *> path_segment "b"
+          <* path_end
+        in
+        fun _request -> text Status.ok "plain")
+  in
+  let empty_segment_route =
+    Halo.Router.route
+      Halo.Router.Matcher.(
+        let+ () =
+          request_method_is GET
+          *> path_segment "a"
+          *> path_segment ""
+          *> path_segment "b"
+          <* path_end
+        in
+        fun _request -> text Status.ok "empty segment")
+  in
+  let trailing_segment_route =
+    Halo.Router.route
+      Halo.Router.Matcher.(
+        let+ () =
+          request_method_is GET
+          *> path_segment "a"
+          *> path_segment "b"
+          *> path_segment ""
+          <* path_end
+        in
+        fun _request -> text Status.ok "trailing segment")
+  in
+  let router =
+    Halo.Router.(plain_route <|> empty_segment_route <|> trailing_segment_route)
+  in
+  check_response "ordinary path" (text Status.ok "plain")
+    (Halo.Router.dispatch router (request GET "/a/b"));
+  check_response "doubled slash" (text Status.ok "empty segment")
+    (Halo.Router.dispatch router (request GET "/a//b"));
+  check_response "trailing slash" (text Status.ok "trailing segment")
+    (Halo.Router.dispatch router (request GET "/a/b/"));
+  check_response "root remains segmentless" (text Status.not_found "not found\n")
+    (Halo.Router.dispatch router (request GET "/"))
+
 let test_method_mismatch () =
   check_response "method mismatch"
     (fixed_response ~status:Status.method_not_allowed
@@ -199,6 +245,53 @@ let test_queryparams_repeated () =
     (Halo.Router.dispatch router (request GET "/search?tag=ocaml&tag=http"));
   check_response "queryparams empty" (text Status.ok "")
     (Halo.Router.dispatch router (request GET "/search"))
+
+let test_queryparams_are_percent_decoded () =
+  let router =
+    Halo.Router.route
+      Halo.Router.Matcher.(
+        let+ query =
+          request_method_is GET
+          *> path_segment "search"
+          *> path_end
+          *> queryparam_required "q"
+        and+ name = queryparam_required "first name"
+        and+ plus = queryparam_required "plus"
+        and+ tags = queryparams "tag" in
+        fun _request ->
+          text Status.ok
+            (String.concat "|" [query; name; plus; String.concat "," tags]))
+  in
+  check_response "percent-decoded query names and values"
+    (text Status.ok "a&b=c%/|Ada Lovelace|a+b|one,two")
+    (Halo.Router.dispatch router
+       (request GET
+          "/search?q=a%26b%3Dc%25%2F&first%20name=Ada%20Lovelace&plus=a+b&t%61g=one&tag=two"))
+
+let test_invalid_uri_encoding_is_bad_request () =
+  let router =
+    Halo.Router.route
+      Halo.Router.Matcher.(
+        let+ () = request_method_is GET *> path_segment "search" *> path_end in
+        fun _request -> text Status.ok "should not run")
+  in
+  let expected =
+    fixed_response ~status:Status.bad_request
+      ~headers:[("Content-Type", "text/plain; charset=utf-8")]
+      "bad request\n"
+  in
+  List.iter
+    (fun target ->
+      check_response ("invalid URI target " ^ target) expected
+        (Halo.Router.dispatch router (request GET target)))
+    [
+      "/search?q=%";
+      "/search?q=%2";
+      "/search?q=%GG";
+      "/search?q=[value]";
+      "/search#fragment";
+      "/search?q=value#fragment";
+    ]
 
 let test_not_found () =
   check_response "not found" (text Status.not_found "not found\n")
@@ -593,6 +686,8 @@ let () =
       ( "router",
         [
           Alcotest.test_case "exact route" `Quick test_exact_route;
+          Alcotest.test_case "empty path segments are significant" `Quick
+            test_empty_path_segments_are_significant;
           Alcotest.test_case "method mismatch" `Quick test_method_mismatch;
           Alcotest.test_case "int capture" `Quick test_int_capture;
           Alcotest.test_case "applicative sequencing operators" `Quick
@@ -607,6 +702,10 @@ let () =
             test_int_queryparam_required;
           Alcotest.test_case "queryparams repeated" `Quick
             test_queryparams_repeated;
+          Alcotest.test_case "queryparams are percent-decoded" `Quick
+            test_queryparams_are_percent_decoded;
+          Alcotest.test_case "invalid URI encoding is a bad request" `Quick
+            test_invalid_uri_encoding_is_bad_request;
           Alcotest.test_case "not found" `Quick test_not_found;
           Alcotest.test_case "static before dynamic" `Quick
             test_static_before_dynamic;

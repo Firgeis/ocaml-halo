@@ -291,6 +291,16 @@ let run_server clock =
       <|>
       route
         Matcher.(
+          let+ query =
+            request_method_is GET
+            *> path_segment "query"
+            *> path_end
+            *> queryparam_required "q"
+          and+ plus = queryparam_required "plus" in
+          fun _request -> text Status.ok (query ^ "|" ^ plus))
+      <|>
+      route
+        Matcher.(
           let+ () = request_method_is GET *> path_end in
           fun _request -> text Status.ok "hello world\n")
       |> use_pre rewrite_legacy

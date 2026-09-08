@@ -396,6 +396,7 @@ type input = {
   request_method : http_method option;
   path : path_state;
   queryparams : queryparam list;
+  valid_target : bool;
 }
 
 type route_match =
@@ -520,29 +521,95 @@ module Req = struct
 end
 
 let split_path path =
-  let pieces =
-    String.split_on_char '/' path |> List.filter (fun piece -> piece <> "")
+  if String.equal path "" || String.equal path "/" then
+    [||]
+  else
+    let offset = if path.[0] = '/' then 1 else 0 in
+    String.sub path offset (String.length path - offset)
+    |> String.split_on_char '/'
+    |> Array.of_list
+
+let is_alpha = function
+  | 'A' .. 'Z' | 'a' .. 'z' -> true
+  | _ -> false
+
+let is_digit = function
+  | '0' .. '9' -> true
+  | _ -> false
+
+let is_hexdig character =
+  is_digit character
+  ||
+  match character with
+  | 'A' .. 'F' | 'a' .. 'f' -> true
+  | _ -> false
+
+let is_unreserved = function
+  | '-' | '.' | '_' | '~' -> true
+  | character -> is_alpha character || is_digit character
+
+let is_sub_delim = function
+  | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '=' -> true
+  | _ -> false
+
+let is_pchar character =
+  is_unreserved character
+  || is_sub_delim character
+  || character = ':'
+  || character = '@'
+
+let validate_encoded_component ~is_literal_allowed value =
+  let length = String.length value in
+  let rec scan_from index =
+    if index = length then
+      true
+    else
+      match value.[index] with
+      | '%' ->
+          index + 2 < length
+          && is_hexdig value.[index + 1]
+          && is_hexdig value.[index + 2]
+          && scan_from (index + 3)
+      | character -> is_literal_allowed character && scan_from (index + 1)
   in
-  Array.of_list pieces
+  scan_from 0
+
+let validate_path path =
+  String.length path > 0
+  && path.[0] = '/'
+  && validate_encoded_component path ~is_literal_allowed:(fun character ->
+         character = '/' || is_pchar character)
+
+let validate_query query =
+  validate_encoded_component query ~is_literal_allowed:(fun character ->
+      character = '/' || character = '?' || is_pchar character)
 
 let parse_queryparam_piece piece =
   match String.index_opt piece '=' with
   | Some index ->
-      Some
-        {
-          name = String.sub piece 0 index;
-          value =
-            String.sub piece (index + 1) (String.length piece - index - 1);
-        }
-  | None -> Some { name = piece; value = "" }
+      {
+        name = Uri.pct_decode (String.sub piece 0 index);
+        value =
+          Uri.pct_decode
+            (String.sub piece (index + 1) (String.length piece - index - 1));
+      }
+  | None -> { name = Uri.pct_decode piece; value = "" }
 
 let parse_queryparams = function
   | Origin { query = Some query; _ } ->
-      query
-      |> String.split_on_char '&'
-      |> List.filter (fun piece -> piece <> "")
-      |> List.filter_map parse_queryparam_piece
+      if validate_query query then
+        query
+        |> String.split_on_char '&'
+        |> List.filter (fun piece -> piece <> "")
+        |> List.map parse_queryparam_piece
+      else
+        []
   | Origin { query = None; _ } | Absolute _ | Authority _ | Asterisk -> []
+
+let validate_request_target = function
+  | Origin { path; query } ->
+      validate_path path && Option.fold ~none:true ~some:validate_query query
+  | Absolute _ | Authority _ | Asterisk -> true
 
 let split_target = function
   | Origin { path; _ } -> split_path path
@@ -557,6 +624,7 @@ let input_of_request_view request_view =
     request_method = Req.eval request_view Req.request_method;
     path = { segments = split_target (Req.eval request_view Req.target); index = 0 };
     queryparams = parse_queryparams (Req.eval request_view Req.target);
+    valid_target = validate_request_target (Req.eval request_view Req.target);
   }
 
 let apply_request_patch (request_view : request_view) (patch : request_patch) =
@@ -894,6 +962,14 @@ let not_found_response () =
     body = Fixed_body "not found\n";
   }
 
+let bad_request_response () =
+  {
+    status = Status.bad_request;
+    headers =
+      Headers.of_list_exn [("Content-Type", "text/plain; charset=utf-8")];
+    body = Fixed_body "bad request\n";
+  }
+
 let method_not_allowed_response allowed_methods =
   {
     status = Status.method_not_allowed;
@@ -920,25 +996,31 @@ let apply_middleware middleware handler =
   List.fold_right (fun wrap next -> wrap next) middleware handler
 
 let dispatch_from_input router input =
-  let evaluation = run_router router input in
-  let effective_input = evaluation.effective_input in
-  let fallback_handler _request =
-    match effective_input.request_method with
-    | Some _request_method -> (
-        match allowed_methods_for_path router effective_input with
-        | [] -> not_found_response ()
-        | allowed_methods -> method_not_allowed_response allowed_methods)
-    | None -> not_found_response ()
-  in
-  match evaluation.route_match with
-  | Route_matched (handler, middleware) ->
-      apply_middleware middleware handler effective_input.request_view
-  | Route_rejected (response, middleware) ->
-      apply_middleware middleware (fun _request -> response)
-        effective_input.request_view
-  | Route_missing ->
-      apply_middleware router.middleware fallback_handler
-        effective_input.request_view
+  if not input.valid_target then
+    bad_request_response ()
+  else
+    let evaluation = run_router router input in
+    let effective_input = evaluation.effective_input in
+    if not effective_input.valid_target then
+      bad_request_response ()
+    else
+      let fallback_handler _request =
+        match effective_input.request_method with
+        | Some _request_method -> (
+            match allowed_methods_for_path router effective_input with
+            | [] -> not_found_response ()
+            | allowed_methods -> method_not_allowed_response allowed_methods)
+        | None -> not_found_response ()
+      in
+      match evaluation.route_match with
+      | Route_matched (handler, middleware) ->
+          apply_middleware middleware handler effective_input.request_view
+      | Route_rejected (response, middleware) ->
+          apply_middleware middleware (fun _request -> response)
+            effective_input.request_view
+      | Route_missing ->
+          apply_middleware router.middleware fallback_handler
+            effective_input.request_view
 
 let dispatch router (request : request) =
   let context =
@@ -972,6 +1054,7 @@ let dispatch router (request : request) =
       request_method = Some request.request_method;
       path = { segments = split_target request.target; index = 0 };
       queryparams = parse_queryparams request.target;
+      valid_target = validate_request_target request.target;
     }
 
 module Runtime = struct
@@ -1004,6 +1087,7 @@ module Runtime = struct
         request_method = Some request.request_method;
         path = { segments = split_target request.target; index = 0 };
         queryparams = parse_queryparams request.target;
+        valid_target = validate_request_target request.target;
       }
 end
 

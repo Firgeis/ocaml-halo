@@ -15,5 +15,6 @@
   (conf-libssl :build)
   (conf-pkg-config :build)
   eio
+  uri
   (eio_main :with-test)
   (alcotest :with-test)))

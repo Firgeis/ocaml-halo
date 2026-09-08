@@ -13,7 +13,7 @@
   stream
   sse)
  (private_modules server_backend reactor request_runtime)
- (libraries eio eio.unix)
+ (libraries eio eio.unix uri)
  (foreign_archives ../c/halo_stubs ../c/halo_s2n)
  (c_library_flags
   (-lcrypto
