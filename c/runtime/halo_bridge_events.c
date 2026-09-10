@@ -313,7 +313,7 @@ int halo_bridge_dispatch_replay_claim(struct halo_client* client,
   if (event == NULL)
     return -1;
   event->listener_id = client->listener_ref->bridge_listener_id;
-  event->replay_ttl_secs = ttl_secs;
+  event->auxiliary = ttl_secs;
   event->payload = halo_bridge_copy_bytes((const char*) identity, identity_len);
   event->payload_len = identity_len;
   if (event->payload == NULL) {
@@ -379,6 +379,7 @@ int halo_bridge_dispatch_request(struct halo_client* client) {
   struct halo_request* request;
   size_t index;
   uint64_t request_id;
+  int first_request_on_connection;
 
   if (client == NULL || client->handle.loop == NULL)
     return -1;
@@ -387,12 +388,22 @@ int halo_bridge_dispatch_request(struct halo_client* client) {
   if (bridge == NULL || client->bridge_request_id != 0)
     return -1;
 
+  first_request_on_connection = client->bridge_connection_id == 0;
+  /* One-shot connections carry metadata directly and never enter the shared
+   * OCaml cache. */
+  if (first_request_on_connection && client->should_keep_alive) {
+    client->bridge_connection_id = ++bridge->next_connection_id;
+    if (client->bridge_connection_id == 0)
+      client->bridge_connection_id = ++bridge->next_connection_id;
+  }
+
   request = &client->request;
   event = calloc(1, sizeof(*event));
   if (event == NULL)
     return -1;
   event->kind = HALO_BRIDGE_REQUEST;
   event->listener_id = client->listener_ref->bridge_listener_id;
+  event->auxiliary = client->bridge_connection_id;
   event->method_text = halo_bridge_copy_bytes(request->method_text,
                                               request->method_len);
   event->method_len = request->method_len;
@@ -406,7 +417,8 @@ int halo_bridge_dispatch_request(struct halo_client* client) {
   event->is_early_data = client->request_is_early_data;
   if ((request->method_len > 0 && event->method_text == NULL)
       || (request->url_len > 0 && event->target == NULL)
-      || halo_bridge_copy_transport(event, client) != 0) {
+      || (first_request_on_connection
+          && halo_bridge_copy_transport(event, client) != 0)) {
     halo_bridge_event_destroy(event);
     return -1;
   }
@@ -540,6 +552,29 @@ void halo_bridge_complete_request(struct halo_client* client) {
 
 void halo_bridge_disconnect_request(struct halo_client* client) {
   halo_bridge_finish_request(client, HALO_BRIDGE_DISCONNECTED);
+}
+
+void halo_bridge_connection_closed(struct halo_client* client) {
+  struct halo_runtime* runtime;
+  struct halo_bridge* bridge;
+  struct halo_bridge_event* event;
+  uint64_t connection_id;
+
+  if (client == NULL || client->bridge_connection_id == 0)
+    return;
+  connection_id = client->bridge_connection_id;
+  client->bridge_connection_id = 0;
+  if (client->handle.loop == NULL)
+    return;
+  runtime = client->handle.loop->data;
+  bridge = runtime != NULL ? runtime->bridge : NULL;
+  if (bridge == NULL)
+    return;
+  event = halo_bridge_simple_event(HALO_BRIDGE_CONNECTION_CLOSED,
+                                   connection_id);
+  if (event == NULL)
+    return;
+  halo_bridge_push_required_event(bridge, event);
 }
 
 int halo_bridge_complete_write(struct halo_client* client) {

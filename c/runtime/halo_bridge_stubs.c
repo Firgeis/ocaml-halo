@@ -107,7 +107,7 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   CAMLparam1(runtime_value);
   CAMLlocal5(option, record, headers, cell, pair);
   CAMLlocal5(name, header_value, method_text, target, payload);
-  CAMLlocal3(request_id, listener_id, replay_ttl_secs);
+  CAMLlocal3(request_id, listener_id, auxiliary);
   CAMLlocal1(raw_headers);
   CAMLlocal5(connection_option, connection, tls_option, tls, remote_address);
   CAMLlocal5(local_address, server_name, application_protocol, cipher,
@@ -148,7 +148,7 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
 
   request_id = caml_copy_int64((int64_t) event->request_id);
   listener_id = caml_copy_int64((int64_t) event->listener_id);
-  replay_ttl_secs = caml_copy_int64((int64_t) event->replay_ttl_secs);
+  auxiliary = caml_copy_int64((int64_t) event->auxiliary);
   method_text = halo_bridge_alloc_string(event->method_text, event->method_len);
   target = halo_bridge_alloc_string(event->target, event->target_len);
   payload = halo_bridge_alloc_string(event->payload, event->payload_len);
@@ -208,7 +208,7 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   Store_field(record, 10, Val_bool(event->body_expected));
   Store_field(record, 11, Val_bool(event->is_early_data));
   Store_field(record, 12, connection_option);
-  Store_field(record, 13, replay_ttl_secs);
+  Store_field(record, 13, auxiliary);
   Store_field(record, 14, payload);
   option = caml_alloc(1, 0);
   Store_field(option, 0, record);

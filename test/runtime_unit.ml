@@ -195,36 +195,45 @@ let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router
 
 let with_live_tls_server tls = with_live_server ~tls
 
-let plaintext_request ~until request =
+let connect_plaintext () =
   let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Unix.connect socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 8443));
+  socket
+
+let write_socket_all socket text =
+  let payload = Bytes.of_string text in
+  let rec write offset =
+    if offset < Bytes.length payload then
+      let count =
+        Unix.write socket payload offset (Bytes.length payload - offset)
+      in
+      write (offset + count)
+  in
+  write 0
+
+let read_socket_until socket until =
+  let response = Buffer.create 256 in
+  let chunk = Bytes.create 256 in
+  let rec read () =
+    let contents = Buffer.contents response in
+    if contains until contents then
+      contents
+    else
+      match Unix.read socket chunk 0 (Bytes.length chunk) with
+      | 0 -> contents
+      | count ->
+          Buffer.add_subbytes response chunk 0 count;
+          read ()
+  in
+  read ()
+
+let plaintext_request ~until request =
+  let socket = connect_plaintext () in
   Fun.protect
     ~finally:(fun () -> Unix.close socket)
     (fun () ->
-      Unix.connect socket
-        (Unix.ADDR_INET (Unix.inet_addr_loopback, 8443));
-      let payload = Bytes.of_string request in
-      let rec write offset =
-        if offset < Bytes.length payload then
-          let count =
-            Unix.write socket payload offset (Bytes.length payload - offset)
-          in
-          write (offset + count)
-      in
-      write 0;
-      let response = Buffer.create 256 in
-      let chunk = Bytes.create 256 in
-      let rec read () =
-        let contents = Buffer.contents response in
-        if contains until contents then
-          contents
-        else
-          match Unix.read socket chunk 0 (Bytes.length chunk) with
-          | 0 -> contents
-          | count ->
-              Buffer.add_subbytes response chunk 0 count;
-              read ()
-      in
-      read ())
+      write_socket_all socket request;
+      read_socket_until socket until)
 
 type observed_response_outcome =
   | Observed_completed
@@ -506,6 +515,47 @@ let test_tls_request_exposes_negotiated_transport_metadata () =
               result.stdout);
          Alcotest.(check bool) "TLS local address" true
            (contains "local=127.0.0.1:8443\n" result.stdout)))
+
+let test_keep_alive_requests_share_connection_metadata () =
+  let previous = ref None in
+  let router =
+    Halo.Router.(
+      route
+        Matcher.(
+          let+ () = request_method_is GET *> path_end in
+          fun request ->
+            let connection_info = Request.connection_info request in
+            let result =
+              match !previous with
+              | None -> "first\n"
+              | Some prior when prior == connection_info -> "shared\n"
+              | Some _ -> "new\n"
+            in
+            previous := Some connection_info;
+            text Status.ok result))
+  in
+  ignore
+    (with_live_server ~router (fun () ->
+         let socket = connect_plaintext () in
+         Fun.protect
+           ~finally:(fun () -> Unix.close socket)
+           (fun () ->
+             write_socket_all socket
+               "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n";
+             let first = read_socket_until socket "first\n" in
+             Alcotest.(check bool) "first request receives metadata" true
+               (contains "first\n" first);
+             write_socket_all socket
+               "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+             let second = read_socket_until socket "shared\n" in
+             Alcotest.(check bool) "keep-alive metadata is shared" true
+               (contains "shared\n" second));
+         let fresh =
+           plaintext_request ~until:"new\n"
+             "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+         in
+         Alcotest.(check bool) "new connection receives new metadata" true
+           (contains "new\n" fresh)))
 
 let test_runtime_metrics_defaults () =
   let metrics = with_live_server (fun () -> ()) in
@@ -874,6 +924,8 @@ let () =
             test_plaintext_request_exposes_transport_metadata;
           Alcotest.test_case "TLS request" `Slow
             test_tls_request_exposes_negotiated_transport_metadata;
+          Alcotest.test_case "keep-alive requests share metadata" `Quick
+            test_keep_alive_requests_share_connection_metadata;
         ] );
       ( "errors",
         [

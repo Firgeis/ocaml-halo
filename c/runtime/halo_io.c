@@ -1076,6 +1076,7 @@ void halo_close_client(struct halo_client* client) {
   halo_runtime_note_connection_closed(client);
 
   halo_bridge_disconnect_request(client);
+  halo_bridge_connection_closed(client);
 
   halo_client_stop_timer(client);
 

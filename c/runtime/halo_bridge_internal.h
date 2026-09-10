@@ -18,7 +18,8 @@ enum halo_bridge_event_kind {
   HALO_BRIDGE_WRITE_COMPLETE = 6,
   HALO_BRIDGE_METRICS = 7,
   HALO_BRIDGE_REPLAY_CLAIM = 8,
-  HALO_BRIDGE_DRAINED = 9
+  HALO_BRIDGE_DRAINED = 9,
+  HALO_BRIDGE_CONNECTION_CLOSED = 10
 };
 
 enum halo_bridge_command_kind {
@@ -80,7 +81,8 @@ struct halo_bridge_event {
   int body_expected;
   int is_early_data;
   struct halo_bridge_transport* transport;
-  uint64_t replay_ttl_secs;
+  /* Connection ID for request events; replay TTL for replay-claim events. */
+  uint64_t auxiliary;
   char* payload;
   size_t payload_len;
   struct halo_bridge_event* next;
@@ -132,6 +134,7 @@ struct halo_bridge {
   struct halo_bridge_command* command_head;
   struct halo_bridge_command* command_tail;
   uint64_t next_request_id;
+  uint64_t next_connection_id;
   struct halo_bridge_request_entry* requests;
   uint64_t next_replay_claim_id;
   struct halo_bridge_replay_claim_entry*

@@ -193,6 +193,7 @@ struct halo_client {
   struct s2n_offered_early_data* tls_pending_early_data;
   size_t body_bytes_read;
   uint64_t bridge_request_id;
+  uint64_t bridge_connection_id;
   int bridge_response_in_flight;
   char* paused_data;
   size_t paused_data_len;

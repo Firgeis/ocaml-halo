@@ -23,7 +23,7 @@ type raw_event = {
   body_expected : bool;
   is_early_data : bool;
   connection_info : Router.connection_info option;
-  replay_ttl_secs : int64;
+  auxiliary : int64;
   payload : string;
 }
 
@@ -39,7 +39,8 @@ type request_event = {
   keep_alive : bool;
   body_expected : bool;
   is_early_data : bool;
-  connection_info : Router.connection_info;
+  connection_id : int64;
+  connection_info : Router.connection_info option;
 }
 
 type body_chunk_event = { request_id : int64; chunk : string }
@@ -69,6 +70,7 @@ type event =
   | Metrics of metrics_event
   | Replay_claim of replay_claim_event
   | Drained
+  | Connection_closed of int64
   | Unknown of unknown_event
 
 type command_status = Enqueued | Full | Closed | Unknown_status of int
@@ -137,11 +139,6 @@ let enable runtime ~max_in_flight_requests ~command_capacity =
 let event_of_raw (raw : raw_event) =
   match raw.kind with
   | 0 ->
-      let connection_info =
-        match raw.connection_info with
-        | Some connection_info -> connection_info
-        | None -> raise (Runtime_error "request transport metadata is missing")
-      in
       Request
         {
           request_id = raw.request_id;
@@ -155,7 +152,8 @@ let event_of_raw (raw : raw_event) =
           keep_alive = raw.keep_alive;
           body_expected = raw.body_expected;
           is_early_data = raw.is_early_data;
-          connection_info;
+          connection_id = raw.auxiliary;
+          connection_info = raw.connection_info;
         }
   | 1 -> Body_chunk { request_id = raw.request_id; chunk = raw.payload }
   | 2 -> Body_end raw.request_id
@@ -170,9 +168,10 @@ let event_of_raw (raw : raw_event) =
           claim_id = raw.request_id;
           listener_id = raw.listener_id;
           identity = raw.payload;
-          ttl_secs = raw.replay_ttl_secs;
+          ttl_secs = raw.auxiliary;
         }
   | 9 -> Drained
+  | 10 -> Connection_closed raw.request_id
   | kind -> Unknown { kind; request_id = raw.request_id; payload = raw.payload }
 
 let poll_event runtime = Option.map event_of_raw (poll_event_raw runtime)

@@ -13,7 +13,11 @@ type request_event = {
   keep_alive : bool;
   body_expected : bool;
   is_early_data : bool;
-  connection_info : Router.connection_info;
+  (** Zero for a one-shot request; stable across a keep-alive connection. *)
+  connection_id : int64;
+  (** Present only on the first request of a cached connection, or on a
+      one-shot request. *)
+  connection_info : Router.connection_info option;
 }
 
 type body_chunk_event = { request_id : int64; chunk : string }
@@ -43,6 +47,7 @@ type event =
   | Metrics of metrics_event
   | Replay_claim of replay_claim_event
   | Drained
+  | Connection_closed of int64
   | Unknown of unknown_event
 
 val create_runtime : unit -> (Server_backend.t, string) result

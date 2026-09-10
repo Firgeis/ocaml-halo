@@ -159,6 +159,7 @@ type listener = {
 type t = {
   runtime : Server_backend.t;
   requests : (int64, request_state) Hashtbl.t;
+  connection_infos : (int64, Router.connection_info) Hashtbl.t;
   metrics_waiters :
     (int64, (Server_backend.runtime_metrics, exn) result Eio.Promise.u) Hashtbl.t;
   mutable next_metrics_query : int64;
@@ -175,6 +176,7 @@ let create ~runtime ~listeners ~bridge_switch ~on_error =
   {
     runtime;
     requests = Hashtbl.create 128;
+    connection_infos = Hashtbl.create 128;
     metrics_waiters = Hashtbl.create 4;
     next_metrics_query = 1L;
     draining = false;
@@ -266,7 +268,7 @@ let with_early_data_policy listener (event : Reactor.request_event) next =
   else next ()
 
 let dispatch_request listener (event : Reactor.request_event) state body
-    ~send_informational =
+    ~connection_info ~send_informational =
   match Router.Http_method.of_string event.method_text with
   | None -> Http.not_implemented
   | Some Router.CONNECT -> Http.connect_not_implemented
@@ -278,19 +280,21 @@ let dispatch_request listener (event : Reactor.request_event) state body
       Router.Runtime.dispatch listener.router request
         ~raw_headers:event.raw_headers ~body
         ~http_major:event.http_major ~http_minor:event.http_minor
-        ~connection_info:event.connection_info
+        ~connection_info
         ~is_early_data:event.is_early_data ~request_id:event.request_id
         ~request_switch ~send_informational
         ~on_disconnect:(on_disconnect state)
         ~on_response_terminated:(on_response_terminated state)
 
 let handle_request listener (event : Reactor.request_event) state body
-    ~send_informational ~send_response ~send_fixed ~completed ~sent ~on_error () =
+    ~connection_info ~send_informational ~send_response ~send_fixed ~completed
+    ~sent ~on_error () =
   try
     if state.disconnected then raise Client_disconnected;
     let response =
       with_early_data_policy listener event @@ fun () ->
-      dispatch_request listener event state body ~send_informational
+      dispatch_request listener event state body ~connection_info
+        ~send_informational
     in
     send_response response
   with
@@ -304,7 +308,7 @@ let handle_request listener (event : Reactor.request_event) state body
            completed := true)
 
 let run_handler runtime requests listener (event : Reactor.request_event) state
-    ~is_draining on_error =
+    ~connection_info ~is_draining on_error =
   Reactor.trace "handler start request=%Ld" event.request_id;
   let completed = ref false in
   let sent = ref false in
@@ -391,15 +395,32 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
         Eio.Cancel.protect (fun () ->
             try Reactor.close_request runtime event.request_id
             with Client_disconnected -> ()))
-    (handle_request listener event state body ~send_informational ~send_response
-       ~send_fixed ~completed ~sent ~on_error)
+    (handle_request listener event state body ~connection_info
+       ~send_informational ~send_response ~send_fixed ~completed ~sent ~on_error)
 
 let start_request t (event : Reactor.request_event) =
   Reactor.trace "request event request=%Ld listener=%Ld" event.request_id
     event.listener_id;
-  match Hashtbl.find_opt t.listeners event.listener_id with
-  | None -> Reactor.close_request t.runtime event.request_id
-  | Some listener ->
+  (* Bridge events are FIFO: the first request seeds the cache, later requests
+     reuse it, and the physical-close event eventually evicts it. *)
+  let connection_info =
+    match event.connection_info with
+    | Some connection_info ->
+        if event.connection_id <> 0L then
+          Hashtbl.replace t.connection_infos event.connection_id
+            connection_info;
+        Some connection_info
+    | None -> Hashtbl.find_opt t.connection_infos event.connection_id
+  in
+  match connection_info, Hashtbl.find_opt t.listeners event.listener_id with
+  | None, _ ->
+      let exn =
+        Reactor.Runtime_error "request connection metadata is missing"
+      in
+      t.on_error event.request_id exn (Printexc.get_callstack 32);
+      Reactor.close_request t.runtime event.request_id
+  | Some _, None -> Reactor.close_request t.runtime event.request_id
+  | Some connection_info, Some listener ->
       let completion, complete = Eio.Promise.create () in
       let state =
         {
@@ -419,7 +440,7 @@ let start_request t (event : Reactor.request_event) =
       Hashtbl.replace t.requests event.request_id state;
       Eio.Fiber.fork ~sw:t.bridge_switch (fun () ->
           run_handler t.runtime t.requests listener event state
-            ~is_draining:(fun () -> t.draining) t.on_error)
+            ~connection_info ~is_draining:(fun () -> t.draining) t.on_error)
 
 let replay_claim store (event : Reactor.replay_claim_event) =
   let module Store = Server_config.Early_data_replay_store in
@@ -490,6 +511,8 @@ let dispatch_event t = function
         (Hashtbl.find_opt t.metrics_waiters query_id)
   | Reactor.Replay_claim event ->
       Eio.Fiber.fork ~sw:t.bridge_switch (fun () -> start_replay_claim t event)
+  | Reactor.Connection_closed connection_id ->
+      Hashtbl.remove t.connection_infos connection_id
   | Reactor.Drained -> (
       try Reactor.stop t.runtime with Client_disconnected -> ())
   | Reactor.Stopped ->
@@ -499,7 +522,8 @@ let dispatch_event t = function
             (Eio.Promise.try_resolve resolve
                (Error (Reactor.Runtime_error "reactor stopped"))))
         t.metrics_waiters;
-      Hashtbl.clear t.metrics_waiters
+      Hashtbl.clear t.metrics_waiters;
+      Hashtbl.clear t.connection_infos
   | Reactor.Unknown { kind; request_id; payload = _ } ->
       let exn = Failure (Printf.sprintf "unknown bridge event %d" kind) in
       t.on_error request_id exn (Printexc.get_callstack 32)
