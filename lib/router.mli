@@ -164,6 +164,33 @@ type request = {
   body : string;
 }
 
+type tls_protocol_version =
+  | SSL_2
+  | SSL_3
+  | TLS_1_0
+  | TLS_1_1
+  | TLS_1_2
+  | TLS_1_3
+  | Unknown_tls_protocol_version of int
+
+type tls_info = {
+  server_name : string option;
+  application_protocol : string option;
+  protocol_version : tls_protocol_version;
+  cipher : string option;
+}
+(** Negotiated TLS metadata. [server_name] is the SNI name sent by the client,
+    and [application_protocol] is the selected ALPN protocol. *)
+
+type connection_info = {
+  remote_address : Unix.sockaddr;
+  local_address : Unix.sockaddr;
+  tls : tls_info option;
+}
+(** Connection metadata captured by the server when the request is dispatched.
+    [tls] is [None] for plaintext connections. TLS strings are copied only when
+    the corresponding value was negotiated or supplied by the client. *)
+
 type response_body =
   | Fixed_body of string
   | Stream_body of (yield:(string -> unit) -> unit)
@@ -213,6 +240,20 @@ module Request : sig
   val raw_target : t -> string
   val target : t -> request_target
   val body : t -> Body.t
+  val http_version : t -> int * int
+  (** The HTTP protocol major and minor version received on the wire. Raises
+      [Invalid_argument] for a synthetic request passed to [dispatch]. *)
+
+  val connection_info : t -> connection_info
+  (** Network and optional TLS metadata for the connection. Raises
+      [Invalid_argument] for a synthetic request passed to [dispatch]. *)
+
+  val remote_address : t -> Unix.sockaddr
+  val local_address : t -> Unix.sockaddr
+  val is_tls : t -> bool
+  val tls : t -> tls_info option
+  (** [tls request] is [None] for plaintext and synthetic requests. *)
+
   val is_early_data : t -> bool
   (** Whether any bytes of this request arrived as TLS 1.3 early data. *)
 
@@ -247,6 +288,7 @@ type pre_middleware = Request.t -> pre_result
 type t
 
 val string_of_http_method : http_method -> string
+val string_of_tls_protocol_version : tls_protocol_version -> string
 val parse_request_target : http_method -> string -> request_target
 
 module Matcher : sig
@@ -304,6 +346,9 @@ module Runtime : sig
     request ->
     raw_headers:(string * string) list ->
     body:Body.t ->
+    http_major:int ->
+    http_minor:int ->
+    connection_info:connection_info ->
     is_early_data:bool ->
     request_id:int64 ->
     request_switch:Eio.Switch.t ->

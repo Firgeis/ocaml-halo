@@ -309,6 +309,28 @@ type request = {
   body : string;
 }
 
+type tls_protocol_version =
+  | SSL_2
+  | SSL_3
+  | TLS_1_0
+  | TLS_1_1
+  | TLS_1_2
+  | TLS_1_3
+  | Unknown_tls_protocol_version of int
+
+type tls_info = {
+  server_name : string option;
+  application_protocol : string option;
+  protocol_version : tls_protocol_version;
+  cipher : string option;
+}
+
+type connection_info = {
+  remote_address : Unix.sockaddr;
+  local_address : Unix.sockaddr;
+  tls : tls_info option;
+}
+
 type response_body =
   | Fixed_body of string
   | Stream_body of (yield:(string -> unit) -> unit)
@@ -353,6 +375,9 @@ type request_patch = {
 
 type request_context = {
   body : Body.t;
+  http_major : int;
+  http_minor : int;
+  connection_info : connection_info option;
   is_early_data : bool;
   request_id : int64 option;
   request_switch : Eio.Switch.t option;
@@ -463,6 +488,16 @@ let queryparams_from_list queryparams wanted =
 let http_method_of_string = Http_method.of_string
 
 let string_of_http_method = Http_method.to_string
+
+let string_of_tls_protocol_version = function
+  | SSL_2 -> "SSLv2"
+  | SSL_3 -> "SSLv3"
+  | TLS_1_0 -> "TLSv1.0"
+  | TLS_1_1 -> "TLSv1.1"
+  | TLS_1_2 -> "TLSv1.2"
+  | TLS_1_3 -> "TLSv1.3"
+  | Unknown_tls_protocol_version version ->
+      Printf.sprintf "unknown(%d)" version
 
 let parse_request_target request_method raw_target =
   match raw_target with
@@ -677,6 +712,26 @@ module Request = struct
     Req.eval request Req.Target
 
   let body request = request.context.body
+
+  let http_version request =
+    match request.context.connection_info with
+    | Some _ -> (request.context.http_major, request.context.http_minor)
+    | None -> invalid_arg "HTTP version is unavailable outside a server handler"
+
+  let connection_info request =
+    match request.context.connection_info with
+    | Some connection_info -> connection_info
+    | None ->
+        invalid_arg "connection info is unavailable outside a server handler"
+
+  let remote_address request = (connection_info request).remote_address
+  let local_address request = (connection_info request).local_address
+  let tls request =
+    match request.context.connection_info with
+    | Some connection_info -> connection_info.tls
+    | None -> None
+
+  let is_tls request = Option.is_some (tls request)
 
   let is_early_data request = request.context.is_early_data
 
@@ -1026,6 +1081,9 @@ let dispatch router (request : request) =
   let context =
     {
       body = Body.Private.of_string request.body;
+      http_major = 0;
+      http_minor = 0;
+      connection_info = None;
       is_early_data = false;
       request_id = None;
       request_switch = None;
@@ -1058,9 +1116,9 @@ let dispatch router (request : request) =
     }
 
 module Runtime = struct
-  let dispatch router (request : request) ~raw_headers ~body ~is_early_data
-      ~request_id ~request_switch ~send_informational ~on_disconnect
-      ~on_response_terminated =
+  let dispatch router (request : request) ~raw_headers ~body ~http_major
+      ~http_minor ~connection_info ~is_early_data ~request_id ~request_switch
+      ~send_informational ~on_disconnect ~on_response_terminated =
     let request_view =
       {
         request_method_text = string_of_http_method request.request_method;
@@ -1072,6 +1130,9 @@ module Runtime = struct
         context =
           {
             body;
+            http_major;
+            http_minor;
+            connection_info = Some connection_info;
             is_early_data;
             request_id = Some request_id;
             request_switch = Some request_switch;

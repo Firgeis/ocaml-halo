@@ -2,10 +2,64 @@
 
 #include <unistd.h>
 
+#include <caml/socketaddr.h>
 #include <caml/threads.h>
 
 static value halo_bridge_alloc_string(const char* data, size_t length) {
   return caml_alloc_initialized_string(length, data == NULL ? "" : data);
+}
+
+static value halo_bridge_alloc_string_option(const unsigned char* data,
+                                             size_t length) {
+  CAMLparam0();
+  CAMLlocal2(string, option);
+
+  if (length == 0)
+    CAMLreturn(Val_none);
+  string = halo_bridge_alloc_string((const char*) data, length);
+  option = caml_alloc(1, 0);
+  Store_field(option, 0, string);
+  CAMLreturn(option);
+}
+
+static value halo_bridge_alloc_sockaddr(const unsigned char* data,
+                                        size_t length) {
+  CAMLparam0();
+  CAMLlocal1(address);
+  union sock_addr_union storage;
+
+  if (length > sizeof(storage))
+    caml_invalid_argument("invalid bridge socket address");
+  memset(&storage, 0, sizeof(storage));
+  memcpy(&storage, data, length);
+  address = caml_unix_alloc_sockaddr(&storage,
+                                     (socklen_param_type) length,
+                                     -1);
+  CAMLreturn(address);
+}
+
+static value halo_bridge_alloc_tls_protocol_version(uint8_t version) {
+  CAMLparam0();
+  CAMLlocal1(result);
+
+  switch (version) {
+    case S2N_SSLv2:
+      CAMLreturn(Val_int(0));
+    case S2N_SSLv3:
+      CAMLreturn(Val_int(1));
+    case S2N_TLS10:
+      CAMLreturn(Val_int(2));
+    case S2N_TLS11:
+      CAMLreturn(Val_int(3));
+    case S2N_TLS12:
+      CAMLreturn(Val_int(4));
+    case S2N_TLS13:
+      CAMLreturn(Val_int(5));
+    default:
+      result = caml_alloc(1, 0);
+      Store_field(result, 0, Val_int(version));
+      CAMLreturn(result);
+  }
 }
 
 CAMLprim value ocaml_halo_bridge_enable(value runtime_value,
@@ -55,6 +109,9 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   CAMLlocal5(name, header_value, method_text, target, payload);
   CAMLlocal3(request_id, listener_id, replay_ttl_secs);
   CAMLlocal1(raw_headers);
+  CAMLlocal5(connection_option, connection, tls_option, tls, remote_address);
+  CAMLlocal5(local_address, server_name, application_protocol, cipher,
+             protocol_version);
   struct halo_runtime* runtime;
   struct halo_bridge_event* event;
   size_t index;
@@ -95,7 +152,49 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   method_text = halo_bridge_alloc_string(event->method_text, event->method_len);
   target = halo_bridge_alloc_string(event->target, event->target_len);
   payload = halo_bridge_alloc_string(event->payload, event->payload_len);
-  record = caml_alloc(14, 0);
+  connection_option = Val_none;
+  if (event->transport != NULL) {
+    const struct halo_bridge_transport* transport;
+    const unsigned char* cursor;
+
+    transport = event->transport;
+    cursor = transport->storage;
+    remote_address = halo_bridge_alloc_sockaddr(
+      cursor, transport->remote_address_len);
+    cursor += transport->remote_address_len;
+    local_address = halo_bridge_alloc_sockaddr(
+      cursor, transport->local_address_len);
+    cursor += transport->local_address_len;
+
+    tls_option = Val_none;
+    if (transport->tls_protocol_version != 0) {
+      server_name = halo_bridge_alloc_string_option(
+        cursor, transport->server_name_len);
+      cursor += transport->server_name_len;
+      application_protocol = halo_bridge_alloc_string_option(
+        cursor, transport->application_protocol_len);
+      cursor += transport->application_protocol_len;
+      cipher = halo_bridge_alloc_string_option(cursor, transport->cipher_len);
+      protocol_version = halo_bridge_alloc_tls_protocol_version(
+        transport->tls_protocol_version);
+      tls = caml_alloc(4, 0);
+      Store_field(tls, 0, server_name);
+      Store_field(tls, 1, application_protocol);
+      Store_field(tls, 2, protocol_version);
+      Store_field(tls, 3, cipher);
+      tls_option = caml_alloc(1, 0);
+      Store_field(tls_option, 0, tls);
+    }
+
+    connection = caml_alloc(3, 0);
+    Store_field(connection, 0, remote_address);
+    Store_field(connection, 1, local_address);
+    Store_field(connection, 2, tls_option);
+    connection_option = caml_alloc(1, 0);
+    Store_field(connection_option, 0, connection);
+  }
+
+  record = caml_alloc(15, 0);
   Store_field(record, 0, Val_int(event->kind));
   Store_field(record, 1, request_id);
   Store_field(record, 2, listener_id);
@@ -108,8 +207,9 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   Store_field(record, 9, Val_bool(event->keep_alive));
   Store_field(record, 10, Val_bool(event->body_expected));
   Store_field(record, 11, Val_bool(event->is_early_data));
-  Store_field(record, 12, replay_ttl_secs);
-  Store_field(record, 13, payload);
+  Store_field(record, 12, connection_option);
+  Store_field(record, 13, replay_ttl_secs);
+  Store_field(record, 14, payload);
   option = caml_alloc(1, 0);
   Store_field(option, 0, record);
   halo_bridge_event_destroy(event);

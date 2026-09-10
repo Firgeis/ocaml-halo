@@ -13,6 +13,7 @@ type request_event = {
   keep_alive : bool;
   body_expected : bool;
   is_early_data : bool;
+  connection_info : Router.connection_info;
 }
 
 type body_chunk_event = { request_id : int64; chunk : string }

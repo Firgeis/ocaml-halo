@@ -50,6 +50,20 @@ struct halo_bridge_header {
   int is_hop_by_hop;
 };
 
+/* Request-only transport metadata. The trailing storage contains, in order,
+ * the remote sockaddr, local sockaddr, SNI, ALPN protocol, and cipher name.
+ * Keeping it in one exact-size allocation avoids adding worst-case address
+ * and TLS buffers to every bridge event. A zero TLS version means plaintext. */
+struct halo_bridge_transport {
+  uint16_t remote_address_len;
+  uint16_t local_address_len;
+  uint16_t server_name_len;
+  uint16_t application_protocol_len;
+  uint16_t cipher_len;
+  uint8_t tls_protocol_version;
+  unsigned char storage[];
+};
+
 struct halo_bridge_event {
   enum halo_bridge_event_kind kind;
   uint64_t request_id;
@@ -65,6 +79,7 @@ struct halo_bridge_event {
   int keep_alive;
   int body_expected;
   int is_early_data;
+  struct halo_bridge_transport* transport;
   uint64_t replay_ttl_secs;
   char* payload;
   size_t payload_len;

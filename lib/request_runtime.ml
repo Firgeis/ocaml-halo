@@ -277,6 +277,8 @@ let dispatch_request listener (event : Reactor.request_event) state body
       Eio.Switch.run ~name:"halo-request" @@ fun request_switch ->
       Router.Runtime.dispatch listener.router request
         ~raw_headers:event.raw_headers ~body
+        ~http_major:event.http_major ~http_minor:event.http_minor
+        ~connection_info:event.connection_info
         ~is_early_data:event.is_early_data ~request_id:event.request_id
         ~request_switch ~send_informational
         ~on_disconnect:(on_disconnect state)

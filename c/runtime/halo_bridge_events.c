@@ -15,8 +15,96 @@ void halo_bridge_event_destroy(struct halo_bridge_event* event) {
     free(event->headers[index].value);
   }
   free(event->headers);
+  free(event->transport);
   free(event->payload);
   free(event);
+}
+
+static int halo_bridge_copy_transport(struct halo_bridge_event* event,
+                                      struct halo_client* client) {
+  struct sockaddr_storage remote_address;
+  struct sockaddr_storage local_address;
+  int remote_address_len;
+  int local_address_len;
+  const char* server_name;
+  const char* application_protocol;
+  const char* cipher;
+  size_t server_name_len;
+  size_t application_protocol_len;
+  size_t cipher_len;
+  size_t storage_len;
+  struct halo_bridge_transport* transport;
+  unsigned char* cursor;
+  int tls_protocol_version;
+
+  remote_address_len = (int) sizeof(remote_address);
+  local_address_len = (int) sizeof(local_address);
+  if (uv_tcp_getpeername(&client->handle,
+                         (struct sockaddr*) &remote_address,
+                         &remote_address_len) != 0
+      || uv_tcp_getsockname(&client->handle,
+                            (struct sockaddr*) &local_address,
+                            &local_address_len) != 0
+      || remote_address_len <= 0 || remote_address_len > UINT16_MAX
+      || local_address_len <= 0 || local_address_len > UINT16_MAX)
+    return -1;
+
+  server_name = NULL;
+  application_protocol = NULL;
+  cipher = NULL;
+  tls_protocol_version = 0;
+  if (client->tls_conn != NULL) {
+    tls_protocol_version =
+      s2n_connection_get_actual_protocol_version(client->tls_conn);
+    if (tls_protocol_version <= 0 || tls_protocol_version > UINT8_MAX)
+      return -1;
+    server_name = s2n_get_server_name(client->tls_conn);
+    application_protocol = s2n_get_application_protocol(client->tls_conn);
+    cipher = s2n_connection_get_cipher(client->tls_conn);
+  }
+
+  server_name_len = server_name == NULL ? 0 : strlen(server_name);
+  application_protocol_len =
+    application_protocol == NULL ? 0 : strlen(application_protocol);
+  cipher_len = cipher == NULL ? 0 : strlen(cipher);
+  if (server_name_len > UINT16_MAX
+      || application_protocol_len > UINT16_MAX
+      || cipher_len > UINT16_MAX)
+    return -1;
+
+  storage_len = (size_t) remote_address_len + (size_t) local_address_len
+    + server_name_len + application_protocol_len + cipher_len;
+  if (storage_len > SIZE_MAX - sizeof(*transport))
+    return -1;
+  transport = malloc(sizeof(*transport) + storage_len);
+  if (transport == NULL)
+    return -1;
+
+  transport->remote_address_len = (uint16_t) remote_address_len;
+  transport->local_address_len = (uint16_t) local_address_len;
+  transport->server_name_len = (uint16_t) server_name_len;
+  transport->application_protocol_len =
+    (uint16_t) application_protocol_len;
+  transport->cipher_len = (uint16_t) cipher_len;
+  transport->tls_protocol_version = (uint8_t) tls_protocol_version;
+  cursor = transport->storage;
+  memcpy(cursor, &remote_address, (size_t) remote_address_len);
+  cursor += remote_address_len;
+  memcpy(cursor, &local_address, (size_t) local_address_len);
+  cursor += local_address_len;
+  if (server_name_len > 0) {
+    memcpy(cursor, server_name, server_name_len);
+    cursor += server_name_len;
+  }
+  if (application_protocol_len > 0) {
+    memcpy(cursor, application_protocol, application_protocol_len);
+    cursor += application_protocol_len;
+  }
+  if (cipher_len > 0)
+    memcpy(cursor, cipher, cipher_len);
+
+  event->transport = transport;
+  return 0;
 }
 
 static void halo_bridge_notify(struct halo_bridge* bridge) {
@@ -317,7 +405,8 @@ int halo_bridge_dispatch_request(struct halo_client* client) {
     || (client->parser.flags & F_CHUNKED) != 0;
   event->is_early_data = client->request_is_early_data;
   if ((request->method_len > 0 && event->method_text == NULL)
-      || (request->url_len > 0 && event->target == NULL)) {
+      || (request->url_len > 0 && event->target == NULL)
+      || halo_bridge_copy_transport(event, client) != 0) {
     halo_bridge_event_destroy(event);
     return -1;
   }

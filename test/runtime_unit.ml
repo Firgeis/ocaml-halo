@@ -86,7 +86,7 @@ let run_process ?input ?(close_stdin = true) command =
       in
       { stdout; stderr; status })
 
-let run_s2nc ?ticket_out ?ticket_in ?early_data_file ?send_file ?input
+let run_s2nc ?ticket_out ?ticket_in ?early_data_file ?send_file ?input ?alpn
     ?(echo = false) ?(close_stdin = false) ?(port = 8443) () =
   let args =
     [
@@ -112,6 +112,10 @@ let run_s2nc ?ticket_out ?ticket_in ?early_data_file ?send_file ?input
     (match send_file with
     | None -> []
     | Some path -> ["--send-file"; Filename.quote path])
+    @
+    (match alpn with
+    | None -> []
+    | Some protocols -> ["--alpn"; Filename.quote protocols])
     @ (if echo then ["--echo"] else [])
     @ ["127.0.0.1"; string_of_int port]
   in
@@ -420,6 +424,88 @@ let tls_early_data_config () =
     ~session_ticket_encrypt_decrypt_lifetime_secs:(10 * 365 * 24 * 60 * 60)
     ~session_ticket_decrypt_lifetime_secs:(10 * 365 * 24 * 60 * 60)
     ~max_early_data_size:4096 ()
+
+let string_of_sockaddr = function
+  | Unix.ADDR_INET (address, port) ->
+      Printf.sprintf "%s:%d" (Unix.string_of_inet_addr address) port
+  | Unix.ADDR_UNIX path -> "unix:" ^ path
+
+let transport_router =
+  Halo.Router.(
+    route
+      Matcher.(
+        let+ () = request_method_is GET *> path_end in
+        fun request ->
+          let connection = Request.connection_info request in
+          let http_major, http_minor = Request.http_version request in
+          let tls =
+            match Request.tls request with
+            | None -> "plaintext"
+            | Some tls ->
+                Printf.sprintf "tls=%s;sni=%s;alpn=%s;cipher=%b"
+                  (string_of_tls_protocol_version tls.protocol_version)
+                  (Option.value tls.server_name ~default:"none")
+                  (Option.value tls.application_protocol ~default:"none")
+                  (Option.fold ~none:false
+                     ~some:(fun cipher -> String.length cipher > 0)
+                     tls.cipher)
+          in
+          text Status.ok
+            (Printf.sprintf
+               "http=%d.%d\nremote=%s\nlocal=%s\ntls-status=%b\n%s\naccessors=%b\n"
+               http_major http_minor
+               (string_of_sockaddr connection.remote_address)
+               (string_of_sockaddr connection.local_address)
+               (Request.is_tls request) tls
+               (Request.remote_address request = connection.remote_address
+               && Request.local_address request = connection.local_address))))
+
+let test_plaintext_request_exposes_transport_metadata () =
+  ignore
+    (with_live_server ~router:transport_router (fun () ->
+         let response =
+           plaintext_request ~until:"accessors=true\n"
+             "GET / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+         in
+         Alcotest.(check bool) "HTTP version" true
+           (contains "http=1.0\n" response);
+         Alcotest.(check bool) "remote address" true
+           (contains "remote=127.0.0.1:" response);
+         Alcotest.(check bool) "local address" true
+           (contains "local=127.0.0.1:8443\n" response);
+         Alcotest.(check bool) "plaintext TLS status" true
+           (contains "tls-status=false\nplaintext\n" response);
+         Alcotest.(check bool) "address accessors" true
+           (contains "accessors=true\n" response)))
+
+let test_tls_request_exposes_negotiated_transport_metadata () =
+  let tls =
+    Halo.Server.Config.tls
+      ~cert_chain_path:(tls_cert_fixture_path ())
+      ~private_key_path:(tls_key_fixture_path ())
+      ~minimum_protocol_version:Halo.Server.TLS13
+      ~alpn_protocols:[ "http/1.1" ] ()
+  in
+  ignore
+    (with_live_server ~tls ~router:transport_router (fun () ->
+         let result =
+           run_s2nc ~alpn:"http/1.1" ~echo:true
+             ~input:
+               "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+             ()
+         in
+         assert_process_success result;
+         if not (contains "tls-status=true\n" result.stdout) then
+           fail "expected TLS transport response\nstdout:\n%s\nstderr:\n%s"
+             result.stdout result.stderr;
+         Alcotest.(check bool) "TLS request HTTP version" true
+           (contains "http=1.1\n" result.stdout);
+         Alcotest.(check bool) "negotiated TLS metadata" true
+           (contains
+              "tls=TLSv1.3;sni=localhost;alpn=http/1.1;cipher=true\n"
+              result.stdout);
+         Alcotest.(check bool) "TLS local address" true
+           (contains "local=127.0.0.1:8443\n" result.stdout)))
 
 let test_runtime_metrics_defaults () =
   let metrics = with_live_server (fun () -> ()) in
@@ -782,6 +868,13 @@ let test_blocking_replay_store_deadline_and_capacity () =
 let () =
   Alcotest.run "runtime"
     [
+      ( "transport metadata",
+        [
+          Alcotest.test_case "plaintext request" `Quick
+            test_plaintext_request_exposes_transport_metadata;
+          Alcotest.test_case "TLS request" `Slow
+            test_tls_request_exposes_negotiated_transport_metadata;
+        ] );
       ( "errors",
         [
           Alcotest.test_case "handler reports raw backtrace" `Quick

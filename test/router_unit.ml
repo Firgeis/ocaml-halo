@@ -666,7 +666,7 @@ let test_response_header_validation () =
         (Halo.Router.text Status.ok "ok"
         |> Halo.Router.with_header "X-Test" "safe\r\nInjected: yes"))
 
-let test_detached_request_is_not_early_data () =
+let test_detached_request_has_no_transport_flags () =
   let router =
     Halo.Router.(
       route
@@ -674,10 +674,13 @@ let test_detached_request_is_not_early_data () =
           let+ () = request_method_is GET *> path_end in
           fun request ->
             text Status.ok
-              (string_of_bool (Request.is_early_data request))))
+              (Printf.sprintf "%b:%b:%b"
+                 (Request.is_early_data request)
+                 (Request.is_tls request)
+                 (Option.is_none (Request.tls request)))))
   in
-  check_response "detached request early-data marker"
-    (text Status.ok "false")
+  check_response "detached request transport flags"
+    (text Status.ok "false:false:true")
     (Halo.Router.dispatch router (request GET "/"))
 
 let () =
@@ -749,7 +752,7 @@ let () =
             test_response_status_classes_are_enforced;
           Alcotest.test_case "response header validation" `Quick
             test_response_header_validation;
-          Alcotest.test_case "detached request is not early data" `Quick
-            test_detached_request_is_not_early_data;
+          Alcotest.test_case "detached request has no transport flags" `Quick
+            test_detached_request_has_no_transport_flags;
         ] );
     ]

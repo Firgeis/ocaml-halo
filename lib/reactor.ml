@@ -22,6 +22,7 @@ type raw_event = {
   keep_alive : bool;
   body_expected : bool;
   is_early_data : bool;
+  connection_info : Router.connection_info option;
   replay_ttl_secs : int64;
   payload : string;
 }
@@ -38,6 +39,7 @@ type request_event = {
   keep_alive : bool;
   body_expected : bool;
   is_early_data : bool;
+  connection_info : Router.connection_info;
 }
 
 type body_chunk_event = { request_id : int64; chunk : string }
@@ -135,6 +137,11 @@ let enable runtime ~max_in_flight_requests ~command_capacity =
 let event_of_raw (raw : raw_event) =
   match raw.kind with
   | 0 ->
+      let connection_info =
+        match raw.connection_info with
+        | Some connection_info -> connection_info
+        | None -> raise (Runtime_error "request transport metadata is missing")
+      in
       Request
         {
           request_id = raw.request_id;
@@ -148,6 +155,7 @@ let event_of_raw (raw : raw_event) =
           keep_alive = raw.keep_alive;
           body_expected = raw.body_expected;
           is_early_data = raw.is_early_data;
+          connection_info;
         }
   | 1 -> Body_chunk { request_id = raw.request_id; chunk = raw.payload }
   | 2 -> Body_end raw.request_id

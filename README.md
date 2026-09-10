@@ -68,6 +68,8 @@ used by the handler.
 `Router.Request` exposes request metadata:
 
 - `request_method`, `request_method_text`, `raw_target`, and `target`
+- `http_version`, `remote_address`, and `local_address`
+- `is_tls` and `tls`, including SNI, ALPN, protocol version, and cipher
 - case-insensitive `header`, `headers`, and `fold_headers`
 - `id`, a unique request ID for the runtime
 - `switch`, the request-scoped Eio switch
@@ -76,6 +78,13 @@ used by the handler.
 
 Use `Request.switch request` when starting child fibers. They are cancelled with
 the request if the client disconnects.
+
+`Request.connection_info` returns both socket endpoints as `Unix.sockaddr`
+values and an optional TLS record. A missing SNI or ALPN value is represented by
+`None`; the whole TLS record is `None` on a plaintext connection. These
+connection endpoints and the HTTP version are available on requests dispatched
+by a running server, not synthetic requests passed directly to
+`Router.dispatch`. Synthetic requests report `is_tls = false` and `tls = None`.
 
 Middleware may wrap matched handlers with `Router.use`. Pre-middleware added
 with `Router.use_pre` can continue, respond immediately, or rewrite the request
