@@ -41,6 +41,7 @@ type event =
   | Write_complete of int64
   | Metrics of metrics_event
   | Replay_claim of replay_claim_event
+  | Drained
   | Unknown of unknown_event
 
 val create_runtime : unit -> (Server_backend.t, string) result
@@ -59,6 +60,7 @@ val send_response : Server_backend.t -> int64 -> string -> unit
 val request_body : Server_backend.t -> int64 -> unit
 val close_request : Server_backend.t -> int64 -> unit
 val stop : Server_backend.t -> unit
+val begin_drain : Server_backend.t -> unit
 val send_informational : Server_backend.t -> int64 -> string -> unit
 val start_response_stream : Server_backend.t -> int64 -> string -> unit
 val write_response_chunk : Server_backend.t -> int64 -> string -> unit

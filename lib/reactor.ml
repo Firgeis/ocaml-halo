@@ -66,6 +66,7 @@ type event =
   | Write_complete of int64
   | Metrics of metrics_event
   | Replay_claim of replay_claim_event
+  | Drained
   | Unknown of unknown_event
 
 type command_status = Enqueued | Full | Closed | Unknown_status of int
@@ -97,6 +98,9 @@ external close_request_raw : Server_backend.t -> int64 -> int
   = "ocaml_halo_bridge_close_request"
 
 external stop_raw : Server_backend.t -> int = "ocaml_halo_bridge_stop"
+
+external begin_drain_raw : Server_backend.t -> int
+  = "ocaml_halo_bridge_begin_drain"
 
 external send_informational_raw : Server_backend.t -> int64 -> string -> int
   = "ocaml_halo_bridge_send_informational"
@@ -160,6 +164,7 @@ let event_of_raw (raw : raw_event) =
           identity = raw.payload;
           ttl_secs = raw.replay_ttl_secs;
         }
+  | 9 -> Drained
   | kind -> Unknown { kind; request_id = raw.request_id; payload = raw.payload }
 
 let poll_event runtime = Option.map event_of_raw (poll_event_raw runtime)
@@ -180,6 +185,7 @@ let close_request_status runtime request_id =
   command_status (close_request_raw runtime request_id)
 
 let stop_status runtime = command_status (stop_raw runtime)
+let begin_drain_status runtime = command_status (begin_drain_raw runtime)
 
 let send_informational_status runtime request_id response =
   command_status (send_informational_raw runtime request_id response)
@@ -224,6 +230,7 @@ let close_request runtime request_id =
   enqueue (fun () -> close_request_status runtime request_id)
 
 let stop runtime = enqueue (fun () -> stop_status runtime)
+let begin_drain runtime = enqueue (fun () -> begin_drain_status runtime)
 
 let send_informational runtime request_id response =
   enqueue (fun () -> send_informational_status runtime request_id response)

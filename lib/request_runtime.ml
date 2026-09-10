@@ -162,6 +162,7 @@ type t = {
   metrics_waiters :
     (int64, (Server_backend.runtime_metrics, exn) result Eio.Promise.u) Hashtbl.t;
   mutable next_metrics_query : int64;
+  mutable draining : bool;
   listeners : (int64, listener) Hashtbl.t;
   bridge_switch : Eio.Switch.t;
   on_error : int64 -> exn -> Printexc.raw_backtrace -> unit;
@@ -176,6 +177,7 @@ let create ~runtime ~listeners ~bridge_switch ~on_error =
     requests = Hashtbl.create 128;
     metrics_waiters = Hashtbl.create 4;
     next_metrics_query = 1L;
+    draining = false;
     listeners;
     bridge_switch;
     on_error;
@@ -272,8 +274,6 @@ let dispatch_request listener (event : Reactor.request_event) state body
   | Some Router.TRACE -> Http.trace_response event (Body.read_all body)
   | Some request_method ->
       let request = Http.make_request event request_method in
-      Eio.Cancel.sub @@ fun request_cancel ->
-      state.request_cancel <- Some request_cancel;
       Eio.Switch.run ~name:"halo-request" @@ fun request_switch ->
       Router.Runtime.dispatch listener.router request
         ~raw_headers:event.raw_headers ~body
@@ -290,7 +290,6 @@ let handle_request listener (event : Reactor.request_event) state body
       with_early_data_policy listener event @@ fun () ->
       dispatch_request listener event state body ~send_informational
     in
-    state.request_cancel <- None;
     send_response response
   with
   | exn when is_disconnect_exception exn -> completed := true
@@ -303,12 +302,14 @@ let handle_request listener (event : Reactor.request_event) state body
            completed := true)
 
 let run_handler runtime requests listener (event : Reactor.request_event) state
-    on_error =
+    ~is_draining on_error =
   Reactor.trace "handler start request=%Ld" event.request_id;
   let completed = ref false in
   let sent = ref false in
   let body = make_body runtime state ~body_expected:event.body_expected in
-  let keep_alive () = event.keep_alive && Body.is_complete body in
+  let keep_alive () =
+    event.keep_alive && not (is_draining ()) && Body.is_complete body
+  in
   let await_response_completion () =
     match Eio.Promise.await state.completion with
     | Ok () -> completed := true
@@ -376,6 +377,8 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
     | Router.Fixed_body _ -> send_fixed response
     | Router.Stream_body producer -> send_stream response producer
   in
+  Eio.Cancel.sub @@ fun request_cancel ->
+  state.request_cancel <- Some request_cancel;
   Fun.protect
     ~finally:(fun () ->
       state.request_cancel <- None;
@@ -413,7 +416,8 @@ let start_request t (event : Reactor.request_event) =
       in
       Hashtbl.replace t.requests event.request_id state;
       Eio.Fiber.fork ~sw:t.bridge_switch (fun () ->
-          run_handler t.runtime t.requests listener event state t.on_error)
+          run_handler t.runtime t.requests listener event state
+            ~is_draining:(fun () -> t.draining) t.on_error)
 
 let replay_claim store (event : Reactor.replay_claim_event) =
   let module Store = Server_config.Early_data_replay_store in
@@ -484,6 +488,8 @@ let dispatch_event t = function
         (Hashtbl.find_opt t.metrics_waiters query_id)
   | Reactor.Replay_claim event ->
       Eio.Fiber.fork ~sw:t.bridge_switch (fun () -> start_replay_claim t event)
+  | Reactor.Drained -> (
+      try Reactor.stop t.runtime with Client_disconnected -> ())
   | Reactor.Stopped ->
       Hashtbl.iter
         (fun _ resolve ->
@@ -526,6 +532,11 @@ let await_idle t =
   while Hashtbl.length t.requests > 0 do
     Eio.Fiber.yield ()
   done
+
+let begin_drain t =
+  if not t.draining then (
+    t.draining <- true;
+    Reactor.begin_drain t.runtime)
 
 let metrics t =
   let query_id = t.next_metrics_query in

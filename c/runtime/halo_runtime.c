@@ -22,6 +22,18 @@ static struct halo_runtime* halo_runtime_from_client(struct halo_client* client)
   return (struct halo_runtime*) client->handle.loop->data;
 }
 
+static void halo_runtime_maybe_finish_drain(struct halo_runtime* runtime) {
+  if (runtime == NULL
+      || !runtime->is_draining
+      || runtime->is_stopping
+      || runtime->drain_complete_emitted
+      || runtime->metrics.active_connections != 0)
+    return;
+
+  runtime->drain_complete_emitted = 1;
+  halo_bridge_mark_drained(runtime);
+}
+
 static double halo_runtime_clamp_utilization(double utilization) {
   if (utilization < 0.0)
     return 0.0;
@@ -266,7 +278,7 @@ value halo_option_some_uv(const char* operation, int code) {
 void halo_listener_ref_release(struct halo_listener_ref* ref) {
   if (ref == NULL)
     return;
-  if (ref->ocaml_alive || ref->handle != NULL)
+  if (ref->ocaml_alive || ref->handle != NULL || ref->active_clients != 0)
     return;
   if (ref->tls_cert_chain != NULL) {
     s2n_cert_chain_and_key_free(ref->tls_cert_chain);
@@ -304,6 +316,7 @@ void halo_runtime_note_connection_closed(struct halo_client* client) {
   if (runtime->metrics.active_connections > 0)
     runtime->metrics.active_connections -= 1;
   client->connection_closed_accounted = 1;
+  halo_runtime_maybe_finish_drain(runtime);
 }
 
 void halo_runtime_note_request_started(struct halo_client* client) {
@@ -384,6 +397,46 @@ static void halo_close_walk_cb(uv_handle_t* handle, void* arg) {
 
   if (!uv_is_closing(handle))
     uv_close(handle, halo_on_handle_closed);
+}
+
+static void halo_drain_walk_cb(uv_handle_t* handle, void* arg) {
+  struct halo_runtime* runtime;
+  void* data;
+  enum halo_handle_kind kind;
+  struct halo_client* client;
+
+  runtime = arg;
+  if ((uv_handle_t*) &runtime->controller.timer == handle)
+    return;
+
+  data = handle->data;
+  if (data == NULL)
+    return;
+
+  kind = *(enum halo_handle_kind*) data;
+  if (kind == HALO_HANDLE_LISTENER) {
+    if (!uv_is_closing(handle))
+      uv_close(handle, halo_on_handle_closed);
+    return;
+  }
+
+  if (kind == HALO_HANDLE_CLIENT) {
+    client = (struct halo_client*) data;
+    client->should_keep_alive = 0;
+    if (!client->request_in_flight
+        && (!client->response_started || client->shutdown_started)
+        && !client->interim_response_started)
+      halo_close_client(client);
+  }
+}
+
+void halo_runtime_begin_drain(struct halo_runtime* handle) {
+  if (handle->is_closed || handle->is_stopping || handle->is_draining)
+    return;
+
+  handle->is_draining = 1;
+  uv_walk(&handle->loop, halo_drain_walk_cb, handle);
+  halo_runtime_maybe_finish_drain(handle);
 }
 
 void halo_runtime_begin_shutdown(struct halo_runtime* handle) {
@@ -519,7 +572,9 @@ static value halo_runtime_create_internal(void) {
 
   owner.handle = handle;
   handle->is_closed = 0;
+  handle->is_draining = 0;
   handle->is_stopping = 0;
+  handle->drain_complete_emitted = 0;
   handle->bridge = NULL;
   handle->next_listener_id = 0;
   memset(&handle->metrics, 0, sizeof(handle->metrics));

@@ -182,6 +182,18 @@ CAMLprim value ocaml_halo_bridge_stop(value runtime_value) {
                                               0));
 }
 
+CAMLprim value ocaml_halo_bridge_begin_drain(value runtime_value) {
+  CAMLparam1(runtime_value);
+  CAMLlocal1(zero);
+
+  zero = caml_copy_int64(0);
+  CAMLreturn(halo_bridge_enqueue_command_stub(runtime_value,
+                                              zero,
+                                              HALO_BRIDGE_BEGIN_DRAIN,
+                                              NULL,
+                                              0));
+}
+
 static value halo_bridge_enqueue_payload_command(value runtime_value,
                                                  value request_id,
                                                  value payload,

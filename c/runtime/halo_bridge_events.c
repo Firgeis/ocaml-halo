@@ -520,3 +520,14 @@ void halo_bridge_mark_stopped(struct halo_runtime* runtime) {
     return;
   halo_bridge_push_required_event(runtime->bridge, event);
 }
+
+void halo_bridge_mark_drained(struct halo_runtime* runtime) {
+  struct halo_bridge_event* event;
+
+  if (runtime == NULL || runtime->bridge == NULL)
+    return;
+  event = halo_bridge_simple_event(HALO_BRIDGE_DRAINED, 0);
+  if (event == NULL)
+    return;
+  halo_bridge_push_required_event(runtime->bridge, event);
+}

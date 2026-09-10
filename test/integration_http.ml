@@ -239,6 +239,23 @@ let wait_until_listening ~timeout =
   in
   loop ()
 
+let wait_until_not_listening ~timeout =
+  let deadline = Unix.gettimeofday () +. timeout in
+  let rec loop () =
+    try
+      ignore (connect_once ());
+      if Unix.gettimeofday () >= deadline then
+        fail "server kept accepting connections on 127.0.0.1:%d" port;
+      Unix.sleepf 0.01;
+      loop ()
+    with
+    | Unix.Unix_error
+        ((Unix.ECONNREFUSED | Unix.ECONNRESET | Unix.ENOENT), _, _) ->
+        ()
+    | Unix.Unix_error (Unix.EINTR, _, _) -> loop ()
+  in
+  loop ()
+
 let request_response ?(body_expected = true) request =
   let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Fun.protect
@@ -476,7 +493,7 @@ let tls_request_response request =
 let short_timeout_env =
   [("HALO_REQUEST_TIMEOUT_MS", "100"); ("HALO_IDLE_TIMEOUT_MS", "100")]
 
-let with_server_capture_log path f =
+let with_server_capture_log ?(env = []) path f =
   let log_path = Filename.temp_file "ocaml-halo-server" ".log" in
   let devnull = Unix.openfile "/dev/null" [Unix.O_RDWR] 0 in
   let log_fd =
@@ -488,7 +505,10 @@ let with_server_capture_log path f =
       Unix.close log_fd;
       Sys.remove log_path)
     (fun () ->
-      let pid = Unix.create_process path [|path|] devnull log_fd log_fd in
+      let pid =
+        Unix.create_process_env path [|path|] (build_env env) devnull log_fd
+          log_fd
+      in
       Fun.protect
         ~finally:(fun () ->
           (try Unix.kill pid Sys.sigint with
@@ -1395,6 +1415,134 @@ let test_route_can_emit_informational_responses_before_final_response () =
             ~body:"hello world\n"
             response4))
 
+let check_shutdown_exit_status = function
+  | Unix.WEXITED 0 -> ()
+  | Unix.WSIGNALED signal when signal = Sys.sigint -> ()
+  | Unix.WEXITED code -> fail "server exited with code %d during shutdown" code
+  | Unix.WSIGNALED signal ->
+      fail "server terminated by signal %d during shutdown" signal
+  | Unix.WSTOPPED signal -> fail "server stopped by signal %d during shutdown" signal
+
+let test_shutdown_closes_completed_half_closed_connection_promptly () =
+  let path = server_path () in
+  with_server_capture_log
+    ~env:[("HALO_SHUTDOWN_TIMEOUT_MS", "2000")] path
+    (fun pid _log_path ->
+      let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      Fun.protect
+        ~finally:(fun () -> Unix.close fd)
+        (fun () ->
+          Unix.connect fd (Unix.ADDR_INET (host, port));
+          let request =
+            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+          in
+          write_all fd request 0 (String.length request);
+          let response = read_response fd in
+          assert_response ~connection:"close" ~content_length:12
+            ~status:"HTTP/1.1 200 OK" ~body:"hello world\n" response;
+          assert_socket_closed fd;
+          Unix.kill pid Sys.sigint;
+          wait_until_not_listening ~timeout:0.25;
+          wait_for_exit pid ~timeout:0.5 |> check_shutdown_exit_status))
+
+let test_shutdown_closes_connection_after_upload_completes () =
+  let path = server_path () in
+  with_server_capture_log path (fun pid _log_path ->
+      let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      Fun.protect
+        ~finally:(fun () -> Unix.close fd)
+        (fun () ->
+          Unix.connect fd (Unix.ADDR_INET (host, port));
+          let request =
+            "POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nExpect: 100-continue\r\nConnection: keep-alive\r\n\r\n"
+          in
+          write_all fd request 0 (String.length request);
+          let interim = read_response fd in
+          assert_response ~status:"HTTP/1.1 100 Continue" ~body:"" interim;
+          write_all fd "he" 0 2;
+          Unix.kill pid Sys.sigint;
+          wait_until_not_listening ~timeout:0.25;
+          write_all fd "llo" 0 3;
+          let response = read_response fd in
+          assert_response ~connection:"close" ~content_length:15
+            ~status:"HTTP/1.1 200 OK" ~body:"submitted:hello" response;
+          let next_request =
+            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+          in
+          (try write_all fd next_request 0 (String.length next_request) with
+          | Unix.Unix_error ((Unix.EPIPE | Unix.ECONNRESET), _, _) -> ());
+          (try Unix.shutdown fd Unix.SHUTDOWN_SEND with
+          | Unix.Unix_error (Unix.ENOTCONN, _, _) -> ());
+          let trailing = read_until_eof ~timeout:1.0 fd (Buffer.create 16) in
+          Alcotest.(check bool) "connection did not serve another request" false
+            (contains "hello world\n" trailing);
+          wait_for_exit pid ~timeout:2.0 |> check_shutdown_exit_status))
+
+let test_shutdown_drains_active_stream () =
+  let path = server_path () in
+  with_server_capture_log path (fun pid _log_path ->
+      let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      let idle_fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      let buffer = Buffer.create 4096 in
+      Fun.protect
+        ~finally:(fun () ->
+          Unix.close idle_fd;
+          Unix.close fd)
+        (fun () ->
+          Unix.connect idle_fd (Unix.ADDR_INET (host, port));
+          let idle_request =
+            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
+          in
+          write_all idle_fd idle_request 0 (String.length idle_request);
+          ignore (read_response idle_fd);
+          Unix.connect fd (Unix.ADDR_INET (host, port));
+          let request =
+            "GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
+          in
+          write_all fd request 0 (String.length request);
+          ignore (read_until_contains fd buffer "\r\n\r\n6\r\nhello \r\n");
+          let pipelined_request =
+            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+          in
+          write_all fd pipelined_request 0 (String.length pipelined_request);
+          Unix.shutdown fd Unix.SHUTDOWN_SEND;
+          Unix.kill pid Sys.sigint;
+          wait_until_not_listening ~timeout:0.25;
+          ignore (read_until_eof ~timeout:1.0 idle_fd (Buffer.create 16));
+          let complete = read_until_contains fd buffer "6\r\nworld\n\r\n" in
+          Alcotest.(check bool) "active stream completed" true
+            (contains "6\r\nworld\n\r\n" complete);
+          let finished = read_until_contains fd buffer "\r\n0\r\n\r\n" in
+          Alcotest.(check bool) "stream terminator completed" true
+            (contains "\r\n0\r\n\r\n" finished);
+          ignore (read_until_eof ~timeout:2.0 fd buffer);
+          wait_for_exit pid ~timeout:2.0 |> check_shutdown_exit_status))
+
+let test_shutdown_deadline_force_closes_active_stream () =
+  let path = server_path () in
+  with_server_capture_log
+    ~env:[("HALO_SHUTDOWN_TIMEOUT_MS", "500")] path
+    (fun pid _log_path ->
+      let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      let buffer = Buffer.create 4096 in
+      Fun.protect
+        ~finally:(fun () -> Unix.close fd)
+        (fun () ->
+          Unix.connect fd (Unix.ADDR_INET (host, port));
+          let request =
+            "GET /stream/hold HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
+          in
+          write_all fd request 0 (String.length request);
+          ignore (read_until_contains fd buffer "\r\n\r\n6\r\nhello \r\n");
+          Unix.kill pid Sys.sigint;
+          wait_until_not_listening ~timeout:0.25;
+          Alcotest.(check bool) "server remains alive until the deadline" true
+            (wait_for_exit_status pid ~timeout:0.0 = None);
+          let response = read_until_eof ~timeout:2.0 fd buffer in
+          Alcotest.(check bool) "forced stream has no terminator" false
+            (contains "\r\n0\r\n\r\n" response);
+          wait_for_exit pid ~timeout:2.0 |> check_shutdown_exit_status))
+
 let test_shutdown_during_suspended_informational_response_exits_promptly () =
   let path = server_path () in
   with_server_capture_log path (fun pid _log_path ->
@@ -1407,6 +1555,7 @@ let test_shutdown_during_suspended_informational_response_exits_promptly () =
           write_all fd request 0 (String.length request);
           let interim = read_response fd in
           assert_response ~status:"HTTP/1.1 102 Processing" ~body:"" interim;
+          Unix.shutdown fd Unix.SHUTDOWN_SEND;
           Unix.kill pid Sys.sigint;
           match wait_for_exit pid ~timeout:2.0 with
           | Unix.WEXITED 0 -> ()
@@ -1643,6 +1792,15 @@ let () =
           Alcotest.test_case
             "route can emit informational responses before final response"
             `Quick test_route_can_emit_informational_responses_before_final_response;
+          timed_test_case
+            "shutdown promptly closes a completed half-closed connection"
+            `Quick test_shutdown_closes_completed_half_closed_connection_promptly;
+          timed_test_case "shutdown closes connection after upload completes"
+            `Quick test_shutdown_closes_connection_after_upload_completes;
+          timed_test_case "shutdown drains an active stream" `Quick
+            test_shutdown_drains_active_stream;
+          timed_test_case "shutdown deadline force-closes an active stream"
+            `Quick test_shutdown_deadline_force_closes_active_stream;
           Alcotest.test_case
             "shutdown during suspended informational response exits promptly"
             `Quick

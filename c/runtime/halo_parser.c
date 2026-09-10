@@ -834,10 +834,15 @@ static int halo_on_body(llhttp_t* parser, const char* at, size_t length) {
 
 static int halo_on_message_complete(llhttp_t* parser) {
   struct halo_client* client;
+  struct halo_runtime* runtime;
 
   client = halo_parser_client(parser);
+  runtime = (struct halo_runtime*) client->handle.loop->data;
   client->message_complete = 1;
-  client->should_keep_alive = llhttp_should_keep_alive(parser);
+  client->should_keep_alive = runtime != NULL
+    && !runtime->is_draining
+    && !runtime->is_stopping
+    && llhttp_should_keep_alive(parser);
   return HPE_PAUSED;
 }
 

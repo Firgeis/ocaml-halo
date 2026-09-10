@@ -28,9 +28,11 @@ Add `ocaml-halo` and `eio_main` to the executable's Dune libraries:
  (libraries ocaml-halo eio_main))
 ```
 
-`Server.run` installs a SIGINT handler by default and shuts down cleanly when
-Ctrl-C is received. Pass several configurations to `Server.run` to serve
-several listeners.
+`Server.run` installs a SIGINT handler by default. On shutdown, Halo stops
+accepting connections, closes idle connections, and lets active requests and
+responses finish for up to 30 seconds before force-closing them. Configure the
+deadline with `~shutdown_timeout_ms`; zero requests an immediate stop. Pass
+several configurations to `Server.run` to serve several listeners.
 
 Request limits are configured independently on `Server.Config.create`:
 `max_request_line_size` caps the combined method and request-target bytes,

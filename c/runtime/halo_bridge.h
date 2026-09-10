@@ -14,6 +14,7 @@ int halo_bridge_enable(struct halo_runtime* runtime,
 void halo_bridge_destroy(struct halo_runtime* runtime);
 void halo_bridge_begin_shutdown(struct halo_runtime* runtime);
 void halo_bridge_mark_stopped(struct halo_runtime* runtime);
+void halo_bridge_mark_drained(struct halo_runtime* runtime);
 
 /* Reactor-to-Eio request events. */
 int halo_bridge_dispatch_request(struct halo_client* client);

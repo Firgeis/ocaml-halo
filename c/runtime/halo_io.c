@@ -220,6 +220,7 @@ static int halo_listener_pair_create(struct halo_listener_pair* pair,
   pair->listener->ref = pair->ref;
   pair->ref->handle = pair->listener;
   pair->ref->ocaml_alive = 0;
+  pair->ref->active_clients = 0;
   pair->ref->max_request_line_size = (size_t) Long_val(max_request_line_size);
   pair->ref->max_header_size = (size_t) Long_val(max_header_size);
   pair->ref->max_body_size = (size_t) Long_val(max_body_size);
@@ -976,6 +977,7 @@ static void halo_free_handle(uv_handle_t* handle) {
           && (!client->timer_initialized || client->timer_closed)) {
         struct halo_tls_write_chunk* chunk;
         struct halo_tls_write_chunk* next;
+        struct halo_listener_ref* listener_ref;
 
         if (client->tls_conn != NULL) {
           s2n_connection_free(client->tls_conn);
@@ -991,6 +993,13 @@ static void halo_free_handle(uv_handle_t* handle) {
         }
         halo_client_clear_paused_data(client);
         halo_request_free(&client->request);
+        listener_ref = client->listener_ref;
+        client->listener_ref = NULL;
+        if (listener_ref != NULL) {
+          if (listener_ref->active_clients > 0)
+            listener_ref->active_clients -= 1;
+          halo_listener_ref_release(listener_ref);
+        }
         free(client);
       }
       break;
@@ -2280,6 +2289,8 @@ static void halo_connection_cb(uv_stream_t* server, int status) {
 
   listener = (struct halo_listener*) server->data;
   runtime = (struct halo_runtime*) server->loop->data;
+  if (runtime == NULL || runtime->is_draining || runtime->is_stopping)
+    return;
   client = malloc(sizeof(*client));
   if (client == NULL)
     return;
@@ -2293,6 +2304,8 @@ static void halo_connection_cb(uv_stream_t* server, int status) {
     free(client);
     return;
   }
+  client->handle.data = client;
+  client->listener_ref->active_clients += 1;
 
   if (uv_timer_init(server->loop, &client->timer) != 0) {
     uv_close((uv_handle_t*) &client->handle, halo_on_handle_closed);
@@ -2302,7 +2315,6 @@ static void halo_connection_cb(uv_stream_t* server, int status) {
   llhttp_init(&client->parser, HTTP_REQUEST, halo_http_settings());
   llhttp_set_lenient_version(&client->parser, 1);
   client->parser.data = client;
-  client->handle.data = client;
   client->timer.data = client;
   client->timer_initialized = 1;
   client->dispatch_started = 0;

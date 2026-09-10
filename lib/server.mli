@@ -41,6 +41,7 @@ type config = Server_config.t
 module Config = Server_config
 
 val runtime_backend_name : unit -> string
+val default_shutdown_timeout_ms : int
 
 exception Client_disconnected
 exception Runtime_error of string
@@ -57,6 +58,7 @@ val shutdown : running -> unit
 val run :
   ?shutdown:Shutdown.t ->
   ?handle_sigint:bool ->
+  ?shutdown_timeout_ms:int ->
   ?max_in_flight_requests:int ->
   ?command_capacity:int ->
   ?on_ready:(running -> unit) ->
@@ -65,6 +67,11 @@ val run :
   unit
 (** Run all configured listeners. Each request handler executes in its own Eio
     fiber. [on_ready] runs in a child fiber after listeners are bound.
+
+    On shutdown, Halo closes its listeners and idle connections, lets active
+    requests and responses drain, and then force-closes anything remaining
+    after [shutdown_timeout_ms]. The default is
+    [default_shutdown_timeout_ms]. Zero requests an immediate force-stop.
 
     [on_error request_id exn backtrace] reports request-processing and response
     stream failures, and response lifecycle callback failures. If no response

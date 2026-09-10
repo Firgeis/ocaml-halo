@@ -16,4 +16,5 @@ val create :
 
 val run : t -> unit
 val await_idle : t -> unit
+val begin_drain : t -> unit
 val metrics : t -> Server_backend.runtime_metrics

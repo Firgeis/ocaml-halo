@@ -71,7 +71,9 @@ struct halo_bridge;
 struct halo_runtime {
   uv_loop_t loop;
   int is_closed;
+  int is_draining;
   int is_stopping;
+  int drain_complete_emitted;
   struct halo_runtime_metrics metrics;
   struct halo_runtime_controller controller;
   struct halo_bridge* bridge;
@@ -241,6 +243,7 @@ struct halo_tls_write_chunk {
 struct halo_listener_ref {
   struct halo_listener* handle;
   int ocaml_alive;
+  size_t active_clients;
   size_t max_request_line_size;
   size_t max_header_size;
   size_t max_body_size;
@@ -318,6 +321,7 @@ void halo_runtime_note_request_finished(struct halo_client* client, int complete
 void halo_runtime_note_tls_handshake(struct halo_client* client, int resumed);
 void halo_runtime_note_tls_handshake_failure(struct halo_client* client);
 void halo_runtime_controller_tick(struct halo_runtime* runtime);
+void halo_runtime_begin_drain(struct halo_runtime* runtime);
 void halo_runtime_begin_shutdown(struct halo_runtime* runtime);
 int halo_runtime_configure_controller(struct halo_runtime* runtime,
                                       uint64_t interval_ms,

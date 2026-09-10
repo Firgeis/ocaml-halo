@@ -33,6 +33,7 @@ type config = Server_config.t
 module Config = Server_config
 
 let runtime_backend_name = Server_backend.runtime_backend_name
+let default_shutdown_timeout_ms = 30_000
 
 exception Client_disconnected = Reactor.Client_disconnected
 exception Runtime_error = Reactor.Runtime_error
@@ -99,7 +100,7 @@ let install_sigint enabled shutdown =
 
 let stop runtime = try Reactor.stop runtime with Client_disconnected -> ()
 
-let run_bridge runtime listeners shutdown on_error on_ready =
+let run_bridge runtime listeners shutdown shutdown_timeout_ms on_error on_ready =
   let reactor =
     Domain.spawn (fun () -> result_or_raise (Reactor.run runtime))
   in
@@ -115,9 +116,18 @@ let run_bridge runtime listeners shutdown on_error on_ready =
     Request_runtime.create ~runtime ~listeners ~bridge_switch ~on_error
   in
   let running = { dispatcher; shutdown_control = shutdown } in
+  let reactor_stopped, notify_reactor_stopped = Eio.Promise.create () in
   Eio.Fiber.fork ~sw:bridge_switch (fun () ->
       Shutdown.await shutdown;
-      stop runtime);
+      Request_runtime.begin_drain dispatcher;
+      if shutdown_timeout_ms = 0 then
+        stop runtime
+      else
+        Eio.Fiber.first
+          (fun () -> Eio.Promise.await reactor_stopped)
+          (fun () ->
+            Eio_unix.sleep (float shutdown_timeout_ms /. 1000.0);
+            stop runtime));
   Fun.protect
     ~finally:(fun () ->
       Eio.Cancel.protect (fun () -> stop runtime);
@@ -128,16 +138,20 @@ let run_bridge runtime listeners shutdown on_error on_ready =
           Eio.Fiber.fork ~sw:bridge_switch (fun () -> notify running))
         on_ready;
       Request_runtime.run dispatcher;
+      Eio.Promise.resolve notify_reactor_stopped ();
       join_reactor ();
       Request_runtime.await_idle dispatcher)
 
-let run ?shutdown ?(handle_sigint = true) ?(max_in_flight_requests = 4096)
-    ?(command_capacity = 4096)
+let run ?shutdown ?(handle_sigint = true)
+    ?(shutdown_timeout_ms = default_shutdown_timeout_ms)
+    ?(max_in_flight_requests = 4096) ?(command_capacity = 4096)
     ?on_ready
     ?(on_error = fun _request_id exn backtrace ->
       prerr_endline (Printexc.to_string exn);
       Printexc.print_raw_backtrace stderr backtrace)
     configs =
+  if shutdown_timeout_ms < 0 then
+    invalid_arg "shutdown_timeout_ms must be non-negative";
   if max_in_flight_requests <= 0 then
     invalid_arg "max_in_flight_requests must be positive";
   if command_capacity <= 0 then invalid_arg "command_capacity must be positive";
@@ -153,4 +167,6 @@ let run ?shutdown ?(handle_sigint = true) ?(max_in_flight_requests = 4096)
       Fun.protect
         ~finally:(fun () ->
           Option.iter (Sys.set_signal Sys.sigint) previous_sigint)
-        (fun () -> run_bridge runtime listeners shutdown on_error on_ready))
+        (fun () ->
+          run_bridge runtime listeners shutdown shutdown_timeout_ms on_error
+            on_ready))

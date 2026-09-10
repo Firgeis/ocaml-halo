@@ -196,6 +196,21 @@ let run_server clock =
           let+ () =
             request_method_is GET
             *> path_segment "stream"
+            *> path_segment "hold"
+            *> path_end
+          in
+          fun _request ->
+            respond_with_headers plain_text_headers (fun headers ->
+                Halo.Stream.respond ~status:Status.ok ~headers (fun ~yield ->
+                    yield "hello ";
+                    Eio.Time.sleep clock 60.0;
+                    yield "world\n")))
+      <|>
+      route
+        Matcher.(
+          let+ () =
+            request_method_is GET
+            *> path_segment "stream"
             *> path_segment "explode"
             *> path_end
           in
@@ -349,6 +364,10 @@ let run_server clock =
     int_env_or_default "HALO_MAX_BODY_SIZE"
       Halo.Server.Config.default_max_body_size
   in
+  let shutdown_timeout_ms =
+    int_env_or_default "HALO_SHUTDOWN_TIMEOUT_MS"
+      Halo.Server.default_shutdown_timeout_ms
+  in
   let config =
     Halo.Server.Config.create ~port:8080
       ~max_request_line_size ~max_header_size ~max_body_size ~request_timeout_ms
@@ -358,7 +377,7 @@ let run_server clock =
   in
   Printf.printf "server on %s:%d using %s\n%!" config.host config.port
     (Halo.Server.runtime_backend_name ());
-  Halo.Server.run [config]
+  Halo.Server.run ~shutdown_timeout_ms [config]
 
 let () =
   try Eio_main.run @@ fun env -> run_server (Eio.Stdenv.clock env)

@@ -61,6 +61,9 @@ void halo_bridge_command_async_cb(uv_async_t* async) {
       case HALO_BRIDGE_STOP:
         halo_runtime_begin_shutdown(bridge->runtime);
         break;
+      case HALO_BRIDGE_BEGIN_DRAIN:
+        halo_runtime_begin_drain(bridge->runtime);
+        break;
       case HALO_BRIDGE_SEND_INFORMATIONAL:
         if (client != NULL
             && halo_client_bridge_send_informational(client,
