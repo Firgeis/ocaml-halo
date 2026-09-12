@@ -245,7 +245,7 @@ let with_collector ~port run =
   remove_if_present output_path;
   let config =
     Printf.sprintf
-      "receivers:\n  otlp:\n    protocols:\n      http:\n        endpoint: 127.0.0.1:%d\nexporters:\n  file:\n    path: %S\n    format: json\n    flush_interval: 10ms\nservice:\n  telemetry:\n    logs:\n      level: warn\n  pipelines:\n    traces:\n      receivers: [otlp]\n      exporters: [file]\n"
+      "receivers:\n  otlp:\n    protocols:\n      http:\n        endpoint: 127.0.0.1:%d\nexporters:\n  file:\n    path: %S\n    format: json\n    flush_interval: 10ms\nservice:\n  telemetry:\n    logs:\n      level: warn\n  pipelines:\n    traces:\n      receivers: [otlp]\n      exporters: [file]\n    metrics:\n      receivers: [otlp]\n      exporters: [file]\n"
       port output_path
   in
   Out_channel.with_open_bin config_path (fun channel ->
@@ -344,6 +344,15 @@ let run_halo_export ~collector_port ~server_port =
   in
   let tracer = Halo.Telemetry.Tracer.create ~processor () in
   let telemetry = Halo.Telemetry.of_tracer tracer in
+  let metrics = Halo.Metrics.create () in
+  let metrics_endpoint =
+    Uri.of_string
+      (Printf.sprintf "http://127.0.0.1:%d/v1/metrics" collector_port)
+  in
+  let metrics_exporter =
+    Halo.Metrics.Otlp_http.exporter ~net:(Eio.Stdenv.net env)
+      ~service_name:"halo-otel-integration" ~endpoint:metrics_endpoint ()
+  in
   let router =
     Halo.Router.(
       route ~template:"/otel/{id}"
@@ -360,7 +369,7 @@ let run_halo_export ~collector_port ~server_port =
   let started, notify_started = Eio.Promise.create () in
   let server =
     Eio.Fiber.fork_promise ~sw (fun () ->
-        Halo.Server.run ~handle_sigint:false ~telemetry
+        Halo.Server.run ~handle_sigint:false ~telemetry ~metrics
           ~on_ready:(fun running -> Eio.Promise.resolve notify_started running)
           [ config ])
   in
@@ -373,6 +382,11 @@ let run_halo_export ~collector_port ~server_port =
       in
       Ok response
     with exn -> Error (exn, Printexc.get_raw_backtrace ())
+  in
+  let metrics_export_error =
+    Halo.Server.collect_metrics running
+    |> Halo.Metrics.Otlp_http.export metrics_exporter
+    |> result_error "metrics export"
   in
   Halo.Server.shutdown running;
   let server_outcome =
@@ -389,6 +403,7 @@ let run_halo_export ~collector_port ~server_port =
     Halo.Telemetry.Processor.shutdown processor
     |> result_error "processor shutdown"
   in
+  Halo.Metrics.Otlp_http.shutdown metrics_exporter;
   (match request_outcome with
   | Ok response ->
       Alcotest.(check bool) "Halo response status" true
@@ -398,7 +413,8 @@ let run_halo_export ~collector_port ~server_port =
   | Ok () -> ()
   | Error (exn, backtrace) -> Printexc.raise_with_backtrace exn backtrace);
   Option.iter Alcotest.fail flush_error;
-  Option.iter Alcotest.fail shutdown_error
+  Option.iter Alcotest.fail shutdown_error;
+  Option.iter Alcotest.fail metrics_export_error
 
 let json_field name = function
   | `Assoc fields -> (
@@ -469,11 +485,52 @@ let find_exported_span documents expected_name =
         find_scope_spans (json_list_field "scopeSpans" resource_spans)
   in
   let resource_spans =
-    List.concat_map (json_list_field "resourceSpans") documents
+    List.filter_map
+      (function
+        | `Assoc fields -> List.assoc_opt "resourceSpans" fields
+        | _ -> None)
+      documents
+    |> List.concat_map (function
+         | `List values -> values
+         | value ->
+             fail "OTLP resourceSpans is not a list: %s"
+               (Yojson.Safe.to_string value))
   in
   match find_resource_spans resource_spans with
   | Some result -> result
   | None -> fail "collector did not export span %S" expected_name
+
+let find_exported_metric documents expected_name =
+  let resource_metrics =
+    List.filter_map
+      (function
+        | `Assoc fields -> List.assoc_opt "resourceMetrics" fields
+        | _ -> None)
+      documents
+    |> List.concat_map (function
+         | `List values -> values
+         | value ->
+             fail "OTLP resourceMetrics is not a list: %s"
+               (Yojson.Safe.to_string value))
+  in
+  let rec find_resources = function
+    | [] -> fail "collector did not export metric %S" expected_name
+    | resource :: remaining ->
+        let rec find_scopes = function
+          | [] -> find_resources remaining
+          | scope :: scopes -> (
+              match
+                List.find_opt
+                  (fun metric ->
+                    String.equal (json_string_field "name" metric) expected_name)
+                  (json_list_field "metrics" scope)
+              with
+              | Some metric -> (resource, scope, metric)
+              | None -> find_scopes scopes)
+        in
+        find_scopes (json_list_field "scopeMetrics" resource)
+  in
+  find_resources resource_metrics
 
 let parse_json_lines contents =
   contents
@@ -490,7 +547,19 @@ let wait_for_export path =
         if Sys.file_exists path then
           match parse_json_lines (read_file path) with
           | [] -> Error "the export file is empty"
-          | documents -> Ok documents
+          | documents
+            when List.exists
+                   (function
+                     | `Assoc fields -> List.mem_assoc "resourceSpans" fields
+                     | _ -> false)
+                   documents
+                 && List.exists
+                      (function
+                        | `Assoc fields -> List.mem_assoc "resourceMetrics" fields
+                        | _ -> false)
+                      documents ->
+              Ok documents
+          | _ -> Error "not all telemetry signals have been flushed"
         else
           Error "the export file does not exist"
       with
@@ -537,12 +606,44 @@ let test_export_to_reference_collector () =
         (string_attribute "http.route" span);
       Alcotest.(check int64) "HTTP status" 200L
         (int64_attribute "http.response.status_code" span);
+      Alcotest.(check int64) "HTTP request body size" 0L
+        (int64_attribute "http.request.body.size" span);
+      Alcotest.(check int64) "HTTP response body size" 9L
+        (int64_attribute "http.response.body.size" span);
       let start_time = json_int64_field "startTimeUnixNano" span in
       let end_time = json_int64_field "endTimeUnixNano" span in
       Alcotest.(check bool) "C request start time is populated" true
         (Int64.compare start_time 0L > 0);
       Alcotest.(check bool) "span ends after it starts" true
-        (Int64.compare end_time start_time >= 0))
+        (Int64.compare end_time start_time >= 0);
+      let metric_resource, metric_scope, duration =
+        find_exported_metric documents "http.server.request.duration"
+      in
+      Alcotest.(check string) "metrics service name" "halo-otel-integration"
+        (string_attribute "service.name" (json_field "resource" metric_resource));
+      Alcotest.(check string) "metrics instrumentation scope" "ocaml-halo"
+        (json_string_field "name" (json_field "scope" metric_scope));
+      let data_point =
+        json_field "histogram" duration
+        |> json_list_field "dataPoints"
+        |> List.hd
+      in
+      Alcotest.(check int64) "request duration count" 1L
+        (json_int64_field "count" data_point);
+      Alcotest.(check string) "metric route" "/otel/{id}"
+        (string_attribute "http.route" data_point);
+      let _runtime_resource, _runtime_scope, queue =
+        find_exported_metric documents "halo.runtime.queue.depth"
+      in
+      let queue_points = json_field "gauge" queue |> json_list_field "dataPoints" in
+      Alcotest.(check bool) "event and command queue points" true
+        (List.exists
+           (fun point -> String.equal (string_attribute "queue" point) "event")
+           queue_points
+        && List.exists
+             (fun point ->
+               String.equal (string_attribute "queue" point) "command")
+             queue_points))
 
 let () =
   Alcotest.run "OpenTelemetry integrations"

@@ -141,7 +141,7 @@ let assert_process_success result =
       fail "process stopped by signal %d\nstdout:\n%s\nstderr:\n%s" signal
         result.stdout result.stderr
 
-let with_live_config_groups ?on_error ?telemetry config_groups f =
+let with_live_config_groups ?on_error ?telemetry ?metrics config_groups f =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let servers =
@@ -152,7 +152,7 @@ let with_live_config_groups ?on_error ?telemetry config_groups f =
         let server =
           Eio.Fiber.fork_promise ~sw (fun () ->
               Halo.Server.run ~shutdown ~handle_sigint:false
-                ?on_error ?telemetry
+                ?on_error ?telemetry ?metrics
                 ~on_ready:(fun running ->
                   Eio.Promise.resolve notify_started running)
                 configs)
@@ -171,13 +171,13 @@ let with_live_config_groups ?on_error ?telemetry config_groups f =
   List.iter (fun (_, server) -> Eio.Promise.await_exn server) servers;
   match outcome with Ok metrics -> metrics | Error exn -> raise exn
 
-let with_live_configs ?on_error ?telemetry configs f =
-  match with_live_config_groups ?on_error ?telemetry [ configs ] f with
+let with_live_configs ?on_error ?telemetry ?metrics configs f =
+  match with_live_config_groups ?on_error ?telemetry ?metrics [ configs ] f with
   | [ metrics ] -> metrics
   | _ -> assert false
 
 let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router
-    ?on_error ?telemetry f =
+    ?on_error ?telemetry ?metrics f =
   let router =
     Option.value router
       ~default:
@@ -191,7 +191,7 @@ let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router
     Halo.Server.Config.create ~port:8443 ?tls ?early_data_policy
       ?early_data_replay_store router
   in
-  with_live_configs ?on_error ?telemetry [ config ] f
+  with_live_configs ?on_error ?telemetry ?metrics [ config ] f
 
 let with_live_tls_server tls = with_live_server ~tls
 
@@ -473,7 +473,9 @@ let test_request_telemetry_covers_transport_lifecycle () =
     (Option.fold ~none:false
        ~some:(fun timestamp ->
          Int64.compare timestamp request.start_monotonic_ns >= 0)
-       result.end_monotonic_ns)
+       result.end_monotonic_ns);
+  assert_int64_equal "request body size" 0L result.request_body_size;
+  assert_int64_equal "response body size" 8L result.response_body_size
 
 let test_invalid_trace_context_does_not_fail_request () =
   let saw_missing_parent = Atomic.make false in
@@ -744,6 +746,8 @@ let test_runtime_metrics_defaults () =
         metrics.tls_resumed_handshakes;
       assert_int64_equal "tls handshake failures" 0L
         metrics.tls_handshake_failures;
+      assert_int64_equal "event queue depth" 0L metrics.event_queue_depth;
+      assert_int64_equal "command queue depth" 0L metrics.command_queue_depth;
       Alcotest.(check string)
         "controller state"
         "normal"
@@ -752,6 +756,64 @@ let test_runtime_metrics_defaults () =
         "backpressure disabled"
         false
         metrics.backpressure_enabled
+
+let test_request_metrics_cover_live_server () =
+  let collector =
+    Halo.Metrics.create ~duration_buckets:[ 1.0 ]
+      ~size_buckets:[ 4.0; 8.0 ] ()
+  in
+  let router =
+    Halo.Router.(
+      route ~template:"/"
+        Matcher.(
+          let+ () = request_method_is POST *> path_end in
+          fun request ->
+            ignore (Halo.Body.read_all (Request.body request));
+            text Status.created "created\n"))
+  in
+  ignore
+    (with_live_server ~router ~metrics:collector (fun () ->
+         let response =
+           plaintext_request ~until:"created\n"
+             ("POST / HTTP/1.1\r\nHost: localhost\r\n"
+             ^ "Content-Length: 5\r\nConnection: close\r\n\r\nhello")
+         in
+         Alcotest.(check bool) "response status" true
+           (contains "HTTP/1.1 201 Created" response)));
+  let snapshot = Halo.Metrics.snapshot collector in
+  let route point =
+    List.mem
+      ("http.route", Halo.Metrics.String "/")
+      point.Halo.Metrics.attributes
+  in
+  let find name =
+    match
+      List.find_opt
+        (fun point -> String.equal point.Halo.Metrics.name name && route point)
+        snapshot.points
+    with
+    | Some point -> point
+    | None -> fail "missing live metric %s" name
+  in
+  let histogram_sum name =
+    match (find name).aggregation with
+    | Halo.Metrics.Histogram histogram -> histogram.sum
+    | _ -> fail "live metric %s was not a histogram" name
+  in
+  Alcotest.(check (float 0.0)) "request bytes" 5.0
+    (histogram_sum "http.server.request.body.size");
+  Alcotest.(check (float 0.0)) "response bytes" 8.0
+    (histogram_sum "http.server.response.body.size");
+  let requests = find "halo.http.server.requests" in
+  Alcotest.(check bool) "2xx status class" true
+    (List.mem
+       ("http.response.status_class", Halo.Metrics.String "2xx")
+       requests.attributes);
+  Alcotest.(check bool) "runtime points collected" true
+    (List.exists
+       (fun point ->
+         String.equal point.Halo.Metrics.name "halo.runtime.queue.depth")
+       snapshot.points)
 
 let test_tls_metrics_count_full_and_resumed_handshakes_with_explicit_keys () =
   with_temp_path "halo-session" ".bin" (fun session_path ->
@@ -1127,6 +1189,8 @@ let () =
         [
           Alcotest.test_case "default snapshot" `Quick
             test_runtime_metrics_defaults;
+          Alcotest.test_case "request metrics cover live server" `Quick
+            test_request_metrics_cover_live_server;
           Alcotest.test_case "explicit keys count full and resumed handshakes"
             `Slow
             test_tls_metrics_count_full_and_resumed_handshakes_with_explicit_keys;

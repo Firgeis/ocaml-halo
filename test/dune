@@ -76,6 +76,11 @@
  (libraries ocaml-halo eio_main alcotest))
 
 (test
+ (name metrics_unit)
+ (modules metrics_unit)
+ (libraries ocaml-halo eio_main alcotest))
+
+(test
  (name runtime_unit)
  (modules runtime_unit)
  (libraries ocaml-halo eio_main alcotest)

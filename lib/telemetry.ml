@@ -354,6 +354,8 @@ type server_request_result = {
   status_code : int option;
   outcome : Router.response_outcome option;
   end_monotonic_ns : int64 option;
+  request_body_size : int64;
+  response_body_size : int64;
 }
 
 module type Observer = sig
@@ -1080,6 +1082,10 @@ let of_tracer tracer =
     let with_span = Context.with_span
 
     let finish_server_request span result =
+      Span.set_attribute span "http.request.body.size"
+        (Attribute.Int result.request_body_size);
+      Span.set_attribute span "http.response.body.size"
+        (Attribute.Int result.response_body_size);
       Option.iter
         (fun route ->
           Span.set_attribute span "http.route" (Attribute.String route);

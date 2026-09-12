@@ -549,6 +549,7 @@ static void halo_bridge_finish_request(struct halo_client* client,
   }
   if (runtime->telemetry_enabled)
     event->monotonic_time_ns = uv_hrtime();
+  event->auxiliary = client->body_bytes_read;
   halo_bridge_push_required_event(bridge, event);
 }
 
@@ -604,16 +605,24 @@ int halo_bridge_complete_write(struct halo_client* client) {
 int halo_bridge_emit_metrics(struct halo_runtime* runtime, uint64_t query_id) {
   struct halo_bridge_event* event;
   char payload[384];
+  size_t event_queue_depth;
+  size_t command_queue_depth;
   int length;
 
   if (runtime == NULL || runtime->bridge == NULL)
     return -1;
   halo_runtime_controller_tick(runtime);
+  pthread_mutex_lock(&runtime->bridge->event_mutex);
+  event_queue_depth = runtime->bridge->event_count;
+  pthread_mutex_unlock(&runtime->bridge->event_mutex);
+  pthread_mutex_lock(&runtime->bridge->command_mutex);
+  command_queue_depth = runtime->bridge->command_count;
+  pthread_mutex_unlock(&runtime->bridge->command_mutex);
   length = snprintf(payload,
                     sizeof(payload),
                     "%.17g %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
                     " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
-                    " %d %d",
+                    " %zu %zu %d %d",
                     runtime->metrics.utilization,
                     runtime->metrics.active_connections,
                     runtime->metrics.active_requests,
@@ -623,6 +632,8 @@ int halo_bridge_emit_metrics(struct halo_runtime* runtime, uint64_t query_id) {
                     runtime->metrics.tls_full_handshakes,
                     runtime->metrics.tls_resumed_handshakes,
                     runtime->metrics.tls_handshake_failures,
+                    event_queue_depth,
+                    command_queue_depth,
                     (int) runtime->controller.state,
                     runtime->controller.backpressure_enabled);
   if (length < 0 || (size_t) length >= sizeof(payload))

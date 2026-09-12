@@ -47,7 +47,11 @@ type request_event = {
 }
 
 type body_chunk_event = { request_id : int64; chunk : string }
-type terminal_event = { request_id : int64; end_monotonic_ns : int64 }
+type terminal_event = {
+  request_id : int64;
+  end_monotonic_ns : int64;
+  request_body_size : int64;
+}
 type metrics_event = { query_id : int64; payload : string }
 
 type replay_claim_event = {
@@ -170,10 +174,18 @@ let event_of_raw (raw : raw_event) =
   | 2 -> Body_end raw.request_id
   | 3 ->
       Response_complete
-        { request_id = raw.request_id; end_monotonic_ns = monotonic_time_ns }
+        {
+          request_id = raw.request_id;
+          end_monotonic_ns = monotonic_time_ns;
+          request_body_size = raw.auxiliary;
+        }
   | 4 ->
       Disconnected
-        { request_id = raw.request_id; end_monotonic_ns = monotonic_time_ns }
+        {
+          request_id = raw.request_id;
+          end_monotonic_ns = monotonic_time_ns;
+          request_body_size = raw.auxiliary;
+        }
   | 5 -> Stopped
   | 6 -> Write_complete raw.request_id
   | 7 -> Metrics { query_id = raw.request_id; payload = raw.payload }
@@ -297,6 +309,8 @@ let metrics_of_payload payload =
    tls_full_handshakes;
    tls_resumed_handshakes;
    tls_handshake_failures;
+   event_queue_depth;
+   command_queue_depth;
    controller_state;
    backpressure_enabled;
   ] ->
@@ -310,6 +324,8 @@ let metrics_of_payload payload =
         tls_full_handshakes = Int64.of_string tls_full_handshakes;
         tls_resumed_handshakes = Int64.of_string tls_resumed_handshakes;
         tls_handshake_failures = Int64.of_string tls_handshake_failures;
+        event_queue_depth = Int64.of_string event_queue_depth;
+        command_queue_depth = Int64.of_string command_queue_depth;
         controller_state = controller_state_of_int (int_of_string controller_state);
         backpressure_enabled = int_of_string backpressure_enabled <> 0;
       }

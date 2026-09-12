@@ -22,6 +22,8 @@ type runtime_metrics = Server_backend.runtime_metrics = {
   tls_full_handshakes : int64;
   tls_resumed_handshakes : int64;
   tls_handshake_failures : int64;
+  event_queue_depth : int64;
+  command_queue_depth : int64;
   controller_state : controller_state;
   backpressure_enabled : bool;
 }
@@ -52,6 +54,10 @@ type running
 val metrics : running -> runtime_metrics
 (** Request a metrics snapshot from the reactor domain. *)
 
+val collect_metrics : running -> Metrics.snapshot
+(** Request a fresh reactor snapshot and combine it with the cumulative HTTP
+    request measurements recorded by the configured [Metrics.t]. *)
+
 val shutdown : running -> unit
 (** Request graceful shutdown. *)
 
@@ -63,6 +69,7 @@ val run :
   ?command_capacity:int ->
   ?on_ready:(running -> unit) ->
   ?telemetry:Telemetry.t ->
+  ?metrics:Metrics.t ->
   ?on_error:(int64 -> exn -> Printexc.raw_backtrace -> unit) ->
   Config.t list ->
   unit
@@ -77,6 +84,9 @@ val run :
     [telemetry] receives each dispatched request's full lifecycle, from the
     first plaintext byte observed by the C reactor through the terminal
     response write or disconnect. It defaults to [Telemetry.noop].
+
+    [metrics] records OpenTelemetry HTTP request metrics and Halo runtime
+    metrics. It defaults to [Metrics.noop].
 
     [on_error request_id exn backtrace] reports request-processing and response
     stream failures, and response lifecycle callback failures. If no response

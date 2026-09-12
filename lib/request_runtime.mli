@@ -13,6 +13,7 @@ val create :
   bridge_switch:Eio.Switch.t ->
   on_error:(int64 -> exn -> Printexc.raw_backtrace -> unit) ->
   telemetry:Telemetry.t ->
+  metrics:Metrics.t ->
   t
 
 val run : t -> unit

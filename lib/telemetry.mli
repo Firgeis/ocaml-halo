@@ -136,6 +136,8 @@ type server_request_result = {
   status_code : int option;
   outcome : Router.response_outcome option;
   end_monotonic_ns : int64 option;
+  request_body_size : int64;
+  response_body_size : int64;
 }
 (** Information known when request processing leaves its telemetry scope.
 
@@ -143,7 +145,8 @@ type server_request_result = {
     describe the terminal transport event, including the final response write.
     They may be absent if the request fiber is terminated by an unexpected
     runtime failure. [route], when present, is the low-cardinality template
-    explicitly supplied to [Router.route]. *)
+    explicitly supplied to [Router.route]. Body sizes count HTTP body octets
+    and exclude framing and headers. *)
 
 module type Observer = sig
   type span

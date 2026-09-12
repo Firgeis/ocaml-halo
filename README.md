@@ -126,6 +126,24 @@ template.
 See [docs/telemetry.md](docs/telemetry.md) for local tracing, batching,
 OTLP/HTTP export, the observer contract, and semantic-convention mapping.
 
+Request and runtime metrics use the companion collector:
+
+```ocaml
+let metrics = Halo.Metrics.create ()
+
+Halo.Server.run ~metrics
+  ~on_ready:(fun running ->
+    let snapshot = Halo.Server.collect_metrics running in
+    let prometheus = Halo.Metrics.Prometheus.encode snapshot in
+    publish prometheus)
+  [ config ]
+```
+
+It includes OTEL HTTP latency and body-size histograms, status-class request
+totals, active requests, and `halo.*` reactor gauges/counters. Prometheus text
+and OTLP/HTTP protobuf adapters consume the same snapshot; the telemetry guide
+lists the instruments and exporter setup.
+
 ## Request bodies
 
 `Body.read` consumes and returns the next available chunk, or `None` after the

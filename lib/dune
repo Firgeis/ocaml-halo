@@ -8,6 +8,7 @@
   body
   headers
   router
+  metrics
   telemetry
   server_config
   server_backend

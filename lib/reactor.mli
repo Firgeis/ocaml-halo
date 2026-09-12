@@ -25,7 +25,11 @@ type request_event = {
 }
 
 type body_chunk_event = { request_id : int64; chunk : string }
-type terminal_event = { request_id : int64; end_monotonic_ns : int64 }
+type terminal_event = {
+  request_id : int64;
+  end_monotonic_ns : int64;
+  request_body_size : int64;
+}
 type metrics_event = { query_id : int64; payload : string }
 
 type replay_claim_event = {

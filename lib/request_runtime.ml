@@ -151,7 +151,9 @@ type request_state = {
   mutable telemetry_route : string option;
   mutable telemetry_status_code : int option;
   mutable telemetry_end_monotonic_ns : int64 option;
-  telemetry_enabled : bool;
+  mutable request_body_size : int64;
+  mutable response_body_size : int64;
+  observability_enabled : bool;
 }
 
 type listener = {
@@ -172,12 +174,13 @@ type t = {
   bridge_switch : Eio.Switch.t;
   on_error : int64 -> exn -> Printexc.raw_backtrace -> unit;
   telemetry : Telemetry.t;
+  metrics : Metrics.t;
 }
 
 let listener ~early_data_policy ~early_data_replay_store router =
   { router; early_data_policy; early_data_replay_store }
 
-let create ~runtime ~listeners ~bridge_switch ~on_error ~telemetry =
+let create ~runtime ~listeners ~bridge_switch ~on_error ~telemetry ~metrics =
   {
     runtime;
     requests = Hashtbl.create 128;
@@ -189,6 +192,7 @@ let create ~runtime ~listeners ~bridge_switch ~on_error ~telemetry =
     bridge_switch;
     on_error;
     telemetry;
+    metrics;
   }
 
 let is_disconnect_exception = function
@@ -283,7 +287,7 @@ let dispatch_request listener (event : Reactor.request_event) state body
   | Some request_method ->
       let request = Http.make_request event request_method in
       let on_route =
-        if state.telemetry_enabled then
+        if state.observability_enabled then
           Some (fun template -> state.telemetry_route <- Some template)
         else
           None
@@ -340,7 +344,7 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
     | Error exn -> raise exn
   in
   let send_fixed response =
-    if state.telemetry_enabled then
+    if state.observability_enabled then
       state.telemetry_status_code <-
         Some (Router.Status.to_int (Router.Response.status response));
     let wire =
@@ -348,6 +352,15 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
         ~http_major:event.http_major ~http_minor:event.http_minor
         ~keep_alive:(keep_alive ()) response
     in
+    if state.observability_enabled then
+      state.response_body_size <-
+        (match Router.Response.body response with
+        | Router.Fixed_body body
+          when (not
+                  (Http.status_forbids_body (Router.Response.status response)))
+               && not (String.equal event.method_text "HEAD") ->
+            Int64.of_int (String.length body)
+        | _ -> 0L);
     Reactor.trace "fixed response request=%Ld status=%d bytes=%d"
       event.request_id
       (Router.Status.to_int (Router.Response.status response))
@@ -365,7 +378,7 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
     await_write state
   in
   let send_stream response producer =
-    if state.telemetry_enabled then
+    if state.observability_enabled then
       state.telemetry_status_code <-
         Some (Router.Status.to_int (Router.Response.status response));
     let head =
@@ -381,7 +394,11 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
         producer ~yield:(fun chunk ->
             Reactor.write_response_chunk runtime event.request_id
               (Http.serialize_chunk chunk);
-            await_write state);
+            await_write state;
+            if state.observability_enabled then
+              state.response_body_size <-
+                Int64.add state.response_body_size
+                  (Int64.of_int (String.length chunk)));
         None
       with
       | exn when is_disconnect_exception exn -> raise exn
@@ -456,7 +473,11 @@ let start_request t (event : Reactor.request_event) =
           telemetry_route = None;
           telemetry_status_code = None;
           telemetry_end_monotonic_ns = None;
-          telemetry_enabled = Telemetry.Lifecycle.enabled t.telemetry;
+          request_body_size = 0L;
+          response_body_size = 0L;
+          observability_enabled =
+            (Telemetry.Lifecycle.enabled t.telemetry
+            || Metrics.Private.enabled t.metrics);
         }
       in
       Hashtbl.replace t.requests event.request_id state;
@@ -465,7 +486,30 @@ let start_request t (event : Reactor.request_event) =
             run_handler t.runtime t.requests listener event state
               ~connection_info ~is_draining:(fun () -> t.draining) t.on_error
           in
-          if not state.telemetry_enabled then
+          let metrics_request =
+            Metrics.Private.start_request t.metrics ~method_:event.method_text
+              ~scheme:
+                (match connection_info.tls with
+                | None -> "http"
+                | Some _ -> "https")
+              ~start_monotonic_ns:event.start_monotonic_ns
+          in
+          let finish_metrics () =
+            let outcome =
+              match state.response_outcome with
+              | Some Router.Completed -> "completed"
+              | Some (Router.Aborted _) -> "aborted"
+              | Some Router.Client_disconnected -> "client_disconnected"
+              | None -> "incomplete"
+            in
+            Metrics.Private.finish_request metrics_request
+              ~route:state.telemetry_route
+              ~status_code:state.telemetry_status_code ~outcome
+              ~end_monotonic_ns:state.telemetry_end_monotonic_ns
+              ~request_body_size:state.request_body_size
+              ~response_body_size:state.response_body_size
+          in
+          if not state.observability_enabled then
             run_handler ()
           else
             let telemetry_span =
@@ -486,13 +530,16 @@ let start_request t (event : Reactor.request_event) =
             in
             Fun.protect
               ~finally:(fun () ->
-                Telemetry.Lifecycle.finish_server_request telemetry_span
-                  {
-                    Telemetry.route = state.telemetry_route;
-                    status_code = state.telemetry_status_code;
-                    outcome = state.response_outcome;
-                    end_monotonic_ns = state.telemetry_end_monotonic_ns;
-                  })
+                Fun.protect ~finally:finish_metrics (fun () ->
+                    Telemetry.Lifecycle.finish_server_request telemetry_span
+                      {
+                        Telemetry.route = state.telemetry_route;
+                        status_code = state.telemetry_status_code;
+                        outcome = state.response_outcome;
+                        end_monotonic_ns = state.telemetry_end_monotonic_ns;
+                        request_body_size = state.request_body_size;
+                        response_body_size = state.response_body_size;
+                      }))
               (fun () ->
                 Telemetry.Lifecycle.with_span telemetry_span run_handler))
 
@@ -525,7 +572,12 @@ let dispatch_event t = function
   | Reactor.Request event -> start_request t event
   | Reactor.Body_chunk { request_id; chunk } ->
       Option.iter
-        (fun state -> Eio.Stream.add state.body_events (Body_chunk chunk))
+        (fun state ->
+          if state.observability_enabled then
+            state.request_body_size <-
+              Int64.add state.request_body_size
+                (Int64.of_int (String.length chunk));
+          Eio.Stream.add state.body_events (Body_chunk chunk))
         (Hashtbl.find_opt t.requests request_id)
   | Reactor.Body_end request_id ->
       Option.iter
@@ -535,16 +587,19 @@ let dispatch_event t = function
       Option.iter
         (fun state -> Eio.Stream.add state.write_completions ())
         (Hashtbl.find_opt t.requests request_id)
-  | Reactor.Response_complete { request_id; end_monotonic_ns } ->
+  | Reactor.Response_complete
+      { request_id; end_monotonic_ns; request_body_size } ->
       handle_terminal_event t.requests request_id (fun state ->
-          if state.telemetry_enabled then
+          if state.observability_enabled then (
             state.telemetry_end_monotonic_ns <- Some end_monotonic_ns;
+            state.request_body_size <- request_body_size);
           resolve_completion state (Ok ());
           terminate_response state t.on_error Router.Completed)
-  | Reactor.Disconnected { request_id; end_monotonic_ns } ->
+  | Reactor.Disconnected { request_id; end_monotonic_ns; request_body_size } ->
       handle_terminal_event t.requests request_id (fun state ->
-          if state.telemetry_enabled then
+          if state.observability_enabled then (
             state.telemetry_end_monotonic_ns <- Some end_monotonic_ns;
+            state.request_body_size <- request_body_size);
           let response_outcome =
             match state.response_abort with
             | Some (exn, backtrace) -> Router.Aborted (exn, backtrace)
@@ -559,12 +614,35 @@ let dispatch_event t = function
             state.request_cancel;
           terminate_response state t.on_error response_outcome)
   | Reactor.Metrics { query_id; payload } ->
+      Reactor.trace "metrics event query=%Ld payload=%s" query_id payload;
       Option.iter
         (fun resolve ->
           Hashtbl.remove t.metrics_waiters query_id;
           let result =
             try Ok (Reactor.metrics_of_payload payload) with exn -> Error exn
           in
+          (match result with
+          | Ok metrics ->
+              Metrics.Private.record_runtime t.metrics
+                ~utilization:metrics.utilization
+                ~active_connections:metrics.active_connections
+                ~active_requests:metrics.active_requests
+                ~accepted_connections:metrics.accepted_connections
+                ~rejected_connections:metrics.rejected_connections
+                ~completed_requests:metrics.completed_requests
+                ~tls_full_handshakes:metrics.tls_full_handshakes
+                ~tls_resumed_handshakes:metrics.tls_resumed_handshakes
+                ~tls_handshake_failures:metrics.tls_handshake_failures
+                ~event_queue_depth:metrics.event_queue_depth
+                ~command_queue_depth:metrics.command_queue_depth
+                ~controller_state:
+                  (match metrics.controller_state with
+                  | Server_backend.Normal -> "normal"
+                  | Busy -> "busy"
+                  | Saturated -> "saturated"
+                  | Recovering -> "recovering")
+                ~backpressure_enabled:metrics.backpressure_enabled
+          | Error _ -> ());
           ignore (Eio.Promise.try_resolve resolve result))
         (Hashtbl.find_opt t.metrics_waiters query_id)
   | Reactor.Replay_claim event ->
@@ -630,6 +708,7 @@ let metrics t =
   Fun.protect
     ~finally:(fun () -> Hashtbl.remove t.metrics_waiters query_id)
     (fun () ->
+      Reactor.trace "request metrics query=%Ld" query_id;
       Reactor.request_metrics t.runtime query_id;
       match Eio.Promise.await promise with
       | Ok metrics -> metrics

@@ -4,6 +4,76 @@
 It is disabled by default and has no dependency on a third-party OpenTelemetry
 package.
 
+`Halo.Metrics` is the matching metrics collector. It records the standard HTTP
+server duration, active-request, request-body-size, and response-body-size
+instruments, plus low-cardinality request totals and reactor measurements under
+`halo.*`.
+
+## Metrics
+
+Create one collector, pass it to the server, and collect a snapshot from the
+live handle. `Server.collect_metrics` refreshes the reactor gauges and counters
+before returning the immutable snapshot:
+
+```ocaml
+let metrics = Halo.Metrics.create ()
+
+let on_ready running =
+  Eio.Fiber.fork ~sw @@ fun () ->
+  let snapshot = Halo.Server.collect_metrics running in
+  let body = Halo.Metrics.Prometheus.encode snapshot in
+  serve_metrics_response
+    ~content_type:Halo.Metrics.Prometheus.content_type body
+
+let () = Halo.Server.run ~metrics ~on_ready [ config ]
+```
+
+The Prometheus adapter emits text exposition format 0.0.4. Dotted OTEL names
+become underscores, duration and byte units get conventional suffixes, and
+monotonic sums get `_total`.
+
+For OTLP/HTTP protobuf, create an exporter and send snapshots at the interval
+chosen by the application:
+
+```ocaml
+let exporter =
+  Halo.Metrics.Otlp_http.exporter ~net:env#net
+    ~service_name:"my-service" ()
+in
+let snapshot = Halo.Server.collect_metrics running in
+match Halo.Metrics.Otlp_http.export exporter snapshot with
+| Ok () -> ()
+| Error message -> log_export_error message
+```
+
+The default endpoint is `http://localhost:4318/v1/metrics`. The exporter uses
+cumulative temporality and the same bounded retry behavior as the trace
+exporter. Call `Metrics.Otlp_http.shutdown` when no further exports should be
+accepted.
+
+Request measurements are grouped by method, scheme, explicit route template,
+status code, terminal outcome, and low-cardinality status class. A raw URL path
+is never used as a metric attribute. Body-size histograms count body octets and
+exclude headers and HTTP/1 framing.
+
+Runtime snapshots expose these instrument families:
+
+| Instrument | Kind |
+|---|---|
+| `halo.runtime.utilization` | gauge |
+| `halo.runtime.connections.active` | gauge |
+| `halo.runtime.requests.active` | gauge |
+| `halo.runtime.connections.accepted` | cumulative sum |
+| `halo.runtime.connections.rejected` | cumulative sum |
+| `halo.runtime.requests.completed` | cumulative sum |
+| `halo.runtime.tls.handshakes` | cumulative sum by result/session mode |
+| `halo.runtime.queue.depth` | gauge by event/command queue |
+| `halo.runtime.controller.state` | gauge labeled by current state |
+| `halo.runtime.backpressure` | boolean gauge |
+
+`Metrics.create` accepts custom duration and size histogram boundaries. The
+defaults cover typical HTTP latencies and payload sizes.
+
 ## Local tracer
 
 The usual production setup uses the bounded batch processor and OTLP/HTTP
@@ -129,11 +199,12 @@ emits a version `00` `traceparent` plus `tracestate` when it is non-empty.
 `Trace_state.add` updates vendor state at the front while preserving the W3C
 entry and size limits.
 
-This first boundary covers requests dispatched from the C reactor to an OCaml
-handler or built-in method response. Rejections completed entirely in C before
-dispatch (for example, a malformed request line or an admission-limit 503) do
-not yet produce request spans. Their aggregate counters remain available from
-`Halo.Server.metrics`.
+The tracing and HTTP-metric lifecycle boundary covers requests dispatched from
+the C reactor to an OCaml handler or built-in method response. Rejections
+completed entirely in C before dispatch (for example, a malformed request line
+or an admission-limit 503) do not produce request spans or HTTP histogram
+points. Their aggregate runtime counters remain available from
+`Halo.Server.metrics` and `Halo.Server.collect_metrics`.
 
 ## Request timing
 

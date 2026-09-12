@@ -17,6 +17,8 @@ type runtime_metrics = {
   tls_full_handshakes : int64;
   tls_resumed_handshakes : int64;
   tls_handshake_failures : int64;
+  event_queue_depth : int64;
+  command_queue_depth : int64;
   controller_state : controller_state;
   backpressure_enabled : bool;
 }
