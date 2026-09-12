@@ -330,7 +330,10 @@ module Matcher : sig
   val require_body : unit t
 end
 
-val route : handler Matcher.t -> t
+(** [route ~template matcher] associates the matched route with a stable,
+    low-cardinality template such as [/users/{id}]. Telemetry backends receive
+    this value as [http.route]. Do not pass the request's concrete path. *)
+val route : ?template:string -> handler Matcher.t -> t
 val scope : unit Matcher.t -> t -> t
 val scope_path_segment : string -> t -> t
 val use_pre : pre_middleware -> t -> t
@@ -342,6 +345,7 @@ val dispatch : t -> request -> response
 
 module Runtime : sig
   val dispatch :
+    ?on_route:(string -> unit) ->
     t ->
     request ->
     raw_headers:(string * string) list ->

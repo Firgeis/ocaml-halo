@@ -100,7 +100,8 @@ let install_sigint enabled shutdown =
 
 let stop runtime = try Reactor.stop runtime with Client_disconnected -> ()
 
-let run_bridge runtime listeners shutdown shutdown_timeout_ms on_error on_ready =
+let run_bridge runtime listeners shutdown shutdown_timeout_ms on_error on_ready
+    telemetry =
   let reactor =
     Domain.spawn (fun () -> result_or_raise (Reactor.run runtime))
   in
@@ -114,6 +115,7 @@ let run_bridge runtime listeners shutdown shutdown_timeout_ms on_error on_ready 
   Eio.Switch.run ~name:"halo-reactor-bridge" @@ fun bridge_switch ->
   let dispatcher =
     Request_runtime.create ~runtime ~listeners ~bridge_switch ~on_error
+      ~telemetry
   in
   let running = { dispatcher; shutdown_control = shutdown } in
   let reactor_stopped, notify_reactor_stopped = Eio.Promise.create () in
@@ -145,7 +147,7 @@ let run_bridge runtime listeners shutdown shutdown_timeout_ms on_error on_ready 
 let run ?shutdown ?(handle_sigint = true)
     ?(shutdown_timeout_ms = default_shutdown_timeout_ms)
     ?(max_in_flight_requests = 4096) ?(command_capacity = 4096)
-    ?on_ready
+    ?on_ready ?(telemetry = Telemetry.noop)
     ?(on_error = fun _request_id exn backtrace ->
       prerr_endline (Printexc.to_string exn);
       Printexc.print_raw_backtrace stderr backtrace)
@@ -160,7 +162,8 @@ let run ?shutdown ?(handle_sigint = true)
     ~finally:(fun () -> close_runtime_or_raise runtime)
     (fun () ->
       result_or_raise
-        (Reactor.enable runtime ~max_in_flight_requests ~command_capacity);
+        (Reactor.enable runtime ~max_in_flight_requests ~command_capacity
+           ~telemetry:(Telemetry.Lifecycle.enabled telemetry));
       let listeners = listen runtime configs in
       let shutdown = Option.value shutdown ~default:(Shutdown.create ()) in
       let previous_sigint = install_sigint handle_sigint shutdown in
@@ -169,4 +172,4 @@ let run ?shutdown ?(handle_sigint = true)
           Option.iter (Sys.set_signal Sys.sigint) previous_sigint)
         (fun () ->
           run_bridge runtime listeners shutdown shutdown_timeout_ms on_error
-            on_ready))
+            on_ready telemetry))

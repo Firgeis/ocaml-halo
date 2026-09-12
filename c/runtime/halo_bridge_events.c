@@ -415,6 +415,10 @@ int halo_bridge_dispatch_request(struct halo_client* client) {
   event->body_expected = request->content_length > 0
     || (client->parser.flags & F_CHUNKED) != 0;
   event->is_early_data = client->request_is_early_data;
+  if (runtime->telemetry_enabled) {
+    event->monotonic_time_ns = client->request_start_monotonic_ns;
+    event->unix_time_ns = client->request_start_unix_ns;
+  }
   if ((request->method_len > 0 && event->method_text == NULL)
       || (request->url_len > 0 && event->target == NULL)
       || (first_request_on_connection
@@ -543,6 +547,8 @@ static void halo_bridge_finish_request(struct halo_client* client,
     halo_bridge_release_request(bridge);
     return;
   }
+  if (runtime->telemetry_enabled)
+    event->monotonic_time_ns = uv_hrtime();
   halo_bridge_push_required_event(bridge, event);
 }
 

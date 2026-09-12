@@ -74,6 +74,7 @@ struct halo_runtime {
   int is_draining;
   int is_stopping;
   int drain_complete_emitted;
+  int telemetry_enabled;
   struct halo_runtime_metrics metrics;
   struct halo_runtime_controller controller;
   struct halo_bridge* bridge;
@@ -189,6 +190,8 @@ struct halo_client {
   int tls_close_started;
   int tls_early_data_complete;
   int request_is_early_data;
+  uint64_t request_start_monotonic_ns;
+  uint64_t request_start_unix_ns;
   uint64_t bridge_replay_claim_id;
   struct s2n_offered_early_data* tls_pending_early_data;
   size_t body_bytes_read;

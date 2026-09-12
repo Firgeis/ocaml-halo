@@ -18,9 +18,14 @@ type request_event = {
   (** Present only on the first request of a cached connection, or on a
       one-shot request. *)
   connection_info : Router.connection_info option;
+  (** C-reactor timestamp captured at the first plaintext request byte. *)
+  start_monotonic_ns : int64;
+  (** Unix-epoch timestamp captured alongside [start_monotonic_ns]. *)
+  start_time_unix_ns : int64 option;
 }
 
 type body_chunk_event = { request_id : int64; chunk : string }
+type terminal_event = { request_id : int64; end_monotonic_ns : int64 }
 type metrics_event = { query_id : int64; payload : string }
 
 type replay_claim_event = {
@@ -40,8 +45,8 @@ type event =
   | Request of request_event
   | Body_chunk of body_chunk_event
   | Body_end of int64
-  | Response_complete of int64
-  | Disconnected of int64
+  | Response_complete of terminal_event
+  | Disconnected of terminal_event
   | Stopped
   | Write_complete of int64
   | Metrics of metrics_event
@@ -57,6 +62,7 @@ val enable :
   Server_backend.t ->
   max_in_flight_requests:int ->
   command_capacity:int ->
+  telemetry:bool ->
   (unit, string) result
 
 val event_fd : Server_backend.t -> Unix.file_descr

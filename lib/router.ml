@@ -425,8 +425,8 @@ type input = {
 }
 
 type route_match =
-  | Route_matched of handler * middleware list
-  | Route_rejected of response * middleware list
+  | Route_matched of handler * middleware list * string option
+  | Route_rejected of response * middleware list * string option
   | Route_missing
 
 type route_eval = {
@@ -905,27 +905,27 @@ module Matcher = struct
         }
 end
 
-let to_route_result matcher input =
+let to_route_result template matcher input =
   let route_match =
     match matcher input with
     | Matcher.Match (handler, final)
       when final.path.index = Array.length final.path.segments ->
-        Route_matched (handler, [])
+        Route_matched (handler, [], template)
     | Matcher.Reject response ->
-        Route_rejected (response, [])
+        Route_rejected (response, [], template)
     | Matcher.Match _ | Matcher.No_match ->
         Route_missing
   in
   { route_match; effective_input = input }
 
-let route matcher =
-  { run = to_route_result matcher; middleware = []; pre_middleware = [] }
+let route ?template matcher =
+  { run = to_route_result template matcher; middleware = []; pre_middleware = [] }
 
 let attach_middleware middleware = function
-  | Route_matched (handler, existing) ->
-      Route_matched (handler, middleware @ existing)
-  | Route_rejected (response, existing) ->
-      Route_rejected (response, middleware @ existing)
+  | Route_matched (handler, existing, template) ->
+      Route_matched (handler, middleware @ existing, template)
+  | Route_rejected (response, existing, template) ->
+      Route_rejected (response, middleware @ existing, template)
   | Route_missing -> Route_missing
 
 let attach_middleware_eval middleware evaluation =
@@ -963,7 +963,7 @@ let run_router router input =
       match pre_result with
       | Pre_respond response ->
           {
-            route_match = Route_rejected (response, router.middleware);
+            route_match = Route_rejected (response, router.middleware, None);
             effective_input;
           }
       | Pre_continue ->
@@ -974,7 +974,10 @@ let scope prefix_matcher router =
     match prefix_matcher input with
     | Matcher.Match ((), next_input) -> run_router router next_input
     | Matcher.Reject response ->
-        { route_match = Route_rejected (response, []); effective_input = input }
+        {
+          route_match = Route_rejected (response, [], None);
+          effective_input = input;
+        }
     | Matcher.No_match ->
         { route_match = Route_missing; effective_input = input }
   in
@@ -1050,7 +1053,7 @@ let allowed_methods_for_path router input =
 let apply_middleware middleware handler =
   List.fold_right (fun wrap next -> wrap next) middleware handler
 
-let dispatch_from_input router input =
+let dispatch_from_input ?(on_route = fun _template -> ()) router input =
   if not input.valid_target then
     bad_request_response ()
   else
@@ -1068,9 +1071,11 @@ let dispatch_from_input router input =
         | None -> not_found_response ()
       in
       match evaluation.route_match with
-      | Route_matched (handler, middleware) ->
+      | Route_matched (handler, middleware, template) ->
+          Option.iter on_route template;
           apply_middleware middleware handler effective_input.request_view
-      | Route_rejected (response, middleware) ->
+      | Route_rejected (response, middleware, template) ->
+          Option.iter on_route template;
           apply_middleware middleware (fun _request -> response)
             effective_input.request_view
       | Route_missing ->
@@ -1116,7 +1121,7 @@ let dispatch router (request : request) =
     }
 
 module Runtime = struct
-  let dispatch router (request : request) ~raw_headers ~body ~http_major
+  let dispatch ?on_route router (request : request) ~raw_headers ~body ~http_major
       ~http_minor ~connection_info ~is_early_data ~request_id ~request_switch
       ~send_informational ~on_disconnect ~on_response_terminated =
     let request_view =
@@ -1142,7 +1147,7 @@ module Runtime = struct
           };
       }
     in
-    dispatch_from_input router
+    dispatch_from_input ?on_route router
       {
         request_view;
         request_method = Some request.request_method;

@@ -10,7 +10,7 @@ TLS, and multiple listeners.
 let router =
   let open Halo.Router in
   let open Matcher in
-  route
+  route ~template:"/"
     (let+ () = request_method_is GET *> path_end in
      fun _request -> text Status.ok "hello world\n")
 
@@ -49,7 +49,7 @@ Routes use applicative matchers and compose with `<|>`:
 let users =
   let open Halo.Router in
   let open Matcher in
-  route
+  route ~template:"/users/{id}"
     (let+ id =
        request_method_is GET *> path_segment "users" *> int_parameter
        <* path_end
@@ -104,6 +104,29 @@ let observe next request =
 
 The callback runs exactly once for buffered and streamed responses, including
 after the handler has returned.
+
+## Telemetry
+
+`Halo.Telemetry` provides a no-op-by-default boundary for local OpenTelemetry
+integration. Pass a packaged server-request observer to `Server.run`:
+
+```ocaml
+let telemetry =
+  Halo.Telemetry.of_observer (module My_otel_observer)
+
+let () = Halo.Server.run ~telemetry [ config ]
+```
+
+The observer receives the request headers needed for W3C `traceparent` and
+`tracestate` extraction, runs the handler and response write inside its span
+scope, and receives the final route, status, transport outcome, and C-reactor
+timestamps. Associate stable route templates with routes using
+`Router.route ~template:"/users/{id}"`; never use a concrete request path as a
+template.
+
+See [docs/telemetry.md](docs/telemetry.md) for the observer contract and the
+OpenTelemetry semantic-convention mapping. Halo does not yet include an OTLP
+encoder or network exporter.
 
 ## Request bodies
 

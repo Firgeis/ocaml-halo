@@ -148,6 +148,10 @@ type request_state = {
   mutable response_outcome : Router.response_outcome option;
   mutable response_termination_callbacks :
     (Router.response_outcome -> unit) list;
+  mutable telemetry_route : string option;
+  mutable telemetry_status_code : int option;
+  mutable telemetry_end_monotonic_ns : int64 option;
+  telemetry_enabled : bool;
 }
 
 type listener = {
@@ -167,12 +171,13 @@ type t = {
   listeners : (int64, listener) Hashtbl.t;
   bridge_switch : Eio.Switch.t;
   on_error : int64 -> exn -> Printexc.raw_backtrace -> unit;
+  telemetry : Telemetry.t;
 }
 
 let listener ~early_data_policy ~early_data_replay_store router =
   { router; early_data_policy; early_data_replay_store }
 
-let create ~runtime ~listeners ~bridge_switch ~on_error =
+let create ~runtime ~listeners ~bridge_switch ~on_error ~telemetry =
   {
     runtime;
     requests = Hashtbl.create 128;
@@ -183,6 +188,7 @@ let create ~runtime ~listeners ~bridge_switch ~on_error =
     listeners;
     bridge_switch;
     on_error;
+    telemetry;
   }
 
 let is_disconnect_exception = function
@@ -276,8 +282,14 @@ let dispatch_request listener (event : Reactor.request_event) state body
   | Some Router.TRACE -> Http.trace_response event (Body.read_all body)
   | Some request_method ->
       let request = Http.make_request event request_method in
+      let on_route =
+        if state.telemetry_enabled then
+          Some (fun template -> state.telemetry_route <- Some template)
+        else
+          None
+      in
       Eio.Switch.run ~name:"halo-request" @@ fun request_switch ->
-      Router.Runtime.dispatch listener.router request
+      Router.Runtime.dispatch ?on_route listener.router request
         ~raw_headers:event.raw_headers ~body
         ~http_major:event.http_major ~http_minor:event.http_minor
         ~connection_info
@@ -328,6 +340,9 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
     | Error exn -> raise exn
   in
   let send_fixed response =
+    if state.telemetry_enabled then
+      state.telemetry_status_code <-
+        Some (Router.Status.to_int (Router.Response.status response));
     let wire =
       Http.serialize_fixed ~request_method:event.method_text
         ~http_major:event.http_major ~http_minor:event.http_minor
@@ -350,6 +365,9 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
     await_write state
   in
   let send_stream response producer =
+    if state.telemetry_enabled then
+      state.telemetry_status_code <-
+        Some (Router.Status.to_int (Router.Response.status response));
     let head =
       Http.serialize_stream_head ~request_method:event.method_text
         ~http_major:event.http_major ~http_minor:event.http_minor
@@ -435,12 +453,46 @@ let start_request t (event : Reactor.request_event) =
           response_abort = None;
           response_outcome = None;
           response_termination_callbacks = [];
+          telemetry_route = None;
+          telemetry_status_code = None;
+          telemetry_end_monotonic_ns = None;
+          telemetry_enabled = Telemetry.Lifecycle.enabled t.telemetry;
         }
       in
       Hashtbl.replace t.requests event.request_id state;
       Eio.Fiber.fork ~sw:t.bridge_switch (fun () ->
-          run_handler t.runtime t.requests listener event state
-            ~connection_info ~is_draining:(fun () -> t.draining) t.on_error)
+          let run_handler () =
+            run_handler t.runtime t.requests listener event state
+              ~connection_info ~is_draining:(fun () -> t.draining) t.on_error
+          in
+          if not state.telemetry_enabled then
+            run_handler ()
+          else
+            let telemetry_span =
+              Telemetry.Lifecycle.start_server_request t.telemetry
+                {
+                  Telemetry.request_id = event.request_id;
+                  method_ = event.method_text;
+                  target = event.target;
+                  headers = event.headers;
+                  http_version = (event.http_major, event.http_minor);
+                  connection_info;
+                  is_early_data = event.is_early_data;
+                  start_time_unix_ns = event.start_time_unix_ns;
+                  start_monotonic_ns = event.start_monotonic_ns;
+                }
+            in
+            Fun.protect
+              ~finally:(fun () ->
+                Telemetry.Lifecycle.finish_server_request telemetry_span
+                  {
+                    Telemetry.route = state.telemetry_route;
+                    status_code = state.telemetry_status_code;
+                    outcome = state.response_outcome;
+                    end_monotonic_ns = state.telemetry_end_monotonic_ns;
+                  })
+              (fun () ->
+                Telemetry.Lifecycle.with_span telemetry_span run_handler))
 
 let replay_claim store (event : Reactor.replay_claim_event) =
   let module Store = Server_config.Early_data_replay_store in
@@ -481,12 +533,16 @@ let dispatch_event t = function
       Option.iter
         (fun state -> Eio.Stream.add state.write_completions ())
         (Hashtbl.find_opt t.requests request_id)
-  | Reactor.Response_complete request_id ->
+  | Reactor.Response_complete { request_id; end_monotonic_ns } ->
       handle_terminal_event t.requests request_id (fun state ->
+          if state.telemetry_enabled then
+            state.telemetry_end_monotonic_ns <- Some end_monotonic_ns;
           resolve_completion state (Ok ());
           terminate_response state t.on_error Router.Completed)
-  | Reactor.Disconnected request_id ->
+  | Reactor.Disconnected { request_id; end_monotonic_ns } ->
       handle_terminal_event t.requests request_id (fun state ->
+          if state.telemetry_enabled then
+            state.telemetry_end_monotonic_ns <- Some end_monotonic_ns;
           let response_outcome =
             match state.response_abort with
             | Some (exn, backtrace) -> Router.Aborted (exn, backtrace)

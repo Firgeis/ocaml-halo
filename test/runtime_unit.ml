@@ -141,7 +141,7 @@ let assert_process_success result =
       fail "process stopped by signal %d\nstdout:\n%s\nstderr:\n%s" signal
         result.stdout result.stderr
 
-let with_live_config_groups ?on_error config_groups f =
+let with_live_config_groups ?on_error ?telemetry config_groups f =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let servers =
@@ -152,7 +152,7 @@ let with_live_config_groups ?on_error config_groups f =
         let server =
           Eio.Fiber.fork_promise ~sw (fun () ->
               Halo.Server.run ~shutdown ~handle_sigint:false
-                ?on_error
+                ?on_error ?telemetry
                 ~on_ready:(fun running ->
                   Eio.Promise.resolve notify_started running)
                 configs)
@@ -171,13 +171,13 @@ let with_live_config_groups ?on_error config_groups f =
   List.iter (fun (_, server) -> Eio.Promise.await_exn server) servers;
   match outcome with Ok metrics -> metrics | Error exn -> raise exn
 
-let with_live_configs ?on_error configs f =
-  match with_live_config_groups ?on_error [ configs ] f with
+let with_live_configs ?on_error ?telemetry configs f =
+  match with_live_config_groups ?on_error ?telemetry [ configs ] f with
   | [ metrics ] -> metrics
   | _ -> assert false
 
 let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router
-    ?on_error f =
+    ?on_error ?telemetry f =
   let router =
     Option.value router
       ~default:
@@ -191,7 +191,7 @@ let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router
     Halo.Server.Config.create ~port:8443 ?tls ?early_data_policy
       ?early_data_replay_store router
   in
-  with_live_configs ?on_error [ config ] f
+  with_live_configs ?on_error ?telemetry [ config ] f
 
 let with_live_tls_server tls = with_live_server ~tls
 
@@ -367,6 +367,134 @@ let test_peer_disconnect_reports_client_disconnected () =
   match outcome with
   | Observed_client_disconnected -> ()
   | _ -> fail "expected client-disconnected response outcome"
+
+let wait_for_telemetry observed =
+  let deadline = Unix.gettimeofday () +. 1.0 in
+  let rec wait () =
+    match Atomic.get observed with
+    | Some value -> value
+    | None when Unix.gettimeofday () >= deadline ->
+        fail "timed out waiting for request telemetry"
+    | None ->
+        Unix.sleepf 0.01;
+        wait ()
+  in
+  wait ()
+
+let test_request_telemetry_covers_transport_lifecycle () =
+  let scope_active = Atomic.make false in
+  let handler_saw_scope = Atomic.make false in
+  let finish_count = Atomic.make 0 in
+  let observed = Atomic.make None in
+  let module Observer = struct
+    type span = Halo.Telemetry.server_request
+
+    let start_server_request request = request
+
+    let with_span _span run =
+      Atomic.set scope_active true;
+      Fun.protect ~finally:(fun () -> Atomic.set scope_active false) run
+
+    let finish_server_request request result =
+      ignore (Atomic.fetch_and_add finish_count 1);
+      Atomic.set observed (Some (request, result))
+  end in
+  let telemetry =
+    Halo.Telemetry.of_observer (module Observer)
+  in
+  let router =
+    Halo.Router.(
+      route ~template:"/users/{id}"
+        Matcher.(
+          let+ _id =
+            request_method_is GET *> path_segment "users" *> int_parameter
+            <* path_end
+          in
+          fun _request ->
+            Atomic.set handler_saw_scope (Atomic.get scope_active);
+            text Status.created "created\n"))
+  in
+  ignore
+    (with_live_server ~router ~telemetry (fun () ->
+         let response =
+           plaintext_request ~until:"created\n"
+             ("GET /users/42?full=1 HTTP/1.1\r\n"
+             ^ "Host: localhost\r\n"
+             ^ "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-"
+             ^ "00f067aa0ba902b7-01\r\n"
+             ^ "Connection: close\r\n\r\n")
+         in
+         Alcotest.(check bool) "response status" true
+           (contains "HTTP/1.1 201 Created" response);
+         ignore (wait_for_telemetry observed)));
+  let request, result = wait_for_telemetry observed in
+  Alcotest.(check int) "finished exactly once" 1 (Atomic.get finish_count);
+  Alcotest.(check bool) "handler runs inside telemetry scope" true
+    (Atomic.get handler_saw_scope);
+  Alcotest.(check string) "method" "GET" request.method_;
+  Alcotest.(check string) "raw target" "/users/42?full=1" request.target;
+  Alcotest.(check (pair int int)) "HTTP version" (1, 1)
+    request.http_version;
+  Alcotest.(check bool) "trace context header is available" true
+    (List.mem
+       ( "traceparent",
+         "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" )
+       request.headers);
+  Alcotest.(check bool) "first-byte monotonic timestamp" true
+    (Int64.compare request.start_monotonic_ns 0L > 0);
+  Alcotest.(check bool) "first-byte Unix timestamp" true
+    (Option.fold ~none:false
+       ~some:(fun timestamp -> Int64.compare timestamp 0L > 0)
+       request.start_time_unix_ns);
+  Alcotest.(check (option string)) "route template" (Some "/users/{id}")
+    result.route;
+  Alcotest.(check (option int)) "response status" (Some 201)
+    result.status_code;
+  (match result.outcome with
+  | Some Halo.Router.Completed -> ()
+  | _ -> fail "expected completed telemetry outcome");
+  Alcotest.(check bool) "terminal timestamp follows first byte" true
+    (Option.fold ~none:false
+       ~some:(fun timestamp ->
+         Int64.compare timestamp request.start_monotonic_ns >= 0)
+       result.end_monotonic_ns)
+
+let test_telemetry_observer_failures_do_not_fail_requests () =
+  let handler_calls = Atomic.make 0 in
+  let module Failing_observer = struct
+    type span = unit
+
+    let start_server_request _request = ()
+
+    let with_span () run =
+      ignore (run ());
+      failwith "telemetry scope failure"
+
+    let finish_server_request () _result =
+      failwith "telemetry finish failure"
+  end in
+  let telemetry =
+    Halo.Telemetry.of_observer (module Failing_observer)
+  in
+  let router =
+    Halo.Router.(
+      route
+        Matcher.(
+          let+ () = request_method_is GET *> path_end in
+          fun _request ->
+            ignore (Atomic.fetch_and_add handler_calls 1);
+            text Status.ok "healthy\n"))
+  in
+  ignore
+    (with_live_server ~router ~telemetry (fun () ->
+         let response =
+           plaintext_request ~until:"healthy\n"
+             "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+         in
+         Alcotest.(check bool) "request succeeds" true
+           (contains "HTTP/1.1 200 OK" response)));
+  Alcotest.(check int) "handler runs exactly once" 1
+    (Atomic.get handler_calls)
 
 let test_handler_error_reports_raw_backtrace () =
   let previous_backtrace_status = Printexc.backtrace_status () in
@@ -942,6 +1070,13 @@ let () =
             test_failed_stream_reports_aborted;
           Alcotest.test_case "peer disconnects" `Quick
             test_peer_disconnect_reports_client_disconnected;
+        ] );
+      ( "telemetry",
+        [
+          Alcotest.test_case "request transport lifecycle" `Quick
+            test_request_telemetry_covers_transport_lifecycle;
+          Alcotest.test_case "observer failures are isolated" `Quick
+            test_telemetry_observer_failures_do_not_fail_requests;
         ] );
       ( "metrics",
         [

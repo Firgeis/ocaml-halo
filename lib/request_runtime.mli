@@ -12,6 +12,7 @@ val create :
   listeners:(int64, listener) Hashtbl.t ->
   bridge_switch:Eio.Switch.t ->
   on_error:(int64 -> exn -> Printexc.raw_backtrace -> unit) ->
+  telemetry:Telemetry.t ->
   t
 
 val run : t -> unit

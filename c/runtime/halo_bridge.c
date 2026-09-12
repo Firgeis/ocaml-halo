@@ -24,7 +24,8 @@ static void halo_bridge_release_partial(struct halo_bridge* bridge) {
 
 int halo_bridge_enable(struct halo_runtime* runtime,
                        size_t event_capacity,
-                       size_t command_capacity) {
+                       size_t command_capacity,
+                       int telemetry_enabled) {
   struct halo_bridge* bridge;
   int flags;
   int code;
@@ -45,6 +46,7 @@ int halo_bridge_enable(struct halo_runtime* runtime,
   bridge->event_capacity = (event_capacity * 2) + 1;
   bridge->command_capacity = command_capacity;
   bridge->accepting_commands = 1;
+  runtime->telemetry_enabled = telemetry_enabled != 0;
 
   if (pthread_mutex_init(&bridge->event_mutex, NULL) != 0) {
     free(bridge);

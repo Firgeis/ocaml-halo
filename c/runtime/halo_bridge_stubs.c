@@ -64,15 +64,18 @@ static value halo_bridge_alloc_tls_protocol_version(uint8_t version) {
 
 CAMLprim value ocaml_halo_bridge_enable(value runtime_value,
                                         value event_capacity,
-                                        value command_capacity) {
-  CAMLparam3(runtime_value, event_capacity, command_capacity);
+                                        value command_capacity,
+                                        value telemetry_enabled) {
+  CAMLparam4(runtime_value, event_capacity, command_capacity,
+             telemetry_enabled);
   struct halo_runtime* runtime;
   int code;
 
   runtime = halo_runtime_get(runtime_value);
   code = halo_bridge_enable(runtime,
                             (size_t) Int_val(event_capacity),
-                            (size_t) Int_val(command_capacity));
+                            (size_t) Int_val(command_capacity),
+                            Bool_val(telemetry_enabled));
   if (code != 0)
     CAMLreturn(halo_result_error_uv("halo_bridge_enable", code));
   CAMLreturn(halo_result_ok(Val_unit));
@@ -108,7 +111,8 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   CAMLlocal5(option, record, headers, cell, pair);
   CAMLlocal5(name, header_value, method_text, target, payload);
   CAMLlocal3(request_id, listener_id, auxiliary);
-  CAMLlocal1(raw_headers);
+  CAMLlocal4(raw_headers, timestamp_option, monotonic_time_ns,
+             unix_time_ns);
   CAMLlocal5(connection_option, connection, tls_option, tls, remote_address);
   CAMLlocal5(local_address, server_name, application_protocol, cipher,
              protocol_version);
@@ -194,7 +198,19 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
     Store_field(connection_option, 0, connection);
   }
 
-  record = caml_alloc(15, 0);
+  timestamp_option = Val_none;
+  if (event->monotonic_time_ns != 0 || event->unix_time_ns != 0) {
+    monotonic_time_ns =
+      caml_copy_int64((int64_t) event->monotonic_time_ns);
+    unix_time_ns = caml_copy_int64((int64_t) event->unix_time_ns);
+    pair = caml_alloc_tuple(2);
+    Store_field(pair, 0, monotonic_time_ns);
+    Store_field(pair, 1, unix_time_ns);
+    timestamp_option = caml_alloc(1, 0);
+    Store_field(timestamp_option, 0, pair);
+  }
+
+  record = caml_alloc(16, 0);
   Store_field(record, 0, Val_int(event->kind));
   Store_field(record, 1, request_id);
   Store_field(record, 2, listener_id);
@@ -210,6 +226,7 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   Store_field(record, 12, connection_option);
   Store_field(record, 13, auxiliary);
   Store_field(record, 14, payload);
+  Store_field(record, 15, timestamp_option);
   option = caml_alloc(1, 0);
   Store_field(option, 0, record);
   halo_bridge_event_destroy(event);

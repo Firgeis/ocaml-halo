@@ -62,6 +62,7 @@ val run :
   ?max_in_flight_requests:int ->
   ?command_capacity:int ->
   ?on_ready:(running -> unit) ->
+  ?telemetry:Telemetry.t ->
   ?on_error:(int64 -> exn -> Printexc.raw_backtrace -> unit) ->
   Config.t list ->
   unit
@@ -72,6 +73,10 @@ val run :
     requests and responses drain, and then force-closes anything remaining
     after [shutdown_timeout_ms]. The default is
     [default_shutdown_timeout_ms]. Zero requests an immediate force-stop.
+
+    [telemetry] receives each dispatched request's full lifecycle, from the
+    first plaintext byte observed by the C reactor through the terminal
+    response write or disconnect. It defaults to [Telemetry.noop].
 
     [on_error request_id exn backtrace] reports request-processing and response
     stream failures, and response lifecycle callback failures. If no response

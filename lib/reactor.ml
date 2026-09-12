@@ -25,6 +25,7 @@ type raw_event = {
   connection_info : Router.connection_info option;
   auxiliary : int64;
   payload : string;
+  telemetry_timestamps : (int64 * int64) option;
 }
 
 type request_event = {
@@ -41,9 +42,12 @@ type request_event = {
   is_early_data : bool;
   connection_id : int64;
   connection_info : Router.connection_info option;
+  start_monotonic_ns : int64;
+  start_time_unix_ns : int64 option;
 }
 
 type body_chunk_event = { request_id : int64; chunk : string }
+type terminal_event = { request_id : int64; end_monotonic_ns : int64 }
 type metrics_event = { query_id : int64; payload : string }
 
 type replay_claim_event = {
@@ -63,8 +67,8 @@ type event =
   | Request of request_event
   | Body_chunk of body_chunk_event
   | Body_end of int64
-  | Response_complete of int64
-  | Disconnected of int64
+  | Response_complete of terminal_event
+  | Disconnected of terminal_event
   | Stopped
   | Write_complete of int64
   | Metrics of metrics_event
@@ -81,7 +85,8 @@ external create_runtime : unit -> (Server_backend.t, string) result
 external close_runtime : Server_backend.t -> string option
   = "ocaml_halo_runtime_close"
 
-external enable_raw : Server_backend.t -> int -> int -> (unit, string) result
+external enable_raw :
+  Server_backend.t -> int -> int -> bool -> (unit, string) result
   = "ocaml_halo_bridge_enable"
 
 external event_fd : Server_backend.t -> Unix.file_descr
@@ -133,10 +138,13 @@ external run : Server_backend.t -> (unit, string) result
 external listener_id : Server_backend.server -> int64
   = "ocaml_halo_server_bridge_id"
 
-let enable runtime ~max_in_flight_requests ~command_capacity =
-  enable_raw runtime max_in_flight_requests command_capacity
+let enable runtime ~max_in_flight_requests ~command_capacity ~telemetry =
+  enable_raw runtime max_in_flight_requests command_capacity telemetry
 
 let event_of_raw (raw : raw_event) =
+  let monotonic_time_ns, unix_time_ns =
+    Option.value raw.telemetry_timestamps ~default:(0L, 0L)
+  in
   match raw.kind with
   | 0 ->
       Request
@@ -154,11 +162,18 @@ let event_of_raw (raw : raw_event) =
           is_early_data = raw.is_early_data;
           connection_id = raw.auxiliary;
           connection_info = raw.connection_info;
+          start_monotonic_ns = monotonic_time_ns;
+          start_time_unix_ns =
+            (if unix_time_ns = 0L then None else Some unix_time_ns);
         }
   | 1 -> Body_chunk { request_id = raw.request_id; chunk = raw.payload }
   | 2 -> Body_end raw.request_id
-  | 3 -> Response_complete raw.request_id
-  | 4 -> Disconnected raw.request_id
+  | 3 ->
+      Response_complete
+        { request_id = raw.request_id; end_monotonic_ns = monotonic_time_ns }
+  | 4 ->
+      Disconnected
+        { request_id = raw.request_id; end_monotonic_ns = monotonic_time_ns }
   | 5 -> Stopped
   | 6 -> Write_complete raw.request_id
   | 7 -> Metrics { query_id = raw.request_id; payload = raw.payload }

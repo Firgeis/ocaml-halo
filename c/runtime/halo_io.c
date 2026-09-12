@@ -1128,6 +1128,8 @@ static int halo_start_graceful_close(uv_stream_t* stream, struct halo_client* cl
   client->body_chunk_delivered = 0;
   client->request_is_early_data = 0;
   client->body_bytes_read = 0;
+  client->request_start_monotonic_ns = 0;
+  client->request_start_unix_ns = 0;
 
   if (!client->shutdown_started) {
     client->shutdown_started = 1;
@@ -1366,6 +1368,8 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
     client->body_chunk_delivered = 0;
     client->request_is_early_data = 0;
     client->body_bytes_read = 0;
+    client->request_start_monotonic_ns = 0;
+    client->request_start_unix_ns = 0;
     llhttp_reset(&client->parser);
     llhttp_set_lenient_version(&client->parser, 1);
     if (uv_read_start(stream, halo_alloc_cb, (uv_read_cb) halo_read_cb) != 0)
@@ -1412,6 +1416,8 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
   client->body_chunk_delivered = 0;
   client->request_is_early_data = 0;
   client->body_bytes_read = 0;
+  client->request_start_monotonic_ns = 0;
+  client->request_start_unix_ns = 0;
   llhttp_reset(&client->parser);
   llhttp_set_lenient_version(&client->parser, 1);
   if (uv_read_start(stream, halo_alloc_cb, (uv_read_cb) halo_read_cb) != 0)
@@ -1513,11 +1519,49 @@ static int halo_tls_handle_blocked_error(void) {
   return -1;
 }
 
+static uint64_t halo_estimate_unix_time_ns(uint64_t monotonic_time_ns) {
+  uv_timeval64_t wall_time;
+  uint64_t seconds;
+  uint64_t nanoseconds;
+  uint64_t clock_read_ns;
+  uint64_t unix_ns;
+
+  if (uv_gettimeofday(&wall_time) != 0 || wall_time.tv_sec < 0)
+    return 0;
+
+  seconds = (uint64_t) wall_time.tv_sec;
+  nanoseconds = (uint64_t) wall_time.tv_usec * 1000ULL;
+  if (seconds > (UINT64_MAX - nanoseconds) / 1000000000ULL)
+    return 0;
+
+  unix_ns = seconds * 1000000000ULL + nanoseconds;
+  clock_read_ns = uv_hrtime() - monotonic_time_ns;
+  if (unix_ns < clock_read_ns)
+    return 0;
+
+  return unix_ns - clock_read_ns;
+}
+
 static int halo_feed_plaintext(uv_stream_t* stream,
                                struct halo_client* client,
                                const char* plaintext,
                                size_t plaintext_len) {
   llhttp_errno_t err;
+  struct halo_runtime* runtime;
+
+  runtime = NULL;
+
+  if (client->handle.loop != NULL)
+    runtime = (struct halo_runtime*) client->handle.loop->data;
+
+  if (plaintext_len > 0
+      && client->request_start_monotonic_ns == 0
+      && runtime != NULL
+      && runtime->telemetry_enabled) {
+    client->request_start_monotonic_ns = uv_hrtime();
+    client->request_start_unix_ns =
+      halo_estimate_unix_time_ns(client->request_start_monotonic_ns);
+  }
 
   err = llhttp_execute(&client->parser, plaintext, plaintext_len);
   if (err == HPE_PAUSED

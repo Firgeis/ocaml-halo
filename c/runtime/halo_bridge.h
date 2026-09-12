@@ -10,7 +10,8 @@ struct halo_runtime;
 /* Runtime lifecycle. */
 int halo_bridge_enable(struct halo_runtime* runtime,
                        size_t event_capacity,
-                       size_t command_capacity);
+                       size_t command_capacity,
+                       int telemetry_enabled);
 void halo_bridge_destroy(struct halo_runtime* runtime);
 void halo_bridge_begin_shutdown(struct halo_runtime* runtime);
 void halo_bridge_mark_stopped(struct halo_runtime* runtime);

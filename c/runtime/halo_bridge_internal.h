@@ -83,6 +83,8 @@ struct halo_bridge_event {
   struct halo_bridge_transport* transport;
   /* Connection ID for request events; replay TTL for replay-claim events. */
   uint64_t auxiliary;
+  uint64_t monotonic_time_ns;
+  uint64_t unix_time_ns;
   char* payload;
   size_t payload_len;
   struct halo_bridge_event* next;
