@@ -422,6 +422,7 @@ let test_request_telemetry_covers_transport_lifecycle () =
              ^ "Host: localhost\r\n"
              ^ "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-"
              ^ "00f067aa0ba902b7-01\r\n"
+             ^ "tracestate: rojo=00f067aa0ba902b7,congo=t61rcWkgMzE\r\n"
              ^ "Connection: close\r\n\r\n")
          in
          Alcotest.(check bool) "response status" true
@@ -440,6 +441,21 @@ let test_request_telemetry_covers_transport_lifecycle () =
        ( "traceparent",
          "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" )
        request.headers);
+  let remote_parent =
+    match request.remote_parent with
+    | Some remote_parent -> remote_parent
+    | None -> fail "expected parsed remote trace context"
+  in
+  Alcotest.(check string) "remote trace ID"
+    "4bf92f3577b34da6a3ce929d0e0e4736"
+    (Halo.Telemetry.Trace_context.trace_id remote_parent);
+  Alcotest.(check string) "remote span ID" "00f067aa0ba902b7"
+    (Halo.Telemetry.Trace_context.span_id remote_parent);
+  Alcotest.(check bool) "remote parent is sampled" true
+    (Halo.Telemetry.Trace_context.sampled remote_parent);
+  Alcotest.(check (list (pair string string))) "remote tracestate"
+    [ ("rojo", "00f067aa0ba902b7"); ("congo", "t61rcWkgMzE") ]
+    (Halo.Telemetry.Trace_context.tracestate remote_parent);
   Alcotest.(check bool) "first-byte monotonic timestamp" true
     (Int64.compare request.start_monotonic_ns 0L > 0);
   Alcotest.(check bool) "first-byte Unix timestamp" true
@@ -458,6 +474,33 @@ let test_request_telemetry_covers_transport_lifecycle () =
        ~some:(fun timestamp ->
          Int64.compare timestamp request.start_monotonic_ns >= 0)
        result.end_monotonic_ns)
+
+let test_invalid_trace_context_does_not_fail_request () =
+  let saw_missing_parent = Atomic.make false in
+  let module Observer = struct
+    type span = unit
+
+    let start_server_request (request : Halo.Telemetry.server_request) =
+      Atomic.set saw_missing_parent (Option.is_none request.remote_parent)
+
+    let with_span () run = run ()
+    let finish_server_request () _result = ()
+  end in
+  let telemetry = Halo.Telemetry.of_observer (module Observer) in
+  ignore
+    (with_live_server ~telemetry (fun () ->
+         let response =
+           plaintext_request ~until:"hello world\n"
+             ("GET / HTTP/1.1\r\n"
+             ^ "Host: localhost\r\n"
+             ^ "traceparent: 00-00000000000000000000000000000000-"
+             ^ "00f067aa0ba902b7-01\r\n"
+             ^ "Connection: close\r\n\r\n")
+         in
+         Alcotest.(check bool) "response status" true
+           (contains "HTTP/1.1 200 OK" response)));
+  Alcotest.(check bool) "invalid parent is ignored" true
+    (Atomic.get saw_missing_parent)
 
 let test_telemetry_observer_failures_do_not_fail_requests () =
   let handler_calls = Atomic.make 0 in
@@ -1075,6 +1118,8 @@ let () =
         [
           Alcotest.test_case "request transport lifecycle" `Quick
             test_request_telemetry_covers_transport_lifecycle;
+          Alcotest.test_case "invalid trace context is ignored" `Quick
+            test_invalid_trace_context_does_not_fail_request;
           Alcotest.test_case "observer failures are isolated" `Quick
             test_telemetry_observer_failures_do_not_fail_requests;
         ] );

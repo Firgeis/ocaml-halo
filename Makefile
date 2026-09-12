@@ -23,10 +23,15 @@ LLHTTP_DIR = $(VENDOR_DIR)/llhttp
 LLHTTP_FETCH_URL = https://github.com/nodejs/llhttp/archive/refs/tags/release/v9.3.0.tar.gz
 LLHTTP_FETCH_REF = release/v9.3.0
 
+OTELCOL_DIR = $(VENDOR_DIR)/otelcol
+OTELCOL_BIN = $(OTELCOL_DIR)/otelcol
+OTELCOL_VERSION = 0.160.0
+OTELCOL_FETCH_URL = https://github.com/open-telemetry/opentelemetry-collector-releases/releases/tag/v$(OTELCOL_VERSION)
+
 VENDORED_FETCH_DEPS = s2n-tls libuv llhttp
 VENDORED_BUILT_DEPS = s2n-tls
 VENDORED_BUILT_TARGETS = $(S2N_TLS_LIB)
-VENDORED_TEST_TARGETS = $(S2N_TLS_S2NC)
+VENDORED_TEST_TARGETS = $(S2N_TLS_S2NC) $(OTELCOL_BIN)
 VENDORED_RUNTIME_LIBRARY_DIRS = $(S2N_TLS_RUNTIME_DIR)
 LIBCRYPTO_ROOT_DEFAULT = /usr
 
@@ -71,6 +76,9 @@ $(S2N_TLS_S2NC):
 	if [ -f ./mk/local.env ]; then . ./mk/local.env; fi; \
 	$(MAKE) -C $(S2N_TLS_DIR) bin LIBCRYPTO_ROOT="$${LIBCRYPTO_ROOT:-$(LIBCRYPTO_ROOT_DEFAULT)}"
 
+$(OTELCOL_BIN):
+	bash ./scripts/fetch_otelcol.sh $(OTELCOL_VERSION) ./$(OTELCOL_DIR)
+
 vendor-build: $(VENDORED_BUILT_TARGETS)
 
 vendor-test-tools: $(VENDORED_TEST_TARGETS)
@@ -79,6 +87,7 @@ vendor-clean:
 	bash ./scripts/vendor_reset.sh ./$(S2N_TLS_DIR)
 	bash ./scripts/vendor_reset.sh ./$(LIBUV_DIR)
 	bash ./scripts/vendor_reset.sh ./$(LLHTTP_DIR)
+	bash ./scripts/vendor_reset.sh ./$(OTELCOL_DIR)
 
 vendor-fetch: vendor-fetch-s2n-tls vendor-fetch-libuv vendor-fetch-llhttp
 
@@ -89,7 +98,8 @@ vendor-status:
 	@printf '%s\n' \
 		's2n-tls $(S2N_TLS_FETCH_REF) $(S2N_TLS_FETCH_URL)' \
 		'libuv $(LIBUV_FETCH_REF) $(LIBUV_FETCH_URL)' \
-		'llhttp $(LLHTTP_FETCH_REF) $(LLHTTP_FETCH_URL)'
+		'llhttp $(LLHTTP_FETCH_REF) $(LLHTTP_FETCH_URL)' \
+		'otelcol v$(OTELCOL_VERSION) $(OTELCOL_FETCH_URL)'
 
 local-setup:
 	bash ./scripts/detect_local_env.sh ./mk/local.env

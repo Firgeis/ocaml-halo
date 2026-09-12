@@ -2,6 +2,9 @@
  (name halo)
  (public_name ocaml-halo)
  (modules
+  ascii_string
+  int64_encoding
+  otlp_http_transport
   body
   headers
   router
@@ -13,7 +16,13 @@
   server
   stream
   sse)
- (private_modules server_backend reactor request_runtime)
+ (private_modules
+  ascii_string
+  int64_encoding
+  otlp_http_transport
+  server_backend
+  reactor
+  request_runtime)
  (libraries eio eio.unix uri)
  (foreign_archives ../c/halo_stubs ../c/halo_s2n)
  (c_library_flags

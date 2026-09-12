@@ -62,6 +62,15 @@
  (libraries ocaml-halo alcotest))
 
 (test
+ (name integrations_otel)
+ (modules integrations_otel)
+ (libraries ocaml-halo eio_main unix alcotest yojson)
+ (deps ../vendor/otelcol/otelcol)
+ (action
+  (setenv HALO_OTELCOL_BIN %{dep:../vendor/otelcol/otelcol}
+   (run %{test}))))
+
+(test
  (name runtime_unit)
  (modules runtime_unit)
  (libraries ocaml-halo eio_main alcotest)

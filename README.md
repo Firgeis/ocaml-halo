@@ -107,26 +107,24 @@ after the handler has returned.
 
 ## Telemetry
 
-`Halo.Telemetry` provides a no-op-by-default boundary for local OpenTelemetry
-integration. Pass a packaged server-request observer to `Server.run`:
+`Halo.Telemetry` provides no-op-by-default OpenTelemetry integration. Use its
+local tracer or pass a custom server-request observer to `Server.run`:
 
 ```ocaml
-let telemetry =
-  Halo.Telemetry.of_observer (module My_otel_observer)
+let telemetry = Halo.Telemetry.of_tracer tracer
 
 let () = Halo.Server.run ~telemetry [ config ]
 ```
 
-The observer receives the request headers needed for W3C `traceparent` and
-`tracestate` extraction, runs the handler and response write inside its span
-scope, and receives the final route, status, transport outcome, and C-reactor
-timestamps. Associate stable route templates with routes using
+The observer receives the parsed W3C `request.remote_parent`, runs the handler
+and response write inside its span scope, and receives the final route, status,
+transport outcome, and C-reactor timestamps. Associate stable route templates
+with routes using
 `Router.route ~template:"/users/{id}"`; never use a concrete request path as a
 template.
 
-See [docs/telemetry.md](docs/telemetry.md) for the observer contract and the
-OpenTelemetry semantic-convention mapping. Halo does not yet include an OTLP
-encoder or network exporter.
+See [docs/telemetry.md](docs/telemetry.md) for local tracing, batching,
+OTLP/HTTP export, the observer contract, and semantic-convention mapping.
 
 ## Request bodies
 

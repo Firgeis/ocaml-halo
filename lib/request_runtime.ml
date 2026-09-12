@@ -475,6 +475,8 @@ let start_request t (event : Reactor.request_event) =
                   method_ = event.method_text;
                   target = event.target;
                   headers = event.headers;
+                  remote_parent =
+                    Telemetry.Trace_context.of_headers event.headers;
                   http_version = (event.http_major, event.http_minor);
                   connection_info;
                   is_early_data = event.is_early_data;

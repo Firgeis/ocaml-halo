@@ -37,6 +37,7 @@
   halo_request
   halo_request_storage
   halo_runtime
+  halo_telemetry
   halo_tls_replay_cache
   halo_utils
   llhttp_api
