@@ -1,3 +1,5 @@
+type error = { message : string; retryable : bool; retry_after : float option }
+
 let response_status line =
   match
     String.split_on_char ' ' line |> List.filter (fun part -> part <> "")
@@ -43,26 +45,80 @@ let request ~target ~host_header ~headers ~content_type ~body =
   Buffer.add_string request body;
   Buffer.contents request
 
+let header line =
+  match String.index_opt line ':' with
+  | None -> None
+  | Some separator ->
+      let name = String.sub line 0 separator |> String.trim in
+      let value =
+        String.sub line (separator + 1) (String.length line - separator - 1)
+        |> String.trim
+      in
+      Some (String.lowercase_ascii name, value)
+
+let retry_after headers =
+  let parse_seconds value =
+    if
+      value = ""
+      || not (String.for_all (fun char -> char >= '0' && char <= '9') value)
+    then None
+    else
+      match int_of_string_opt value with
+      | Some seconds -> Some (float_of_int seconds)
+      | None -> None
+  in
+  List.find_map
+    (fun line ->
+      match header line with
+      | Some ("retry-after", value) -> parse_seconds value
+      | _ -> None)
+    headers
+
+let retryable_status = function 429 | 502 | 503 | 504 -> true | _ -> false
+
 let read_response flow =
   let reader = Eio.Buf_read.of_flow flow ~max_size:65_536 in
   let status_line = Eio.Buf_read.line reader in
-  let rec read_headers count =
+  let rec read_headers count headers =
     if count = 256 then failwith "too many HTTP response headers"
     else
       match Eio.Buf_read.line reader with
-      | "" -> ()
-      | _ -> read_headers (count + 1)
+      | "" -> List.rev headers
+      | line -> read_headers (count + 1) (line :: headers)
   in
-  read_headers 0;
+  let headers = read_headers 0 [] in
   match response_status status_line with
   | Some status when status >= 200 && status < 300 -> Ok ()
   | Some status ->
-      Error (Printf.sprintf "HTTP endpoint returned status %d" status)
-  | None -> Error "HTTP endpoint returned an invalid response"
+      Error
+        {
+          message = Printf.sprintf "HTTP endpoint returned status %d" status;
+          retryable = retryable_status status;
+          retry_after =
+            (if retryable_status status then retry_after headers else None);
+        }
+  | None ->
+      Error
+        {
+          message = "HTTP endpoint returned an invalid response";
+          retryable = false;
+          retry_after = None;
+        }
 
 let post ~net ~endpoint ~headers ~content_type ~body =
   let host, port, target, host_header = endpoint_parts endpoint in
   let request = request ~target ~host_header ~headers ~content_type ~body in
-  Eio.Net.with_tcp_connect ~host ~service:(string_of_int port) net (fun flow ->
-      Eio.Flow.copy_string request flow;
-      read_response flow)
+  try
+    Eio.Net.with_tcp_connect ~host ~service:(string_of_int port) net
+      (fun flow ->
+        Eio.Flow.copy_string request flow;
+        read_response flow)
+  with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
+  | (Eio.Io _ | End_of_file) as exn ->
+      Error
+        {
+          message = Printexc.to_string exn;
+          retryable = true;
+          retry_after = None;
+        }

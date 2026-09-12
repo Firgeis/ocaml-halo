@@ -34,6 +34,14 @@ OTLP protobuf. The built-in network transport currently accepts unencrypted
 TLS proxy in front of it when the collector requires HTTPS, or pass an existing
 TLS-capable HTTP client through `Otlp_http.exporter_with_transport`.
 
+Transient exports use bounded exponential backoff with jitter. By default an
+export is attempted at most five times, starting at 500 ms and capping delays
+at five seconds. The built-in transport retries connection failures and HTTP
+429, 502, 503, and 504 responses, including integer `Retry-After` delays. Use
+`Otlp_http.Retry.create` to tune the policy or
+`Otlp_http.Retry.disabled` to make a single attempt. An application-supplied
+transport's `Error` results are considered transient.
+
 The batch processor holds at most 2048 finished spans, exports up to 512 at a
 time, flushes every five seconds, and applies a 30-second export timeout. Its
 request-facing path only performs a bounded atomic enqueue. New spans are

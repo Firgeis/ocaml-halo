@@ -354,6 +354,25 @@ val of_tracer : Tracer.t -> t
 (** Create Halo's HTTP server observer using the local tracer. *)
 
 module Otlp_http : sig
+  module Retry : sig
+    type t
+
+    val create :
+      ?max_attempts:int ->
+      ?initial_delay:float ->
+      ?max_delay:float ->
+      ?multiplier:float ->
+      ?jitter:float ->
+      unit ->
+      t
+    (** Configure bounded exponential backoff. [max_attempts] includes the
+        initial request. [jitter] is the randomization fraction applied to each
+        computed delay and must be between [0.] and [1.]. *)
+
+    val default : t
+    val disabled : t
+  end
+
   type transport =
     endpoint:Uri.t ->
     headers:(string * string) list ->
@@ -368,12 +387,14 @@ module Otlp_http : sig
     ?endpoint:Uri.t ->
     ?headers:(string * string) list ->
     ?resource_attributes:Attribute.t list ->
+    ?retry:Retry.t ->
     unit ->
     Exporter.t
   (** Build an OTLP protobuf exporter over an application-supplied HTTP
       transport. This allows an existing TLS-capable HTTP client to be used
       without coupling Halo to it. The transport must POST [body] as
-      [application/x-protobuf] to [endpoint], adding the supplied [headers]. *)
+      [application/x-protobuf] to [endpoint], adding the supplied [headers].
+      Transport [Error] results are retried according to [retry]. *)
 
   val exporter :
     net:_ Eio.Net.t ->
@@ -381,9 +402,12 @@ module Otlp_http : sig
     ?endpoint:Uri.t ->
     ?headers:(string * string) list ->
     ?resource_attributes:Attribute.t list ->
+    ?retry:Retry.t ->
     unit ->
     Exporter.t
   (** An OTLP/HTTP protobuf trace exporter using Eio directly. This built-in
       transport supports unencrypted [http] collector endpoints; use
-      {!exporter_with_transport} with a TLS-capable client for [https]. *)
+      {!exporter_with_transport} with a TLS-capable client for [https].
+      Connection failures and HTTP 429, 502, 503, and 504 responses are retried;
+      other HTTP failures are returned immediately. *)
 end

@@ -1108,11 +1108,43 @@ let of_tracer tracer =
   of_observer (module Server_span_observer)
 
 module Otlp_http = struct
+  module Retry = struct
+    type t = {
+      max_attempts : int;
+      initial_delay : float;
+      max_delay : float;
+      multiplier : float;
+      jitter : float;
+    }
+
+    let create ?(max_attempts = 5) ?(initial_delay = 0.5) ?(max_delay = 5.0)
+        ?(multiplier = 2.0) ?(jitter = 0.2) () =
+      if max_attempts <= 0 then invalid_arg "max_attempts must be positive";
+      if (not (Float.is_finite initial_delay)) || initial_delay <= 0.0 then
+        invalid_arg "initial_delay must be positive and finite";
+      if (not (Float.is_finite max_delay)) || max_delay < initial_delay then
+        invalid_arg "max_delay must be finite and at least initial_delay";
+      if (not (Float.is_finite multiplier)) || multiplier < 1.0 then
+        invalid_arg "multiplier must be finite and at least one";
+      if (not (Float.is_finite jitter)) || jitter < 0.0 || jitter > 1.0 then
+        invalid_arg "jitter must be between zero and one";
+      { max_attempts; initial_delay; max_delay; multiplier; jitter }
+
+    let default = create ()
+    let disabled = create ~max_attempts:1 ()
+  end
+
   type transport =
     endpoint:Uri.t ->
     headers:(string * string) list ->
     body:string ->
     (unit, string) result
+
+  type transport_error = {
+    message : string;
+    retryable : bool;
+    retry_after : float option;
+  }
 
   module Protobuf = struct
     let add_varint buffer value =
@@ -1299,9 +1331,14 @@ module Otlp_http = struct
         then invalid_arg ("invalid OTLP HTTP header: " ^ name))
       headers
 
-  let exporter_with_transport ~transport ~service_name
+  let jittered_delay retry random delay =
+    let spread = delay *. retry.Retry.jitter in
+    Float.min retry.max_delay
+      (delay -. spread +. Random.State.float random (spread *. 2.0))
+
+  let exporter_with_classified_transport ~transport ~service_name
       ?(endpoint = default_endpoint) ?(headers = []) ?(resource_attributes = [])
-      () =
+      ?(retry = Retry.default) () =
     if service_name = "" then invalid_arg "service_name must not be empty";
     validate_headers headers;
     let stopped = Atomic.make false in
@@ -1310,7 +1347,26 @@ module Otlp_http = struct
       else if Atomic.get stopped then Error "OTLP exporter is shut down"
       else
         let body = encode_request ~service_name ~resource_attributes spans in
-        transport ~endpoint ~headers ~body
+        let random = lazy (Random.State.make_self_init ()) in
+        let rec attempt number backoff =
+          if Atomic.get stopped then Error "OTLP exporter is shut down"
+          else
+            match transport ~endpoint ~headers ~body with
+            | Ok () -> Ok ()
+            | Error error when error.retryable && number < retry.max_attempts ->
+                let delay =
+                  match error.retry_after with
+                  | Some delay -> Float.min retry.max_delay delay
+                  | None -> jittered_delay retry (Lazy.force random) backoff
+                in
+                Eio_unix.sleep delay;
+                let next_backoff =
+                  Float.min retry.max_delay (backoff *. retry.multiplier)
+                in
+                attempt (number + 1) next_backoff
+            | Error error -> Error error.message
+        in
+        attempt 1 retry.initial_delay
     in
     Exporter.create ~export:send
       ~shutdown:(fun () ->
@@ -1318,11 +1374,32 @@ module Otlp_http = struct
         Ok ())
       ()
 
-  let exporter ~net ~service_name ?endpoint ?headers ?resource_attributes () =
+  let exporter_with_transport ~transport ~service_name ?endpoint ?headers
+      ?resource_attributes ?retry () =
     let transport ~endpoint ~headers ~body =
-      Otlp_http_transport.post ~net ~endpoint ~headers
-        ~content_type:"application/x-protobuf" ~body
+      match transport ~endpoint ~headers ~body with
+      | Ok () -> Ok ()
+      | Error message -> Error { message; retryable = true; retry_after = None }
     in
-    exporter_with_transport ~transport ~service_name ?endpoint ?headers
-      ?resource_attributes ()
+    exporter_with_classified_transport ~transport ~service_name ?endpoint
+      ?headers ?resource_attributes ?retry ()
+
+  let exporter ~net ~service_name ?endpoint ?headers ?resource_attributes ?retry
+      () =
+    let transport ~endpoint ~headers ~body =
+      match
+        Otlp_http_transport.post ~net ~endpoint ~headers
+          ~content_type:"application/x-protobuf" ~body
+      with
+      | Ok () -> Ok ()
+      | Error error ->
+          Error
+            {
+              message = error.message;
+              retryable = error.retryable;
+              retry_after = error.retry_after;
+            }
+    in
+    exporter_with_classified_transport ~transport ~service_name ?endpoint
+      ?headers ?resource_attributes ?retry ()
 end
