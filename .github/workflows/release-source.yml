@@ -20,7 +20,7 @@ jobs:
       archive_name: ${{ steps.meta.outputs.archive_name }}
       version: ${{ steps.meta.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Determine release version
         id: meta
@@ -40,7 +40,7 @@ jobs:
       - name: Build source archive
         run: make release-source-artifact VERSION="${{ steps.meta.outputs.version }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.archive_name }}
           path: dist/${{ steps.meta.outputs.archive_name }}
@@ -60,7 +60,7 @@ jobs:
           - macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ needs.package.outputs.archive_name }}
           path: dist
