@@ -25,6 +25,10 @@ int halo_bridge_emit_body_chunk(struct halo_client* client,
 int halo_bridge_emit_body_end(struct halo_client* client);
 void halo_bridge_complete_request(struct halo_client* client);
 void halo_bridge_disconnect_request(struct halo_client* client);
+void halo_bridge_observe_pre_dispatch_response(struct halo_client* client,
+                                               int status_code,
+                                               size_t response_body_size,
+                                               int completed);
 void halo_bridge_connection_closed(struct halo_client* client);
 int halo_bridge_complete_write(struct halo_client* client);
 int halo_bridge_emit_metrics(struct halo_runtime* runtime, uint64_t query_id);

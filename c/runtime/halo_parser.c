@@ -13,7 +13,7 @@ static int halo_parser_fail_status(llhttp_t* parser, const char* reason, int sta
   struct halo_client* client;
 
   client = halo_parser_client(parser);
-  client->parser_error_status = status;
+  client->direct_response_status = status;
   llhttp_set_error_reason(parser, reason);
   return HPE_USER;
 }

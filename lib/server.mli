@@ -81,9 +81,10 @@ val run :
     after [shutdown_timeout_ms]. The default is
     [default_shutdown_timeout_ms]. Zero requests an immediate force-stop.
 
-    [telemetry] receives each dispatched request's full lifecycle, from the
-    first plaintext byte observed by the C reactor through the terminal
-    response write or disconnect. It defaults to [Telemetry.noop].
+    [telemetry] receives each request's full lifecycle, from the first plaintext
+    byte observed by the C reactor through the terminal response write or
+    disconnect. Parser errors and other final responses generated before OCaml
+    dispatch are included. It defaults to [Telemetry.noop].
 
     [metrics] records OpenTelemetry HTTP request metrics and Halo runtime
     metrics. It defaults to [Metrics.noop].

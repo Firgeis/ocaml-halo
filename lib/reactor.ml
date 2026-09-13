@@ -52,6 +52,25 @@ type terminal_event = {
   end_monotonic_ns : int64;
   request_body_size : int64;
 }
+
+type pre_dispatch_response_event = {
+  request_id : int64;
+  method_text : string;
+  target : string;
+  headers : (string * string) list;
+  http_major : int;
+  http_minor : int;
+  is_early_data : bool;
+  connection_info : Router.connection_info option;
+  start_monotonic_ns : int64;
+  start_time_unix_ns : int64 option;
+  end_monotonic_ns : int64;
+  status_code : int;
+  request_body_size : int64;
+  response_body_size : int64;
+  completed : bool;
+}
+
 type metrics_event = { query_id : int64; payload : string }
 
 type replay_claim_event = {
@@ -79,6 +98,7 @@ type event =
   | Replay_claim of replay_claim_event
   | Drained
   | Connection_closed of int64
+  | Pre_dispatch_response of pre_dispatch_response_event
   | Unknown of unknown_event
 
 type command_status = Enqueued | Full | Closed | Unknown_status of int
@@ -145,6 +165,38 @@ external listener_id : Server_backend.server -> int64
 let enable runtime ~max_in_flight_requests ~command_capacity ~telemetry =
   enable_raw runtime max_in_flight_requests command_capacity telemetry
 
+let pre_dispatch_response_of_raw (raw : raw_event) ~start_monotonic_ns
+    ~start_time_unix_ns =
+  match
+    ( String.length raw.payload,
+      Int64_encoding.of_big_endian raw.payload ~offset:0,
+      Int64_encoding.of_big_endian raw.payload ~offset:8,
+      Int64_encoding.of_big_endian raw.payload ~offset:16 )
+  with
+  | 25, Some status_code, Some request_body_size, Some response_body_size
+    when status_code >= 100L && status_code <= 599L
+         && request_body_size >= 0L && response_body_size >= 0L
+         && (raw.payload.[24] = '\000' || raw.payload.[24] = '\001') ->
+      Some
+        {
+          request_id = raw.request_id;
+          method_text = raw.method_text;
+          target = raw.target;
+          headers = raw.headers;
+          http_major = raw.http_major;
+          http_minor = raw.http_minor;
+          is_early_data = raw.is_early_data;
+          connection_info = raw.connection_info;
+          start_monotonic_ns;
+          start_time_unix_ns;
+          end_monotonic_ns = raw.auxiliary;
+          status_code = Int64.to_int status_code;
+          request_body_size;
+          response_body_size;
+          completed = raw.payload.[24] = '\001';
+        }
+  | _ -> None
+
 let event_of_raw (raw : raw_event) =
   let monotonic_time_ns, unix_time_ns =
     Option.value raw.telemetry_timestamps ~default:(0L, 0L)
@@ -199,6 +251,16 @@ let event_of_raw (raw : raw_event) =
         }
   | 9 -> Drained
   | 10 -> Connection_closed raw.request_id
+  | 11 -> (
+      match
+        pre_dispatch_response_of_raw raw ~start_monotonic_ns:monotonic_time_ns
+          ~start_time_unix_ns:
+            (if unix_time_ns = 0L then None else Some unix_time_ns)
+      with
+      | Some event -> Pre_dispatch_response event
+      | None ->
+          Unknown
+            { kind = raw.kind; request_id = raw.request_id; payload = raw.payload })
   | kind -> Unknown { kind; request_id = raw.request_id; payload = raw.payload }
 
 let poll_event runtime = Option.map event_of_raw (poll_event_raw runtime)

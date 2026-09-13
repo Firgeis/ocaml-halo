@@ -141,7 +141,8 @@ let assert_process_success result =
       fail "process stopped by signal %d\nstdout:\n%s\nstderr:\n%s" signal
         result.stdout result.stderr
 
-let with_live_config_groups ?on_error ?telemetry ?metrics config_groups f =
+let with_live_config_groups ?max_in_flight_requests ?on_error ?telemetry
+    ?metrics config_groups f =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let servers =
@@ -152,7 +153,7 @@ let with_live_config_groups ?on_error ?telemetry ?metrics config_groups f =
         let server =
           Eio.Fiber.fork_promise ~sw (fun () ->
               Halo.Server.run ~shutdown ~handle_sigint:false
-                ?on_error ?telemetry ?metrics
+                ?max_in_flight_requests ?on_error ?telemetry ?metrics
                 ~on_ready:(fun running ->
                   Eio.Promise.resolve notify_started running)
                 configs)
@@ -171,13 +172,17 @@ let with_live_config_groups ?on_error ?telemetry ?metrics config_groups f =
   List.iter (fun (_, server) -> Eio.Promise.await_exn server) servers;
   match outcome with Ok metrics -> metrics | Error exn -> raise exn
 
-let with_live_configs ?on_error ?telemetry ?metrics configs f =
-  match with_live_config_groups ?on_error ?telemetry ?metrics [ configs ] f with
+let with_live_configs ?max_in_flight_requests ?on_error ?telemetry ?metrics
+    configs f =
+  match
+    with_live_config_groups ?max_in_flight_requests ?on_error ?telemetry
+      ?metrics [ configs ] f
+  with
   | [ metrics ] -> metrics
   | _ -> assert false
 
 let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router
-    ?on_error ?telemetry ?metrics f =
+    ?max_in_flight_requests ?on_error ?telemetry ?metrics f =
   let router =
     Option.value router
       ~default:
@@ -191,7 +196,8 @@ let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router
     Halo.Server.Config.create ~port:8443 ?tls ?early_data_policy
       ?early_data_replay_store router
   in
-  with_live_configs ?on_error ?telemetry ?metrics [ config ] f
+  with_live_configs ?max_in_flight_requests ?on_error ?telemetry ?metrics
+    [ config ] f
 
 let with_live_tls_server tls = with_live_server ~tls
 
@@ -381,6 +387,28 @@ let wait_for_telemetry observed =
   in
   wait ()
 
+let find_metric_by_status snapshot name status =
+  let status_attribute : Halo.Metrics.attribute =
+    ( "http.response.status_code",
+      Halo.Metrics.Int (Int64.of_int status) )
+  in
+  match
+    List.find_opt
+      (fun point ->
+        String.equal point.Halo.Metrics.name name
+        && List.mem status_attribute point.attributes)
+      snapshot.Halo.Metrics.points
+  with
+  | Some point -> point
+  | None -> fail "missing metric %s for status %d" name status
+
+let check_histogram_count_and_sum label expected_count expected_sum point =
+  match point.Halo.Metrics.aggregation with
+  | Halo.Metrics.Histogram histogram ->
+      Alcotest.(check int64) (label ^ " count") expected_count histogram.count;
+      Alcotest.(check (float 0.0)) (label ^ " sum") expected_sum histogram.sum
+  | _ -> fail "%s is not a histogram" label
+
 let test_request_telemetry_covers_transport_lifecycle () =
   let scope_active = Atomic.make false in
   let handler_saw_scope = Atomic.make false in
@@ -476,6 +504,137 @@ let test_request_telemetry_covers_transport_lifecycle () =
        result.end_monotonic_ns);
   assert_int64_equal "request body size" 0L result.request_body_size;
   assert_int64_equal "response body size" 8L result.response_body_size
+
+let test_pre_dispatch_parser_failure_is_observed () =
+  let observed = Atomic.make None in
+  let module Observer = struct
+    type span = Halo.Telemetry.server_request
+
+    let start_server_request request = request
+    let with_span _span run = run ()
+
+    let finish_server_request request result =
+      if result.Halo.Telemetry.status_code = Some 400 then
+        Atomic.set observed (Some (request, result))
+  end in
+  let telemetry = Halo.Telemetry.of_observer (module Observer) in
+  let metrics = Halo.Metrics.create ~duration_buckets:[ 1.0 ] () in
+  ignore
+    (with_live_server ~telemetry ~metrics (fun () ->
+         let response =
+           plaintext_request ~until:"bad request\n"
+             ("GET /invalid HTTP/1.1\r\n"
+             ^ "Host: localhost\r\n"
+             ^ "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-"
+             ^ "00f067aa0ba902b7-01\r\n"
+             ^ "Host: duplicate\r\nConnection: close\r\n\r\n")
+         in
+         Alcotest.(check bool) "parser response status" true
+           (contains "HTTP/1.1 400 Bad Request" response);
+         ignore (wait_for_telemetry observed)));
+  let request, result = wait_for_telemetry observed in
+  Alcotest.(check string) "parser method" "GET" request.method_;
+  Alcotest.(check string) "parser target" "/invalid" request.target;
+  Alcotest.(check (pair int int)) "parser HTTP version" (1, 1)
+    request.http_version;
+  Alcotest.(check bool) "parser trace context" true
+    (Option.is_some request.remote_parent);
+  Alcotest.(check (option string)) "parser route" None result.route;
+  Alcotest.(check (option int)) "parser telemetry status" (Some 400)
+    result.status_code;
+  (match result.outcome with
+  | Some Halo.Router.Completed -> ()
+  | _ -> fail "expected completed parser-error telemetry outcome");
+  Alcotest.(check bool) "parser terminal timestamp" true
+    (Option.fold ~none:false
+       ~some:(fun timestamp -> timestamp >= request.start_monotonic_ns)
+       result.end_monotonic_ns);
+  assert_int64_equal "parser request body size" 0L result.request_body_size;
+  assert_int64_equal "parser response body size" 12L result.response_body_size;
+  let snapshot = Halo.Metrics.snapshot metrics in
+  find_metric_by_status snapshot "http.server.request.duration" 400
+  |> check_histogram_count_and_sum "parser duration" 1L
+       (match result.end_monotonic_ns with
+       | Some end_ns ->
+           Int64.to_float (Int64.sub end_ns request.start_monotonic_ns) /. 1e9
+       | None -> assert false);
+  find_metric_by_status snapshot "http.server.response.body.size" 400
+  |> check_histogram_count_and_sum "parser response bytes" 1L 12.0;
+  let requests = find_metric_by_status snapshot "halo.http.server.requests" 400 in
+  Alcotest.(check bool) "parser 4xx status class" true
+    (List.mem
+       ("http.response.status_class", Halo.Metrics.String "4xx")
+       requests.attributes)
+
+let test_pre_dispatch_admission_rejection_is_observed () =
+  let observed = Atomic.make None in
+  let fast_handler_calls = Atomic.make 0 in
+  let module Observer = struct
+    type span = Halo.Telemetry.server_request
+
+    let start_server_request request = request
+    let with_span _span run = run ()
+
+    let finish_server_request request result =
+      if result.Halo.Telemetry.status_code = Some 503 then
+        Atomic.set observed (Some (request, result))
+  end in
+  let telemetry = Halo.Telemetry.of_observer (module Observer) in
+  let metrics = Halo.Metrics.create () in
+  let router =
+    Halo.Router.(
+      route
+        Matcher.(
+          let+ () = request_method_is GET *> path_segment "slow" *> path_end in
+          fun _request ->
+            Eio_unix.sleep 0.25;
+            text Status.ok "slow\n")
+      <|> route
+            Matcher.(
+              let+ () = request_method_is GET *> path_segment "fast" *> path_end in
+              fun _request ->
+                ignore (Atomic.fetch_and_add fast_handler_calls 1);
+                text Status.ok "fast\n"))
+  in
+  ignore
+    (with_live_server ~max_in_flight_requests:1 ~router ~telemetry ~metrics
+       (fun () ->
+         let slow = connect_plaintext () in
+         Fun.protect
+           ~finally:(fun () -> Unix.close slow)
+           (fun () ->
+             write_socket_all slow
+               "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+             Unix.sleepf 0.03;
+             let rejected =
+               plaintext_request ~until:"server overloaded\n"
+                 "GET /fast HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+             in
+             Alcotest.(check bool) "admission response status" true
+               (contains "HTTP/1.1 503 Service Unavailable" rejected);
+             ignore (wait_for_telemetry observed);
+             ignore (read_socket_until slow "slow\n"))));
+  Alcotest.(check int) "rejected handler did not run" 0
+    (Atomic.get fast_handler_calls);
+  let request, result = wait_for_telemetry observed in
+  Alcotest.(check string) "admission method" "GET" request.method_;
+  Alcotest.(check string) "admission target" "/fast" request.target;
+  Alcotest.(check (option string)) "admission route" None result.route;
+  Alcotest.(check (option int)) "admission telemetry status" (Some 503)
+    result.status_code;
+  (match result.outcome with
+  | Some Halo.Router.Completed -> ()
+  | _ -> fail "expected completed admission telemetry outcome");
+  assert_int64_equal "admission response body size" 18L
+    result.response_body_size;
+  let snapshot = Halo.Metrics.snapshot metrics in
+  let requests = find_metric_by_status snapshot "halo.http.server.requests" 503 in
+  Alcotest.(check bool) "admission 5xx status class" true
+    (List.mem
+       ("http.response.status_class", Halo.Metrics.String "5xx")
+       requests.attributes);
+  find_metric_by_status snapshot "http.server.response.body.size" 503
+  |> check_histogram_count_and_sum "admission response bytes" 1L 18.0
 
 let test_invalid_trace_context_does_not_fail_request () =
   let saw_missing_parent = Atomic.make false in
@@ -1180,6 +1339,10 @@ let () =
         [
           Alcotest.test_case "request transport lifecycle" `Quick
             test_request_telemetry_covers_transport_lifecycle;
+          Alcotest.test_case "pre-dispatch parser failure" `Quick
+            test_pre_dispatch_parser_failure_is_observed;
+          Alcotest.test_case "pre-dispatch admission rejection" `Quick
+            test_pre_dispatch_admission_rejection_is_observed;
           Alcotest.test_case "invalid trace context is ignored" `Quick
             test_invalid_trace_context_does_not_fail_request;
           Alcotest.test_case "observer failures are isolated" `Quick

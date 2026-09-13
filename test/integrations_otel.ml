@@ -307,27 +307,66 @@ let read_all socket =
   in
   loop ()
 
-let request_halo port =
+let request_halo_raw port request =
   let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Fun.protect
     ~finally:(fun () -> Unix.close socket)
     (fun () ->
       Unix.connect socket
         (Unix.ADDR_INET (Unix.inet_addr_loopback, port));
-      let request =
-        Printf.sprintf
-          "GET /otel/42 HTTP/1.1\r\nHost: localhost\r\ntraceparent: %s\r\ntracestate: %s\r\nConnection: close\r\n\r\n"
-          (traceparent ()) trace_state
-      in
       write_all socket request;
       Unix.shutdown socket Unix.SHUTDOWN_SEND;
       read_all socket)
+
+let request_halo port =
+  request_halo_raw port
+    (Printf.sprintf
+       "GET /otel/42 HTTP/1.1\r\nHost: localhost\r\ntraceparent: %s\r\ntracestate: %s\r\nConnection: close\r\n\r\n"
+       (traceparent ()) trace_state)
 
 let result_error label = function
   | Ok () -> None
   | Error message -> Some (Printf.sprintf "%s: %s" label message)
 
-let run_halo_export ~collector_port ~server_port =
+let metric_has_status status (point : Halo.Metrics.point) =
+  List.exists
+    (fun ((name, value) : Halo.Metrics.attribute) ->
+      match value with
+      | Halo.Metrics.Int actual ->
+          String.equal name "http.response.status_code"
+          && Int64.equal actual (Int64.of_int status)
+      | _ -> false)
+    point.attributes
+
+let wait_for_metric_status metrics status =
+  let deadline = Unix.gettimeofday () +. 5.0 in
+  let rec loop () =
+    let observed =
+      Halo.Metrics.snapshot metrics
+      |> fun snapshot ->
+      List.exists (metric_has_status status) snapshot.Halo.Metrics.points
+    in
+    if observed then ()
+    else if Unix.gettimeofday () >= deadline then
+      fail "timed out waiting for HTTP metric status %d" status
+    else (
+      Eio_unix.sleep 0.01;
+      loop ())
+  in
+  loop ()
+
+let otel_router =
+  Halo.Router.(
+    route ~template:"/otel/{id}"
+      Matcher.(
+        let+ _id =
+          request_method_is GET *> path_segment "otel" *> string_parameter
+          <* path_end
+        in
+        fun _request -> text Status.ok "exported\n"))
+
+let run_halo_export ~collector_port ~server_port
+    ?(max_in_flight_requests = 4096) ~expected_status ~router run_requests =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let endpoint =
@@ -353,36 +392,26 @@ let run_halo_export ~collector_port ~server_port =
     Halo.Metrics.Otlp_http.exporter ~net:(Eio.Stdenv.net env)
       ~service_name:"halo-otel-integration" ~endpoint:metrics_endpoint ()
   in
-  let router =
-    Halo.Router.(
-      route ~template:"/otel/{id}"
-        Matcher.(
-          let+ _id =
-            request_method_is GET *> path_segment "otel" *> string_parameter
-            <* path_end
-          in
-          fun _request -> text Status.ok "exported\n"))
-  in
   let config =
     Halo.Server.Config.create ~host:"127.0.0.1" ~port:server_port router
   in
   let started, notify_started = Eio.Promise.create () in
   let server =
     Eio.Fiber.fork_promise ~sw (fun () ->
-        Halo.Server.run ~handle_sigint:false ~telemetry ~metrics
+        Halo.Server.run ~handle_sigint:false ~max_in_flight_requests ~telemetry
+          ~metrics
           ~on_ready:(fun running -> Eio.Promise.resolve notify_started running)
           [ config ])
   in
   let running = Eio.Promise.await started in
   let request_outcome =
     try
-      let response =
-        Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
-            request_halo server_port)
-      in
-      Ok response
+      Ok (run_requests env sw server_port)
     with exn -> Error (exn, Printexc.get_raw_backtrace ())
   in
+  (match request_outcome with
+  | Ok _ -> wait_for_metric_status metrics expected_status
+  | Error _ -> ());
   let metrics_export_error =
     Halo.Server.collect_metrics running
     |> Halo.Metrics.Otlp_http.export metrics_exporter
@@ -404,17 +433,15 @@ let run_halo_export ~collector_port ~server_port =
     |> result_error "processor shutdown"
   in
   Halo.Metrics.Otlp_http.shutdown metrics_exporter;
-  (match request_outcome with
-  | Ok response ->
-      Alcotest.(check bool) "Halo response status" true
-        (String.starts_with ~prefix:"HTTP/1.1 200 OK\r\n" response)
-  | Error (exn, backtrace) -> Printexc.raise_with_backtrace exn backtrace);
   (match server_outcome with
   | Ok () -> ()
   | Error (exn, backtrace) -> Printexc.raise_with_backtrace exn backtrace);
   Option.iter Alcotest.fail flush_error;
   Option.iter Alcotest.fail shutdown_error;
-  Option.iter Alcotest.fail metrics_export_error
+  Option.iter Alcotest.fail metrics_export_error;
+  match request_outcome with
+  | Ok result -> result
+  | Error (exn, backtrace) -> Printexc.raise_with_backtrace exn backtrace
 
 let json_field name = function
   | `Assoc fields -> (
@@ -445,17 +472,33 @@ let json_int64_field name json =
   | value -> fail "OTLP JSON field %S is not an int64: %s" name
                (Yojson.Safe.to_string value)
 
-let attribute_value key owner =
+let json_float_field name json =
+  match json_field name json with
+  | `Float value -> value
+  | `Int value -> Float.of_int value
+  | `Intlit value | `String value -> (
+      match Float.of_string_opt value with
+      | Some value -> value
+      | None -> fail "OTLP JSON field %S is not a float: %s" name value)
+  | value -> fail "OTLP JSON field %S is not a float: %s" name
+               (Yojson.Safe.to_string value)
+
+let attribute_value_opt key owner =
   let attributes = json_list_field "attributes" owner in
   let rec find = function
-    | [] -> fail "OTLP JSON attributes have no %S entry" key
+    | [] -> None
     | attribute :: rest ->
         if json_string_field "key" attribute = key then
-          json_field "value" attribute
+          Some (json_field "value" attribute)
         else
           find rest
   in
   find attributes
+
+let attribute_value key owner =
+  match attribute_value_opt key owner with
+  | Some value -> value
+  | None -> fail "OTLP JSON attributes have no %S entry" key
 
 let string_attribute key owner =
   match json_field "stringValue" (attribute_value key owner) with
@@ -465,6 +508,9 @@ let string_attribute key owner =
 
 let int64_attribute key owner =
   json_int64_field "intValue" (attribute_value key owner)
+
+let int64_attribute_opt key owner =
+  Option.map (json_int64_field "intValue") (attribute_value_opt key owner)
 
 let find_exported_span documents expected_name =
   let rec find_resource_spans = function
@@ -532,6 +578,21 @@ let find_exported_metric documents expected_name =
   in
   find_resources resource_metrics
 
+let find_metric_data_point metric aggregation status =
+  let expected = Int64.of_int status in
+  match
+    json_field aggregation metric
+    |> json_list_field "dataPoints"
+    |> List.find_opt (fun point ->
+           int64_attribute_opt "http.response.status_code" point
+           = Some expected)
+  with
+  | Some point -> point
+  | None ->
+      fail "metric %S has no data point for HTTP status %d"
+        (json_string_field "name" metric)
+        status
+
 let parse_json_lines contents =
   contents
   |> String.split_on_char '\n'
@@ -579,7 +640,14 @@ let test_export_to_reference_collector () =
   let collector_port = unused_tcp_port () in
   with_collector ~port:collector_port (fun output_path ->
       let server_port = unused_tcp_port () in
-      run_halo_export ~collector_port ~server_port;
+      let response =
+        run_halo_export ~collector_port ~server_port ~expected_status:200
+          ~router:otel_router (fun env _sw port ->
+            Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
+                request_halo port))
+      in
+      Alcotest.(check bool) "Halo response status" true
+        (String.starts_with ~prefix:"HTTP/1.1 200 OK\r\n" response);
       let documents = wait_for_export output_path in
       let resource_spans, scope_spans, span =
         find_exported_span documents "GET /otel/{id}"
@@ -645,6 +713,160 @@ let test_export_to_reference_collector () =
                String.equal (string_attribute "queue" point) "command")
              queue_points))
 
+let check_pre_dispatch_export documents ~status ~path ~response_body_size =
+  let _resource_spans, _scope_spans, span =
+    find_exported_span documents "GET"
+  in
+  Alcotest.(check string) "propagated trace ID" trace_id
+    (String.lowercase_ascii (json_string_field "traceId" span));
+  Alcotest.(check string) "parent span ID" parent_span_id
+    (String.lowercase_ascii (json_string_field "parentSpanId" span));
+  Alcotest.(check string) "propagated tracestate" trace_state
+    (json_string_field "traceState" span);
+  Alcotest.(check string) "HTTP method" "GET"
+    (string_attribute "http.request.method" span);
+  Alcotest.(check string) "URL path" path (string_attribute "url.path" span);
+  Alcotest.(check string) "HTTP version" "1.1"
+    (string_attribute "network.protocol.version" span);
+  Alcotest.(check bool) "no route attribute" false
+    (Option.is_some (attribute_value_opt "http.route" span));
+  Alcotest.(check int64) "HTTP status" (Int64.of_int status)
+    (int64_attribute "http.response.status_code" span);
+  Alcotest.(check int64) "HTTP request body size" 0L
+    (int64_attribute "http.request.body.size" span);
+  Alcotest.(check int64) "HTTP response body size"
+    (Int64.of_int response_body_size)
+    (int64_attribute "http.response.body.size" span);
+  let start_time = json_int64_field "startTimeUnixNano" span in
+  let end_time = json_int64_field "endTimeUnixNano" span in
+  Alcotest.(check bool) "C request start time is populated" true
+    (Int64.compare start_time 0L > 0);
+  Alcotest.(check bool) "span ends after it starts" true
+    (Int64.compare end_time start_time >= 0);
+
+  let _duration_resource, _duration_scope, duration =
+    find_exported_metric documents "http.server.request.duration"
+  in
+  let duration_point = find_metric_data_point duration "histogram" status in
+  Alcotest.(check int64) "request duration count" 1L
+    (json_int64_field "count" duration_point);
+  Alcotest.(check string) "metric method" "GET"
+    (string_attribute "http.request.method" duration_point);
+  Alcotest.(check bool) "metric has no route" false
+    (Option.is_some (attribute_value_opt "http.route" duration_point));
+
+  let _body_resource, _body_scope, response_body =
+    find_exported_metric documents "http.server.response.body.size"
+  in
+  let response_body_point =
+    find_metric_data_point response_body "histogram" status
+  in
+  Alcotest.(check int64) "response body histogram count" 1L
+    (json_int64_field "count" response_body_point);
+  Alcotest.(check (float 0.000_001)) "response body histogram sum"
+    (Float.of_int response_body_size)
+    (json_float_field "sum" response_body_point);
+
+  let _requests_resource, _requests_scope, requests =
+    find_exported_metric documents "halo.http.server.requests"
+  in
+  let requests_point = find_metric_data_point requests "sum" status in
+  Alcotest.(check int64) "request counter" 1L
+    (json_int64_field "asInt" requests_point);
+  Alcotest.(check string) "status class"
+    (Printf.sprintf "%dxx" (status / 100))
+    (string_attribute "http.response.status_class" requests_point);
+  Alcotest.(check string) "response outcome" "completed"
+    (string_attribute "halo.response.outcome" requests_point);
+  if status >= 500 then
+    Alcotest.(check string) "metric error type" (string_of_int status)
+      (string_attribute "error.type" requests_point)
+
+let test_export_pre_dispatch_parser_failure () =
+  let collector_port = unused_tcp_port () in
+  with_collector ~port:collector_port (fun output_path ->
+      let server_port = unused_tcp_port () in
+      let request =
+        Printf.sprintf
+          "GET /invalid HTTP/1.1\r\nHost: localhost\r\ntraceparent: %s\r\ntracestate: %s\r\nHost: duplicate\r\nConnection: close\r\n\r\n"
+          (traceparent ()) trace_state
+      in
+      let response =
+        run_halo_export ~collector_port ~server_port ~expected_status:400
+          ~router:otel_router (fun env _sw port ->
+            Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
+                request_halo_raw port request))
+      in
+      Alcotest.(check bool) "parser response status" true
+        (String.starts_with ~prefix:"HTTP/1.1 400 Bad Request\r\n" response);
+      wait_for_export output_path
+      |> check_pre_dispatch_export ~status:400 ~path:"/invalid"
+           ~response_body_size:12)
+
+let test_export_pre_dispatch_admission_rejection () =
+  let collector_port = unused_tcp_port () in
+  with_collector ~port:collector_port (fun output_path ->
+      let server_port = unused_tcp_port () in
+      let handler_started, notify_handler_started = Eio.Promise.create () in
+      let release_handler, notify_release_handler = Eio.Promise.create () in
+      let rejected_handler_calls = Atomic.make 0 in
+      let router =
+        Halo.Router.(
+          route ~template:"/slow"
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "slow" *> path_end
+              in
+              fun _request ->
+                Eio.Promise.resolve notify_handler_started ();
+                Eio.Promise.await release_handler;
+                text Status.ok "slow\n")
+          <|> route ~template:"/rejected"
+                Matcher.(
+                  let+ () =
+                    request_method_is GET *> path_segment "rejected" *> path_end
+                  in
+                  fun _request ->
+                    ignore (Atomic.fetch_and_add rejected_handler_calls 1);
+                    text Status.ok "unexpected\n"))
+      in
+      let rejected_response, slow_response =
+        run_halo_export ~collector_port ~server_port
+          ~max_in_flight_requests:1 ~expected_status:503 ~router
+          (fun env sw port ->
+            let domain_request request =
+              Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
+                  request_halo_raw port request)
+            in
+            let slow =
+              Eio.Fiber.fork_promise ~sw (fun () ->
+                  domain_request
+                    "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            in
+            Eio.Promise.await handler_started;
+            let rejected =
+              Fun.protect
+                ~finally:(fun () ->
+                  Eio.Promise.resolve notify_release_handler ())
+                (fun () ->
+                  domain_request
+                    (Printf.sprintf
+                       "GET /rejected HTTP/1.1\r\nHost: localhost\r\ntraceparent: %s\r\ntracestate: %s\r\nConnection: close\r\n\r\n"
+                       (traceparent ()) trace_state))
+            in
+            (rejected, Eio.Promise.await_exn slow))
+      in
+      Alcotest.(check bool) "admission response status" true
+        (String.starts_with ~prefix:"HTTP/1.1 503 Service Unavailable\r\n"
+           rejected_response);
+      Alcotest.(check bool) "slow response status" true
+        (String.starts_with ~prefix:"HTTP/1.1 200 OK\r\n" slow_response);
+      Alcotest.(check int) "rejected handler did not run" 0
+        (Atomic.get rejected_handler_calls);
+      wait_for_export output_path
+      |> check_pre_dispatch_export ~status:503 ~path:"/rejected"
+           ~response_body_size:18)
+
 let () =
   Alcotest.run "OpenTelemetry integrations"
     [
@@ -664,5 +886,9 @@ let () =
         [
           Alcotest.test_case "export through the reference Collector" `Slow
             test_export_to_reference_collector;
+          Alcotest.test_case "export parser failure telemetry" `Slow
+            test_export_pre_dispatch_parser_failure;
+          Alcotest.test_case "export admission rejection telemetry" `Slow
+            test_export_pre_dispatch_admission_rejection;
         ] );
     ]

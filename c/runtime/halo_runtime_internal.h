@@ -175,7 +175,10 @@ struct halo_client {
   int shutdown_started;
   int message_complete;
   int should_keep_alive;
-  int parser_error_status;
+  /* Nonzero while a final response generated entirely by the reactor is in
+   * flight. Parser failures initialize it directly; other pre-dispatch
+   * responses set it before writing. */
+  int direct_response_status;
   int pending_continue;
   int dispatch_started;
   int dispatch_pending_until_handshake;

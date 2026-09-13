@@ -568,6 +568,63 @@ let start_replay_claim t (event : Reactor.replay_claim_event) =
   try Reactor.resolve_replay_claim t.runtime event.claim_id ~accept
   with Client_disconnected -> ()
 
+let observe_pre_dispatch_response t
+    (event : Reactor.pre_dispatch_response_event) =
+  match event.connection_info with
+  | None ->
+      Reactor.trace "pre-dispatch response metadata missing request=%Ld"
+        event.request_id
+  | Some connection_info ->
+      Eio.Fiber.fork ~sw:t.bridge_switch (fun () ->
+          let scheme =
+            match connection_info.Router.tls with
+            | None -> "http"
+            | Some _ -> "https"
+          in
+          let metrics_request =
+            Metrics.Private.start_request t.metrics ~method_:event.method_text
+              ~scheme ~start_monotonic_ns:event.start_monotonic_ns
+          in
+          let outcome =
+            if event.completed then Router.Completed
+            else Router.Client_disconnected
+          in
+          let finish_metrics () =
+            Metrics.Private.finish_request metrics_request ~route:None
+              ~status_code:(Some event.status_code)
+              ~outcome:
+                (if event.completed then "completed" else "client_disconnected")
+              ~end_monotonic_ns:(Some event.end_monotonic_ns)
+              ~request_body_size:event.request_body_size
+              ~response_body_size:event.response_body_size
+          in
+          let telemetry_span =
+            Telemetry.Lifecycle.start_server_request t.telemetry
+              {
+                Telemetry.request_id = event.request_id;
+                method_ = event.method_text;
+                target = event.target;
+                headers = event.headers;
+                remote_parent =
+                  Telemetry.Trace_context.of_headers event.headers;
+                http_version = (event.http_major, event.http_minor);
+                connection_info;
+                is_early_data = event.is_early_data;
+                start_time_unix_ns = event.start_time_unix_ns;
+                start_monotonic_ns = event.start_monotonic_ns;
+              }
+          in
+          Fun.protect ~finally:finish_metrics (fun () ->
+              Telemetry.Lifecycle.finish_server_request telemetry_span
+                {
+                  Telemetry.route = None;
+                  status_code = Some event.status_code;
+                  outcome = Some outcome;
+                  end_monotonic_ns = Some event.end_monotonic_ns;
+                  request_body_size = event.request_body_size;
+                  response_body_size = event.response_body_size;
+                }))
+
 let dispatch_event t = function
   | Reactor.Request event -> start_request t event
   | Reactor.Body_chunk { request_id; chunk } ->
@@ -649,6 +706,7 @@ let dispatch_event t = function
       Eio.Fiber.fork ~sw:t.bridge_switch (fun () -> start_replay_claim t event)
   | Reactor.Connection_closed connection_id ->
       Hashtbl.remove t.connection_infos connection_id
+  | Reactor.Pre_dispatch_response event -> observe_pre_dispatch_response t event
   | Reactor.Drained -> (
       try Reactor.stop t.runtime with Client_disconnected -> ())
   | Reactor.Stopped ->

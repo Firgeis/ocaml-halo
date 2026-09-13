@@ -30,6 +30,23 @@ type terminal_event = {
   end_monotonic_ns : int64;
   request_body_size : int64;
 }
+type pre_dispatch_response_event = {
+  request_id : int64;
+  method_text : string;
+  target : string;
+  headers : (string * string) list;
+  http_major : int;
+  http_minor : int;
+  is_early_data : bool;
+  connection_info : Router.connection_info option;
+  start_monotonic_ns : int64;
+  start_time_unix_ns : int64 option;
+  end_monotonic_ns : int64;
+  status_code : int;
+  request_body_size : int64;
+  response_body_size : int64;
+  completed : bool;
+}
 type metrics_event = { query_id : int64; payload : string }
 
 type replay_claim_event = {
@@ -57,6 +74,7 @@ type event =
   | Replay_claim of replay_claim_event
   | Drained
   | Connection_closed of int64
+  | Pre_dispatch_response of pre_dispatch_response_event
   | Unknown of unknown_event
 
 val create_runtime : unit -> (Server_backend.t, string) result

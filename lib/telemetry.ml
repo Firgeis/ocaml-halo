@@ -1063,11 +1063,16 @@ let of_tracer tracer =
           ( "url.scheme",
             Attribute.String
               (match connection.tls with None -> "http" | Some _ -> "https") );
-          ( "network.protocol.version",
-            Attribute.String (Printf.sprintf "%d.%d" major minor) );
         ]
         @ socket_attributes "client" connection.remote_address
         @ socket_attributes "server" connection.local_address
+      in
+      let attributes =
+        if major > 0 then
+          ( "network.protocol.version",
+            Attribute.String (Printf.sprintf "%d.%d" major minor) )
+          :: attributes
+        else attributes
       in
       let attributes =
         match path_of_target request.target with

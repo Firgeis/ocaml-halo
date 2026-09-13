@@ -199,12 +199,19 @@ emits a version `00` `traceparent` plus `tracestate` when it is non-empty.
 `Trace_state.add` updates vendor state at the front while preserving the W3C
 entry and size limits.
 
-The tracing and HTTP-metric lifecycle boundary covers requests dispatched from
-the C reactor to an OCaml handler or built-in method response. Rejections
-completed entirely in C before dispatch (for example, a malformed request line
-or an admission-limit 503) do not produce request spans or HTTP histogram
-points. Their aggregate runtime counters remain available from
-`Halo.Server.metrics` and `Halo.Server.collect_metrics`.
+The tracing and HTTP-metric lifecycle boundary also covers final responses
+generated entirely by the C reactor before OCaml dispatch. This includes parser
+errors, request timeouts, internal dispatch failures, and admission-limit 503s.
+The observation is delivered only after the final write completes or the client
+disconnects, so its duration and outcome retain the same transport meaning as a
+dispatched request. Parsed method, target, headers, trace context, protocol, and
+body byte counts are preserved. If rejection occurs before a method is known,
+the low-cardinality method is `_OTHER`; the target is empty and the protocol is
+`(0, 0)`. Such responses have no route template.
+
+Connections that fail without generating an HTTP response, such as a failed TLS
+handshake, remain connection/runtime telemetry rather than HTTP request
+telemetry.
 
 ## Request timing
 

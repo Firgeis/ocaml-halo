@@ -28,7 +28,7 @@ static const char halo_request_timeout_response[] =
 
 static const char halo_service_unavailable_response[] =
   "HTTP/1.1 503 Service Unavailable\r\n"
-  "Content-Length: 20\r\n"
+  "Content-Length: 18\r\n"
   "Connection: close\r\n"
   "\r\n"
   "server overloaded\n";
@@ -64,6 +64,10 @@ static int halo_wait_for_request_body(uv_stream_t* stream,
 static int halo_request_body_expected(const struct halo_client* client);
 static int halo_request_body_complete_for_reuse(const struct halo_client* client);
 static void halo_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf);
+static const char* halo_error_response_body(int status);
+static void halo_mark_direct_response(struct halo_client* client, int status);
+static void halo_observe_direct_response(struct halo_client* client,
+                                         int completed);
 static int halo_tls_enabled(const struct halo_client* client);
 static int halo_load_file(const char* path, char** contents, size_t* length);
 static int halo_tls_prepare_operation(struct halo_client* client);
@@ -1031,6 +1035,7 @@ static void halo_client_timeout_cb(uv_timer_t* timer) {
     }
 
     if (!client->response_started) {
+      halo_mark_direct_response(client, 408);
       client->should_keep_alive = 0;
       if (halo_write_response((uv_stream_t*) &client->handle,
                               client,
@@ -1075,7 +1080,10 @@ void halo_close_client(struct halo_client* client) {
   halo_runtime_note_request_finished(client, 0);
   halo_runtime_note_connection_closed(client);
 
-  halo_bridge_disconnect_request(client);
+  if (client->bridge_request_id != 0)
+    halo_bridge_disconnect_request(client);
+  else
+    halo_observe_direct_response(client, 0);
   halo_bridge_connection_closed(client);
 
   halo_client_stop_timer(client);
@@ -1119,7 +1127,7 @@ static int halo_start_graceful_close(uv_stream_t* stream, struct halo_client* cl
   halo_client_clear_paused_data(client);
   halo_request_clear(&client->request);
   client->message_complete = 0;
-  client->parser_error_status = 0;
+  client->direct_response_status = 0;
   client->pending_continue = 0;
   client->dispatch_started = 0;
   client->dispatch_pending_until_handshake = 0;
@@ -1264,6 +1272,7 @@ static int halo_wait_for_request_body(uv_stream_t* stream,
 
 static int halo_write_internal_server_error_response(uv_stream_t* stream,
                                                      struct halo_client* client) {
+  halo_mark_direct_response(client, 500);
   client->should_keep_alive = 0;
   return halo_write_response(stream,
                              client,
@@ -1291,13 +1300,14 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
                                            struct halo_client* client,
                                            enum halo_write_kind kind) {
   llhttp_errno_t err;
-  int fast_close_parser_error;
+  int fast_close_direct_response;
 
   if (client == NULL)
     return 0;
 
-  fast_close_parser_error =
-    client->parser_error_status != 0 && (client->parser.flags & F_CHUNKED) != 0;
+  fast_close_direct_response =
+    client->direct_response_status != 0
+    && (client->parser.flags & F_CHUNKED) != 0;
 
   if (kind == HALO_WRITE_EXPECT_CONTINUE) {
     client->interim_response_started = 0;
@@ -1344,7 +1354,7 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
     halo_bridge_complete_request(client);
 
     if (!client->should_keep_alive) {
-      if (fast_close_parser_error) {
+      if (fast_close_direct_response) {
         halo_client_clear_paused_data(client);
         return -1;
       }
@@ -1359,7 +1369,7 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
     client->response_started = 0;
     client->interim_response_started = 0;
     client->should_keep_alive = 0;
-    client->parser_error_status = 0;
+    client->direct_response_status = 0;
     client->pending_continue = 0;
     client->dispatch_started = 0;
     client->dispatch_pending_until_handshake = 0;
@@ -1384,15 +1394,18 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
       client->bridge_response_in_flight = 0;
       halo_bridge_complete_request(client);
     }
-    else {
+    else if (client->bridge_request_id != 0) {
+      client->direct_response_status = 0;
       halo_bridge_disconnect_request(client);
     }
+    else
+      halo_observe_direct_response(client, 1);
   }
 
   halo_runtime_note_request_finished(client, 1);
 
   if (!client->should_keep_alive) {
-    if (fast_close_parser_error) {
+    if (fast_close_direct_response) {
       halo_client_clear_paused_data(client);
       return -1;
     }
@@ -1407,7 +1420,7 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
   client->response_started = 0;
   client->interim_response_started = 0;
   client->should_keep_alive = 0;
-  client->parser_error_status = 0;
+  client->direct_response_status = 0;
   client->pending_continue = 0;
   client->dispatch_started = 0;
   client->dispatch_pending_until_handshake = 0;
@@ -1540,6 +1553,52 @@ static uint64_t halo_estimate_unix_time_ns(uint64_t monotonic_time_ns) {
     return 0;
 
   return unix_ns - clock_read_ns;
+}
+
+static size_t halo_direct_response_body_size(int status) {
+  switch (status) {
+    case 500:
+      return sizeof("internal server error\n") - 1;
+    case 503:
+      return sizeof("server overloaded\n") - 1;
+    default:
+      return strlen(halo_error_response_body(status));
+  }
+}
+
+static void halo_mark_direct_response(struct halo_client* client, int status) {
+  struct halo_runtime* runtime;
+
+  if (client == NULL)
+    return;
+  client->direct_response_status = status;
+  runtime = NULL;
+  if (client->handle.loop != NULL)
+    runtime = client->handle.loop->data;
+  if (client->request_start_monotonic_ns == 0
+      && runtime != NULL && runtime->telemetry_enabled) {
+    client->request_start_monotonic_ns = uv_hrtime();
+    client->request_start_unix_ns =
+      halo_estimate_unix_time_ns(client->request_start_monotonic_ns);
+  }
+}
+
+static void halo_observe_direct_response(struct halo_client* client,
+                                         int completed) {
+  struct halo_runtime* runtime;
+  int status;
+
+  if (client == NULL || client->direct_response_status == 0)
+    return;
+  status = client->direct_response_status;
+  client->direct_response_status = 0;
+  runtime = NULL;
+  if (client->handle.loop != NULL)
+    runtime = client->handle.loop->data;
+  if (runtime == NULL || !runtime->telemetry_enabled)
+    return;
+  halo_bridge_observe_pre_dispatch_response(
+    client, status, halo_direct_response_body_size(status), completed);
 }
 
 static int halo_feed_plaintext(uv_stream_t* stream,
@@ -1993,6 +2052,7 @@ int halo_client_bridge_reject_busy(struct halo_client* client) {
   if (client == NULL || client->response_started
       || client->interim_response_started)
     return -1;
+  halo_mark_direct_response(client, 503);
   client->should_keep_alive = 0;
   return halo_write_response((uv_stream_t*) &client->handle,
                              client,
@@ -2080,6 +2140,7 @@ static int halo_write_bridge_error_response(uv_stream_t* stream,
            reason,
            strlen(body),
            body);
+  halo_mark_direct_response(client, status);
   client->should_keep_alive = 0;
   result = halo_write_response(stream, client, response, (size_t) response_len);
   free(response);
@@ -2221,12 +2282,12 @@ static int halo_handle_parser_result(uv_stream_t* stream,
     return 1;
   }
 
-  if (client->parser_error_status != 0) {
+  if (client->direct_response_status != 0) {
     halo_client_stop_timer(client);
     halo_close_with_error_response(stream,
                                    client,
-                                   client->parser_error_status,
-                                   halo_error_response_body(client->parser_error_status));
+                                   client->direct_response_status,
+                                   halo_error_response_body(client->direct_response_status));
     return 1;
   }
 
@@ -2406,11 +2467,7 @@ static void halo_connection_cb(uv_stream_t* server, int status) {
 
   if (runtime != NULL && runtime->controller.backpressure_enabled) {
     runtime->metrics.rejected_connections += 1;
-    client->should_keep_alive = 0;
-    if (halo_write_response((uv_stream_t*) &client->handle,
-                            client,
-                            halo_service_unavailable_response,
-                            sizeof(halo_service_unavailable_response) - 1) != 0)
+    if (halo_client_bridge_reject_busy(client) != 0)
       halo_close_client(client);
     return;
   }
