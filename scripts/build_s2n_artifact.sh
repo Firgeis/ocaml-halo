@@ -31,13 +31,13 @@ chmod -R u+w "${staged_s2n_dir}"
 build_target() {
   local make_target=$1
 
-  # Apple Clang 18 diagnoses legacy K&R-style declarations in this vendored
+  # Recent Apple Clang diagnoses legacy K&R-style declarations in this vendored
   # s2n release. Keep the compatibility exception isolated to that toolchain;
   # halo's own sources continue to build with their normal warnings.
   if [[ "$(uname -s)" == "Darwin" ]]; then
     make -C "${staged_s2n_dir}" "${make_target}" \
       LIBCRYPTO_ROOT="${libcrypto_root}" \
-      CC="${CC:-cc} -Wno-error=strict-prototypes"
+      CC="${CC:-cc} -Wno-strict-prototypes"
   else
     make -C "${staged_s2n_dir}" "${make_target}" LIBCRYPTO_ROOT="${libcrypto_root}"
   fi

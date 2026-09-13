@@ -1,3 +1,17 @@
+(rule
+ (target system_c_library_flags.sexp)
+ (enabled_if (= %{system} macosx))
+ (action
+  (with-stdout-to %{target}
+   (echo "()"))))
+
+(rule
+ (target system_c_library_flags.sexp)
+ (enabled_if (<> %{system} macosx))
+ (action
+  (with-stdout-to %{target}
+   (echo "(-ldl -lrt)"))))
+
 (library
  (name halo)
  (public_name ocaml-halo)
@@ -27,4 +41,5 @@
  (libraries eio eio.unix uri)
  (foreign_archives ../c/halo_stubs ../c/halo_s2n ../c/halo_uv)
  (c_library_flags
-  (-lcrypto -lpthread -ldl -lrt -lm)))
+  (-lcrypto -lpthread -lm
+   (:include system_c_library_flags.sexp))))
