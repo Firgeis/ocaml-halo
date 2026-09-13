@@ -37,7 +37,7 @@ build_target() {
   if [[ "$(uname -s)" == "Darwin" ]]; then
     make -C "${staged_s2n_dir}" "${make_target}" \
       LIBCRYPTO_ROOT="${libcrypto_root}" \
-      CFLAGS+=" -Wno-error=strict-prototypes"
+      CC="${CC:-cc} -Wno-error=strict-prototypes"
   else
     make -C "${staged_s2n_dir}" "${make_target}" LIBCRYPTO_ROOT="${libcrypto_root}"
   fi
