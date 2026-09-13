@@ -9,10 +9,9 @@ let body_of_chunks chunks =
 
 let test_read_all_drains_only_unread_chunks () =
   let body = body_of_chunks [ "alpha"; "beta"; "gamma" ] in
-  Alcotest.(check (option string)) "first chunk" (Some "alpha")
-    (Halo.Body.read body);
-  Alcotest.(check string) "unread body" "betagamma"
-    (Halo.Body.read_all body);
+  Alcotest.(check (option string))
+    "first chunk" (Some "alpha") (Halo.Body.read body);
+  Alcotest.(check string) "unread body" "betagamma" (Halo.Body.read_all body);
   Alcotest.(check string) "no body remains" "" (Halo.Body.read_all body);
   Alcotest.(check (option string)) "ended body" None (Halo.Body.read body)
 

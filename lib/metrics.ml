@@ -69,7 +69,7 @@ type t = {
   start_time_unix_ns : int64;
   duration_bounds : float array;
   size_bounds : float array;
-  active : ((string * string), int64) Hashtbl.t;
+  active : (string * string, int64) Hashtbl.t;
   requests : (attribute list, request_group) Hashtbl.t;
   mutable runtime : runtime option;
 }
@@ -81,8 +81,7 @@ type request = {
   start_monotonic_ns : int64;
 }
 
-let unix_time_ns () =
-  Int64.of_float (Unix.gettimeofday () *. 1_000_000_000.0)
+let unix_time_ns () = Int64.of_float (Unix.gettimeofday () *. 1_000_000_000.0)
 
 let default_duration_buckets =
   [
@@ -110,7 +109,8 @@ let validate_buckets name buckets =
     | [] -> ()
     | value :: rest ->
         if
-          (not (Float.is_finite value)) || value < 0.0
+          (not (Float.is_finite value))
+          || value < 0.0
           || Option.fold ~none:false ~some:(fun last -> value <= last) previous
         then
           invalid_arg
@@ -174,8 +174,8 @@ let snapshot_histogram histogram =
   let bucket_counts =
     Array.to_list histogram.counts
     |> List.map (fun count ->
-           cumulative := Int64.add !cumulative count;
-           !cumulative)
+        cumulative := Int64.add !cumulative count;
+        !cumulative)
   in
   {
     count = histogram.count;
@@ -236,10 +236,12 @@ let count_attributes metric_attributes status_code outcome =
   |> List.sort compare
 
 let start_request collector ~method_ ~scheme ~start_monotonic_ns =
-  if collector.enabled then (
-    let key = (method_, scheme) in
-    let active = Option.value (Hashtbl.find_opt collector.active key) ~default:0L in
-    Hashtbl.replace collector.active key (Int64.succ active));
+  (if collector.enabled then
+     let key = (method_, scheme) in
+     let active =
+       Option.value (Hashtbl.find_opt collector.active key) ~default:0L
+     in
+     Hashtbl.replace collector.active key (Int64.succ active));
   { collector; method_; scheme; start_monotonic_ns }
 
 let finish_request request ~route ~status_code ~outcome ~end_monotonic_ns
@@ -247,8 +249,11 @@ let finish_request request ~route ~status_code ~outcome ~end_monotonic_ns
   let collector = request.collector in
   if collector.enabled then (
     let active_key = (request.method_, request.scheme) in
-    let active = Option.value (Hashtbl.find_opt collector.active active_key) ~default:1L in
-    Hashtbl.replace collector.active active_key (Int64.max 0L (Int64.pred active));
+    let active =
+      Option.value (Hashtbl.find_opt collector.active active_key) ~default:1L
+    in
+    Hashtbl.replace collector.active active_key
+      (Int64.max 0L (Int64.pred active));
     let metric_attributes =
       metric_attributes request ~route ~status_code ~outcome
     in
@@ -276,7 +281,9 @@ let finish_request request ~route ~status_code ~outcome ~end_monotonic_ns
     group.requests <- Int64.succ group.requests;
     Option.iter
       (fun end_ns ->
-        let elapsed = Int64.max 0L (Int64.sub end_ns request.start_monotonic_ns) in
+        let elapsed =
+          Int64.max 0L (Int64.sub end_ns request.start_monotonic_ns)
+        in
         record_histogram group.duration (Int64.to_float elapsed /. 1e9))
       end_monotonic_ns;
     record_histogram group.request_size (Int64.to_float request_body_size);
@@ -313,21 +320,23 @@ let request_points collector =
   let active =
     Hashtbl.to_seq collector.active
     |> Seq.map (fun ((method_, scheme), value) ->
-           point ~name:"http.server.active_requests"
-             ~description:"Number of active HTTP server requests." ~unit_:"{request}"
-             ~attributes:
-               [
-                 ("http.request.method", String method_);
-                 ("url.scheme", String scheme);
-               ]
-             (Gauge (Int value)))
+        point ~name:"http.server.active_requests"
+          ~description:"Number of active HTTP server requests."
+          ~unit_:"{request}"
+          ~attributes:
+            [
+              ("http.request.method", String method_);
+              ("url.scheme", String scheme);
+            ]
+          (Gauge (Int value)))
     |> List.of_seq
   in
   Hashtbl.to_seq_values collector.requests
   |> Seq.fold_left
        (fun points group ->
          point ~name:"halo.http.server.requests"
-           ~description:"Number of HTTP server requests by terminal status class."
+           ~description:
+             "Number of HTTP server requests by terminal status class."
            ~unit_:"{request}" ~attributes:group.count_attributes
            (Sum { value = Int group.requests; monotonic = true })
          :: point ~name:"http.server.request.duration"
@@ -356,8 +365,8 @@ let runtime_points = function
           (Sum { value = Int value; monotonic = true })
       in
       [
-        gauge "halo.runtime.utilization" "Reactor event-loop utilization."
-          "1" (Float runtime.utilization);
+        gauge "halo.runtime.utilization" "Reactor event-loop utilization." "1"
+          (Float runtime.utilization);
         gauge "halo.runtime.connections.active" "Active client connections."
           "{connection}" (Int runtime.active_connections);
         gauge "halo.runtime.requests.active" "Requests active in the reactor."
@@ -382,28 +391,32 @@ let runtime_points = function
           (Sum { value = Int runtime.tls_resumed_handshakes; monotonic = true });
         point ~name:"halo.runtime.tls.handshakes"
           ~description:"TLS handshakes by result and session mode."
-          ~unit_:"{handshake}" ~attributes:[ ("result", String "failure") ]
+          ~unit_:"{handshake}"
+          ~attributes:[ ("result", String "failure") ]
           (Sum { value = Int runtime.tls_handshake_failures; monotonic = true });
-        (gauge "halo.runtime.queue.depth" "Current bridge queue depth."
-           "{item}" (Int runtime.event_queue_depth)
+        ( gauge "halo.runtime.queue.depth" "Current bridge queue depth."
+            "{item}" (Int runtime.event_queue_depth)
         |> fun point ->
-        { point with attributes = [ ("queue", String "event") ] });
-        (gauge "halo.runtime.queue.depth" "Current bridge queue depth."
-           "{item}" (Int runtime.command_queue_depth)
+          { point with attributes = [ ("queue", String "event") ] } );
+        ( gauge "halo.runtime.queue.depth" "Current bridge queue depth."
+            "{item}" (Int runtime.command_queue_depth)
         |> fun point ->
-        { point with attributes = [ ("queue", String "command") ] });
+          { point with attributes = [ ("queue", String "command") ] } );
         point ~name:"halo.runtime.controller.state"
           ~description:"Current adaptive controller state." ~unit_:"1"
           ~attributes:[ ("state", String runtime.controller_state) ]
           (Gauge (Int 1L));
-        gauge "halo.runtime.backpressure" "Whether admission backpressure is enabled."
-          "1" (Int (if runtime.backpressure_enabled then 1L else 0L));
+        gauge "halo.runtime.backpressure"
+          "Whether admission backpressure is enabled." "1"
+          (Int (if runtime.backpressure_enabled then 1L else 0L));
       ]
 
 let compare_attribute (left_name, left_value) (right_name, right_value) =
   let by_name = String.compare left_name right_name in
   if by_name <> 0 then by_name
-  else String.compare (string_of_attribute_value left_value)
+  else
+    String.compare
+      (string_of_attribute_value left_value)
       (string_of_attribute_value right_value)
 
 let compare_point left right =
@@ -413,7 +426,8 @@ let compare_point left right =
 
 let snapshot collector =
   let points =
-    if collector.enabled then request_points collector @ runtime_points collector.runtime
+    if collector.enabled then
+      request_points collector @ runtime_points collector.runtime
     else []
   in
   {
@@ -473,17 +487,18 @@ module Prometheus = struct
         attributes
         |> List.sort compare_attribute
         |> List.map (fun (name, value) ->
-               Printf.sprintf "%s=\"%s\"" (sanitize name)
-                 (escape_label (label_value value)))
-        |> String.concat ","
-        |> Printf.sprintf "{%s}"
+            Printf.sprintf "%s=\"%s\"" (sanitize name)
+              (escape_label (label_value value)))
+        |> String.concat "," |> Printf.sprintf "{%s}"
 
   let float value =
     if Float.is_infinite value then if value > 0.0 then "+Inf" else "-Inf"
     else if Float.is_nan value then "NaN"
     else Printf.sprintf "%.17g" value
 
-  let number = function Int value -> Int64.to_string value | Float value -> float value
+  let number = function
+    | Int value -> Int64.to_string value
+    | Float value -> float value
 
   let help_text value =
     let buffer = Buffer.create (String.length value) in
@@ -649,7 +664,9 @@ module Otlp_http = struct
         Buffer.add_char buffer
           (Char.chr
              (Int64.to_int
-                (Int64.logand (Int64.shift_right_logical value (index * 8)) 0xffL)))
+                (Int64.logand
+                   (Int64.shift_right_logical value (index * 8))
+                   0xffL)))
       done
 
     let raw_fixed64 buffer value =
@@ -657,7 +674,9 @@ module Otlp_http = struct
         Buffer.add_char buffer
           (Char.chr
              (Int64.to_int
-                (Int64.logand (Int64.shift_right_logical value (index * 8)) 0xffL)))
+                (Int64.logand
+                   (Int64.shift_right_logical value (index * 8))
+                   0xffL)))
       done
 
     let add_packed_fixed64 buffer field values =
@@ -730,7 +749,8 @@ module Otlp_http = struct
 
   let group_metrics points =
     let rec loop current groups = function
-      | [] -> List.rev (if current = [] then groups else List.rev current :: groups)
+      | [] ->
+          List.rev (if current = [] then groups else List.rev current :: groups)
       | point :: rest -> (
           match current with
           | representative :: _ when same_metric representative point ->
@@ -777,8 +797,8 @@ module Otlp_http = struct
                 match point.aggregation with
                 | Histogram histogram ->
                     Protobuf.add_message encoded 1 (fun data_point ->
-                        encode_histogram_point snapshot data_point point.attributes
-                          histogram)
+                        encode_histogram_point snapshot data_point
+                          point.attributes histogram)
                 | _ -> assert false)
               points;
             Protobuf.add_uint encoded 2 2L)
@@ -881,7 +901,8 @@ module Otlp_http = struct
       ?retry ()
 
   let export exporter (snapshot : snapshot) =
-    if Atomic.get exporter.stopped then Error "OTLP metrics exporter is shut down"
+    if Atomic.get exporter.stopped then
+      Error "OTLP metrics exporter is shut down"
     else if snapshot.points = [] then Ok ()
     else
       let body = encode_request exporter snapshot in
@@ -900,7 +921,8 @@ module Otlp_http = struct
               let delay =
                 match error.retry_after with
                 | Some delay -> Float.min exporter.retry.max_delay delay
-                | None -> jittered_delay exporter.retry (Lazy.force random) backoff
+                | None ->
+                    jittered_delay exporter.retry (Lazy.force random) backoff
               in
               Eio_unix.sleep delay;
               attempt (number + 1)

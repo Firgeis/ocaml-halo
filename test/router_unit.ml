@@ -7,7 +7,9 @@ let request ?(headers = []) ?(body = "") request_method target =
       headers;
       body;
     }
+
 let text = Halo.Router.text
+
 module Status = Halo.Router.Status
 module Response_headers = Halo.Router.Headers
 
@@ -16,17 +18,20 @@ let fixed_response ~status ~headers body =
 
 let check_response label (expected : Halo.Router.response) actual =
   let response : Halo.Router.response = actual in
-  Alcotest.(check int) (label ^ " status")
+  Alcotest.(check int)
+    (label ^ " status")
     (Status.to_int (Halo.Router.Response.status expected))
     (Status.to_int (Halo.Router.Response.status response));
-  Alcotest.(check (list (pair string string))) (label ^ " headers")
+  Alcotest.(check (list (pair string string)))
+    (label ^ " headers")
     (Response_headers.to_list (Halo.Router.Response.headers expected))
     (Response_headers.to_list (Halo.Router.Response.headers response));
   let fixed_body = function
     | Halo.Router.Fixed_body body -> body
     | Halo.Router.Stream_body _ -> Alcotest.fail "expected a fixed response"
   in
-  Alcotest.(check string) (label ^ " body")
+  Alcotest.(check string)
+    (label ^ " body")
     (fixed_body (Halo.Router.Response.body expected))
     (fixed_body (Halo.Router.Response.body response))
 
@@ -77,9 +82,7 @@ let test_empty_path_segments_are_significant () =
     Halo.Router.route
       Halo.Router.Matcher.(
         let+ () =
-          request_method_is GET
-          *> path_segment "a"
-          *> path_segment ""
+          request_method_is GET *> path_segment "a" *> path_segment ""
           *> path_segment "b"
           <* path_end
         in
@@ -89,9 +92,7 @@ let test_empty_path_segments_are_significant () =
     Halo.Router.route
       Halo.Router.Matcher.(
         let+ () =
-          request_method_is GET
-          *> path_segment "a"
-          *> path_segment "b"
+          request_method_is GET *> path_segment "a" *> path_segment "b"
           *> path_segment ""
           <* path_end
         in
@@ -102,21 +103,21 @@ let test_empty_path_segments_are_significant () =
   in
   check_response "ordinary path" (text Status.ok "plain")
     (Halo.Router.dispatch router (request GET "/a/b"));
-  check_response "doubled slash" (text Status.ok "empty segment")
+  check_response "doubled slash"
+    (text Status.ok "empty segment")
     (Halo.Router.dispatch router (request GET "/a//b"));
-  check_response "trailing slash" (text Status.ok "trailing segment")
+  check_response "trailing slash"
+    (text Status.ok "trailing segment")
     (Halo.Router.dispatch router (request GET "/a/b/"));
-  check_response "root remains segmentless" (text Status.not_found "not found\n")
+  check_response "root remains segmentless"
+    (text Status.not_found "not found\n")
     (Halo.Router.dispatch router (request GET "/"))
 
 let test_method_mismatch () =
   check_response "method mismatch"
     (fixed_response ~status:Status.method_not_allowed
        ~headers:
-         [
-           ("Allow", "GET");
-           ("Content-Type", "text/plain; charset=utf-8");
-         ]
+         [ ("Allow", "GET"); ("Content-Type", "text/plain; charset=utf-8") ]
        "method not allowed\n")
     (Halo.Router.dispatch routes (request POST "/health"))
 
@@ -129,11 +130,9 @@ let test_applicative_sequencing_operators () =
     Halo.Router.route
       Halo.Router.Matcher.(
         let+ user_id =
-          (pure "discarded"
-          *> request_method_is GET
-          *> path_segment "users"
-          *> int_parameter)
-          <* (path_segment "profile" *> pure "discarded")
+          pure "discarded" *> request_method_is GET *> path_segment "users"
+          *> int_parameter
+          <* path_segment "profile" *> pure "discarded"
           <* path_end
         in
         fun _request -> text Status.ok (string_of_int user_id))
@@ -154,9 +153,7 @@ let test_queryparam_optional () =
     Halo.Router.route
       Halo.Router.Matcher.(
         let+ query =
-          request_method_is GET
-          *> path_segment "search"
-          *> path_end
+          request_method_is GET *> path_segment "search" *> path_end
           *> queryparam "q"
         in
         fun _request ->
@@ -167,7 +164,8 @@ let test_queryparam_optional () =
   in
   check_response "queryparam optional present" (text Status.ok "q=halo")
     (Halo.Router.dispatch router (request GET "/search?q=halo"));
-  check_response "queryparam optional missing" (text Status.ok "q=<missing>")
+  check_response "queryparam optional missing"
+    (text Status.ok "q=<missing>")
     (Halo.Router.dispatch router (request GET "/search"))
 
 let test_queryparam_required () =
@@ -175,16 +173,15 @@ let test_queryparam_required () =
     Halo.Router.route
       Halo.Router.Matcher.(
         let+ query =
-          request_method_is GET
-          *> path_segment "search"
-          *> path_end
+          request_method_is GET *> path_segment "search" *> path_end
           *> queryparam_required "q"
         in
         fun _request -> text Status.ok ("q=" ^ query))
   in
   check_response "queryparam required present" (text Status.ok "q=halo")
     (Halo.Router.dispatch router (request GET "/search?q=halo"));
-  check_response "queryparam required missing" (text Status.not_found "not found\n")
+  check_response "queryparam required missing"
+    (text Status.not_found "not found\n")
     (Halo.Router.dispatch router (request GET "/search"))
 
 let test_int_queryparam () =
@@ -192,9 +189,7 @@ let test_int_queryparam () =
     Halo.Router.route
       Halo.Router.Matcher.(
         let+ page =
-          request_method_is GET
-          *> path_segment "search"
-          *> path_end
+          request_method_is GET *> path_segment "search" *> path_end
           *> int_queryparam "page"
         in
         fun _request ->
@@ -205,9 +200,11 @@ let test_int_queryparam () =
   in
   check_response "int queryparam present" (text Status.ok "page=2")
     (Halo.Router.dispatch router (request GET "/search?page=2"));
-  check_response "int queryparam missing" (text Status.ok "page=<missing>")
+  check_response "int queryparam missing"
+    (text Status.ok "page=<missing>")
     (Halo.Router.dispatch router (request GET "/search"));
-  check_response "int queryparam invalid" (text Status.ok "page=<missing>")
+  check_response "int queryparam invalid"
+    (text Status.ok "page=<missing>")
     (Halo.Router.dispatch router (request GET "/search?page=nope"))
 
 let test_int_queryparam_required () =
@@ -215,18 +212,18 @@ let test_int_queryparam_required () =
     Halo.Router.route
       Halo.Router.Matcher.(
         let+ page =
-          request_method_is GET
-          *> path_segment "search"
-          *> path_end
+          request_method_is GET *> path_segment "search" *> path_end
           *> int_queryparam_required "page"
         in
         fun _request -> text Status.ok ("page=" ^ string_of_int page))
   in
   check_response "int queryparam required present" (text Status.ok "page=2")
     (Halo.Router.dispatch router (request GET "/search?page=2"));
-  check_response "int queryparam required missing" (text Status.not_found "not found\n")
+  check_response "int queryparam required missing"
+    (text Status.not_found "not found\n")
     (Halo.Router.dispatch router (request GET "/search"));
-  check_response "int queryparam required invalid" (text Status.not_found "not found\n")
+  check_response "int queryparam required invalid"
+    (text Status.not_found "not found\n")
     (Halo.Router.dispatch router (request GET "/search?page=nope"))
 
 let test_queryparams_repeated () =
@@ -234,14 +231,13 @@ let test_queryparams_repeated () =
     Halo.Router.route
       Halo.Router.Matcher.(
         let+ tags =
-          request_method_is GET
-          *> path_segment "search"
-          *> path_end
+          request_method_is GET *> path_segment "search" *> path_end
           *> queryparams "tag"
         in
         fun _request -> text Status.ok (String.concat "," tags))
   in
-  check_response "queryparams repeated" (text Status.ok "ocaml,http")
+  check_response "queryparams repeated"
+    (text Status.ok "ocaml,http")
     (Halo.Router.dispatch router (request GET "/search?tag=ocaml&tag=http"));
   check_response "queryparams empty" (text Status.ok "")
     (Halo.Router.dispatch router (request GET "/search"))
@@ -251,16 +247,14 @@ let test_queryparams_are_percent_decoded () =
     Halo.Router.route
       Halo.Router.Matcher.(
         let+ query =
-          request_method_is GET
-          *> path_segment "search"
-          *> path_end
+          request_method_is GET *> path_segment "search" *> path_end
           *> queryparam_required "q"
         and+ name = queryparam_required "first name"
         and+ plus = queryparam_required "plus"
         and+ tags = queryparams "tag" in
         fun _request ->
           text Status.ok
-            (String.concat "|" [query; name; plus; String.concat "," tags]))
+            (String.concat "|" [ query; name; plus; String.concat "," tags ]))
   in
   check_response "percent-decoded query names and values"
     (text Status.ok "a&b=c%/|Ada Lovelace|a+b|one,two")
@@ -277,12 +271,14 @@ let test_invalid_uri_encoding_is_bad_request () =
   in
   let expected =
     fixed_response ~status:Status.bad_request
-      ~headers:[("Content-Type", "text/plain; charset=utf-8")]
+      ~headers:[ ("Content-Type", "text/plain; charset=utf-8") ]
       "bad request\n"
   in
   List.iter
     (fun target ->
-      check_response ("invalid URI target " ^ target) expected
+      check_response
+        ("invalid URI target " ^ target)
+        expected
         (Halo.Router.dispatch router (request GET target)))
     [
       "/search?q=%";
@@ -294,7 +290,8 @@ let test_invalid_uri_encoding_is_bad_request () =
     ]
 
 let test_not_found () =
-  check_response "not found" (text Status.not_found "not found\n")
+  check_response "not found"
+    (text Status.not_found "not found\n")
     (Halo.Router.dispatch routes (request GET "/missing"))
 
 let test_static_before_dynamic () =
@@ -302,9 +299,7 @@ let test_static_before_dynamic () =
     Halo.Router.route
       Halo.Router.Matcher.(
         let+ () =
-          request_method_is GET
-          *> path_segment "users"
-          *> path_segment "me"
+          request_method_is GET *> path_segment "users" *> path_segment "me"
           *> path_end
         in
         fun _request -> text Status.ok "self")
@@ -323,7 +318,8 @@ let test_static_before_dynamic () =
     (Halo.Router.dispatch router (request GET "/users/me"))
 
 let test_post_route () =
-  check_response "post route" (text Status.ok "echo:halo")
+  check_response "post route"
+    (text Status.ok "echo:halo")
     (Halo.Router.dispatch routes (request POST "/echo/halo"))
 
 let test_scoped_routes () =
@@ -333,11 +329,10 @@ let test_scoped_routes () =
         Matcher.(
           let+ user_id = request_method_is GET *> int_parameter <* path_end in
           fun _request -> text Status.ok ("user:" ^ string_of_int user_id))
-      <|>
-      route
-        Matcher.(
-          let+ () = request_method_is POST *> path_end in
-          fun _request -> text Status.created "create-user"))
+      <|> route
+            Matcher.(
+              let+ () = request_method_is POST *> path_end in
+              fun _request -> text Status.created "create-user"))
   in
   let routes =
     let users_prefix =
@@ -347,27 +342,31 @@ let test_scoped_routes () =
   in
   check_response "scoped get" (text Status.ok "user:7")
     (Halo.Router.dispatch routes (request GET "/api/users/7"));
-  check_response "scoped post" (text Status.created "create-user")
+  check_response "scoped post"
+    (text Status.created "create-user")
     (Halo.Router.dispatch routes (request POST "/api/users"))
 
 let test_scope_path_segment () =
   let users_routes =
     Halo.Router.route
       Halo.Router.Matcher.(
-        let+ user_name = request_method_is GET *> string_parameter <* path_end in
+        let+ user_name =
+          request_method_is GET *> string_parameter <* path_end
+        in
         fun _request -> text Status.ok ("name:" ^ user_name))
   in
-  let routes =
-    Halo.Router.scope_path_segment "users" users_routes
-  in
-  check_response "scope path segment" (text Status.ok "name:alice")
+  let routes = Halo.Router.scope_path_segment "users" users_routes in
+  check_response "scope path segment"
+    (text Status.ok "name:alice")
     (Halo.Router.dispatch routes (request GET "/users/alice"))
 
 let test_request_headers_and_body () =
   let router =
     Halo.Router.route
       Halo.Router.Matcher.(
-        let+ () = request_method_is POST *> path_segment "inspect" *> path_end in
+        let+ () =
+          request_method_is POST *> path_segment "inspect" *> path_end
+        in
         fun (request : Halo.Router.Request.t) ->
           let host =
             match Halo.Router.Request.header request "host" with
@@ -377,10 +376,12 @@ let test_request_headers_and_body () =
           text Status.ok
             (host ^ ":" ^ Halo.Body.read_all (Halo.Router.Request.body request)))
   in
-  check_response "request headers and body" (text Status.ok "localhost:payload")
+  check_response "request headers and body"
+    (text Status.ok "localhost:payload")
     (Halo.Router.dispatch router
-       (request ~headers:[("host", "localhost"); ("x-test", "1")] ~body:"payload"
-          POST "/inspect"))
+       (request
+          ~headers:[ ("host", "localhost"); ("x-test", "1") ]
+          ~body:"payload" POST "/inspect"))
 
 let test_request_multiple_headers () =
   let router =
@@ -398,7 +399,9 @@ let test_request_multiple_headers () =
     (Halo.Router.dispatch router
        (request
           ~headers:
-            [("Set-Cookie", "a=1"); ("set-cookie", "b=2"); ("host", "localhost")]
+            [
+              ("Set-Cookie", "a=1"); ("set-cookie", "b=2"); ("host", "localhost");
+            ]
           GET "/cookies"))
 
 let test_response_headers () =
@@ -413,42 +416,44 @@ let test_response_headers () =
   in
   check_response "response headers"
     (fixed_response ~status:Status.ok
-       ~headers:[("X-Test", "1"); ("Content-Type", "text/plain")]
+       ~headers:[ ("X-Test", "1"); ("Content-Type", "text/plain") ]
        "ok\n")
     (Halo.Router.dispatch router (request GET "/headers"))
 
 let test_text_sets_default_content_type () =
   check_response "text content type"
     (fixed_response ~status:Status.ok
-       ~headers:[("Content-Type", "text/plain; charset=utf-8")]
+       ~headers:[ ("Content-Type", "text/plain; charset=utf-8") ]
        "hello\n")
     (Halo.Router.text Status.ok "hello\n")
 
 let test_html_sets_default_content_type () =
   check_response "html content type"
     (fixed_response ~status:Status.ok
-       ~headers:[("Content-Type", "text/html; charset=utf-8")]
+       ~headers:[ ("Content-Type", "text/html; charset=utf-8") ]
        "<h1>hello</h1>\n")
     (Halo.Router.html Status.ok "<h1>hello</h1>\n")
 
 let test_json_sets_default_content_type () =
   check_response "json content type"
     (fixed_response ~status:Status.ok
-       ~headers:[("Content-Type", "application/json; charset=utf-8")]
+       ~headers:[ ("Content-Type", "application/json; charset=utf-8") ]
        "{\"ok\":true}\n")
     (Halo.Router.json Status.ok "{\"ok\":true}\n")
 
 let test_with_content_type_overrides_existing_header () =
   check_response "with_content_type override"
     (fixed_response ~status:Status.ok
-       ~headers:[("Content-Type", "text/custom")] "hello\n")
+       ~headers:[ ("Content-Type", "text/custom") ]
+       "hello\n")
     (Halo.Router.text Status.ok "hello\n"
     |> Halo.Router.with_content_type "text/custom")
 
 let test_with_header_overrides_case_insensitively () =
   check_response "with_header override"
     (fixed_response ~status:Status.ok
-       ~headers:[("content-type", "text/custom")] "hello\n")
+       ~headers:[ ("content-type", "text/custom") ]
+       "hello\n")
     (Halo.Router.text Status.ok "hello\n"
     |> Halo.Router.with_header "content-type" "text/custom")
 
@@ -484,7 +489,9 @@ let test_middleware_can_short_circuit () =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET *> path_segment "private" *> path_end in
+          let+ () =
+            request_method_is GET *> path_segment "private" *> path_end
+          in
           fun _request -> text Status.ok "secret\n")
       |> use require_auth)
   in
@@ -494,7 +501,7 @@ let test_middleware_can_short_circuit () =
   check_response "middleware allows request"
     (Halo.Router.text Status.ok "secret\n")
     (Halo.Router.dispatch router
-       (request ~headers:[("Authorization", "Bearer token")] GET "/private"))
+       (request ~headers:[ ("Authorization", "Bearer token") ] GET "/private"))
 
 let test_middleware_wraps_not_found_and_method_not_allowed () =
   let add_trace_header next request =
@@ -504,7 +511,9 @@ let test_middleware_wraps_not_found_and_method_not_allowed () =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET *> path_segment "health" *> path_end in
+          let+ () =
+            request_method_is GET *> path_segment "health" *> path_end
+          in
           fun _request -> text Status.ok "ok\n")
       |> use add_trace_header)
   in
@@ -512,8 +521,7 @@ let test_middleware_wraps_not_found_and_method_not_allowed () =
     (fixed_response ~status:Status.not_found
        ~headers:
          [
-           ("X-Trace", "router");
-           ("Content-Type", "text/plain; charset=utf-8");
+           ("X-Trace", "router"); ("Content-Type", "text/plain; charset=utf-8");
          ]
        "not found\n")
     (Halo.Router.dispatch router (request GET "/missing"));
@@ -545,7 +553,9 @@ let test_pre_middleware_can_rewrite_before_route_matching () =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET *> path_segment "health" *> path_end in
+          let+ () =
+            request_method_is GET *> path_segment "health" *> path_end
+          in
           fun request -> text Status.ok (Halo.Router.Request.raw_target request))
       |> use_pre rewrite_legacy)
   in
@@ -556,7 +566,8 @@ let test_pre_middleware_can_rewrite_before_route_matching () =
 let test_pre_middleware_can_respond_early () =
   let block_forbidden request =
     match Halo.Router.Request.raw_target request with
-    | "/forbidden" -> Halo.Router.Respond (Halo.Router.text Status.forbidden "forbidden\n")
+    | "/forbidden" ->
+        Halo.Router.Respond (Halo.Router.text Status.forbidden "forbidden\n")
     | _ -> Halo.Router.Continue
   in
   let router =
@@ -590,14 +601,16 @@ let test_pre_middleware_can_rewrite_method () =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET *> path_segment "override" *> path_end in
+          let+ () =
+            request_method_is GET *> path_segment "override" *> path_end
+          in
           fun _request -> text Status.ok "rewritten\n")
       |> use_pre method_override)
   in
   check_response "pre middleware rewrites method"
     (Halo.Router.text Status.ok "rewritten\n")
     (Halo.Router.dispatch router
-       (request ~headers:[("X-HTTP-Method-Override", "GET")] POST "/override"))
+       (request ~headers:[ ("X-HTTP-Method-Override", "GET") ] POST "/override"))
 
 let test_status_validation () =
   let expect_invalid code =
@@ -608,13 +621,17 @@ let test_status_validation () =
   in
   expect_invalid 99;
   expect_invalid 600;
-  Alcotest.(check int) "lowest valid status" 100
+  Alcotest.(check int)
+    "lowest valid status" 100
     (Status.to_int (Status.of_int_exn 100));
-  Alcotest.(check int) "highest valid status" 599
+  Alcotest.(check int)
+    "highest valid status" 599
     (Status.to_int (Status.of_int_exn 599));
-  Alcotest.(check string) "403 reason phrase" "Forbidden"
+  Alcotest.(check string)
+    "403 reason phrase" "Forbidden"
     (Status.reason_phrase Status.forbidden);
-  Alcotest.(check string) "unknown reason phrase" ""
+  Alcotest.(check string)
+    "unknown reason phrase" ""
     (Status.reason_phrase (Status.of_int_exn 599))
 
 let test_response_status_classes_are_enforced () =
@@ -628,13 +645,12 @@ let test_response_status_classes_are_enforced () =
         (Halo.Router.text Status.ok "ok"
         |> Halo.Router.with_status Status.early_hints));
   Alcotest.check_raises "informational response rejects final status"
-    (Invalid_argument "informational response status must be 1xx")
-    (fun () ->
+    (Invalid_argument "informational response status must be 1xx") (fun () ->
       ignore (Halo.Router.informational Status.ok Response_headers.empty))
 
 let test_response_header_validation () =
   let expect_invalid_name name =
-    match Response_headers.of_list [(name, "value")] with
+    match Response_headers.of_list [ (name, "value") ] with
     | Error (Response_headers.Invalid_name actual) ->
         Alcotest.(check string) "invalid header name" name actual
     | Error (Response_headers.Invalid_value _) ->
@@ -642,26 +658,33 @@ let test_response_header_validation () =
     | Ok _ -> Alcotest.failf "expected header name %S to be rejected" name
   in
   let expect_invalid_value value =
-    match Response_headers.of_list [("X-Test", value)] with
+    match Response_headers.of_list [ ("X-Test", value) ] with
     | Error (Response_headers.Invalid_value { name }) ->
         Alcotest.(check string) "invalid header value name" "X-Test" name
     | Error (Response_headers.Invalid_name _) ->
         Alcotest.fail "valid header name was rejected"
     | Ok _ -> Alcotest.failf "expected header value %S to be rejected" value
   in
-  List.iter expect_invalid_name [""; "Bad Header"; "Bad:Header"; "X\r\nInjected"];
+  List.iter expect_invalid_name
+    [ ""; "Bad Header"; "Bad:Header"; "X\r\nInjected" ];
   List.iter expect_invalid_value
-    ["safe\r\nSet-Cookie: injected=1"; "line\nfeed"; "nul\000byte"; "ctl\001"; "del\127"];
+    [
+      "safe\r\nSet-Cookie: injected=1";
+      "line\nfeed";
+      "nul\000byte";
+      "ctl\001";
+      "del\127";
+    ];
   let valid =
     Response_headers.of_list_exn
-      [("X-Token", "value\twith-tab"); ("X-Bytes", "\255")]
+      [ ("X-Token", "value\twith-tab"); ("X-Bytes", "\255") ]
   in
-  Alcotest.(check (list (pair string string))) "valid response headers"
-    [("X-Token", "value\twith-tab"); ("X-Bytes", "\255")]
+  Alcotest.(check (list (pair string string)))
+    "valid response headers"
+    [ ("X-Token", "value\twith-tab"); ("X-Bytes", "\255") ]
     (Response_headers.to_list valid);
   Alcotest.check_raises "with_header rejects response splitting"
-    (Invalid_argument "invalid value for HTTP header \"X-Test\"")
-    (fun () ->
+    (Invalid_argument "invalid value for HTTP header \"X-Test\"") (fun () ->
       ignore
         (Halo.Router.text Status.ok "ok"
         |> Halo.Router.with_header "X-Test" "safe\r\nInjected: yes"))
@@ -714,8 +737,7 @@ let () =
             test_static_before_dynamic;
           Alcotest.test_case "post route" `Quick test_post_route;
           Alcotest.test_case "scoped routes" `Quick test_scoped_routes;
-          Alcotest.test_case "scope path segment" `Quick
-            test_scope_path_segment;
+          Alcotest.test_case "scope path segment" `Quick test_scope_path_segment;
           Alcotest.test_case "request headers and body" `Quick
             test_request_headers_and_body;
           Alcotest.test_case "request multiple headers" `Quick
@@ -727,22 +749,18 @@ let () =
             test_html_sets_default_content_type;
           Alcotest.test_case "json sets default content-type" `Quick
             test_json_sets_default_content_type;
-          Alcotest.test_case "with_content_type overrides existing header" `Quick
-            test_with_content_type_overrides_existing_header;
+          Alcotest.test_case "with_content_type overrides existing header"
+            `Quick test_with_content_type_overrides_existing_header;
           Alcotest.test_case "with_header overrides case-insensitively" `Quick
             test_with_header_overrides_case_insensitively;
           Alcotest.test_case "middleware can modify response" `Quick
             test_middleware_can_modify_response;
           Alcotest.test_case "middleware can short-circuit" `Quick
             test_middleware_can_short_circuit;
-          Alcotest.test_case
-            "middleware wraps not found and method not allowed"
-            `Quick
-            test_middleware_wraps_not_found_and_method_not_allowed;
-          Alcotest.test_case
-            "pre middleware can rewrite before route matching"
-            `Quick
-            test_pre_middleware_can_rewrite_before_route_matching;
+          Alcotest.test_case "middleware wraps not found and method not allowed"
+            `Quick test_middleware_wraps_not_found_and_method_not_allowed;
+          Alcotest.test_case "pre middleware can rewrite before route matching"
+            `Quick test_pre_middleware_can_rewrite_before_route_matching;
           Alcotest.test_case "pre middleware can respond early" `Quick
             test_pre_middleware_can_respond_early;
           Alcotest.test_case "pre middleware can rewrite method" `Quick

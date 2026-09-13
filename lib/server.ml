@@ -21,13 +21,16 @@ type runtime_metrics = Server_backend.runtime_metrics = {
 }
 
 type controller_config = Server_config.controller_config
+
 type tls_minimum_protocol_version = Server_config.tls_minimum_protocol_version =
   | TLS12
   | TLS13
+
 type tls_client_auth_mode = Server_config.tls_client_auth_mode =
   | Client_auth_none
   | Client_auth_optional
   | Client_auth_required
+
 type tls_client_auth_config = Server_config.tls_client_auth_config
 type tls_config = Server_config.tls_config
 type config = Server_config.t
@@ -62,9 +65,11 @@ type running = {
 }
 
 let metrics running = Request_runtime.metrics running.dispatcher
+
 let collect_metrics running =
   ignore (metrics running);
   Metrics.snapshot running.metric_collector
+
 let shutdown running = Shutdown.request running.shutdown_control
 
 let close_runtime_or_raise runtime =
@@ -92,8 +97,7 @@ let listen runtime configs =
           Hashtbl.add listeners listener_id
             (Request_runtime.listener
                ~early_data_policy:config.early_data_policy
-               ~early_data_replay_store
-               config.router))
+               ~early_data_replay_store config.router))
     configs;
   listeners
 
@@ -130,8 +134,7 @@ let run_bridge runtime listeners shutdown shutdown_timeout_ms on_error on_ready
   Eio.Fiber.fork ~sw:bridge_switch (fun () ->
       Shutdown.await shutdown;
       Request_runtime.begin_drain dispatcher;
-      if shutdown_timeout_ms = 0 then
-        stop runtime
+      if shutdown_timeout_ms = 0 then stop runtime
       else
         Eio.Fiber.first
           (fun () -> Eio.Promise.await reactor_stopped)
@@ -154,12 +157,12 @@ let run_bridge runtime listeners shutdown shutdown_timeout_ms on_error on_ready
 
 let run ?shutdown ?(handle_sigint = true)
     ?(shutdown_timeout_ms = default_shutdown_timeout_ms)
-    ?(max_in_flight_requests = 4096) ?(command_capacity = 4096)
-    ?on_ready ?(telemetry = Telemetry.noop) ?(metrics = Metrics.noop)
-    ?(on_error = fun _request_id exn backtrace ->
-      prerr_endline (Printexc.to_string exn);
-      Printexc.print_raw_backtrace stderr backtrace)
-    configs =
+    ?(max_in_flight_requests = 4096) ?(command_capacity = 4096) ?on_ready
+    ?(telemetry = Telemetry.noop) ?(metrics = Metrics.noop)
+    ?(on_error =
+      fun _request_id exn backtrace ->
+        prerr_endline (Printexc.to_string exn);
+        Printexc.print_raw_backtrace stderr backtrace) configs =
   if shutdown_timeout_ms < 0 then
     invalid_arg "shutdown_timeout_ms must be non-negative";
   if max_in_flight_requests <= 0 then

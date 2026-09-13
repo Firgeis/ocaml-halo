@@ -5,13 +5,13 @@ type event = {
   retry_ms : int option;
 }
 
-type message =
-  | Event of event
-  | Comment of string
+type message = Event of event | Comment of string
 
 val event :
   ?event:string -> ?id:string -> ?retry_ms:int -> string list -> message
+
 val comment : string -> message
+
 val respond :
   ?headers:Router.Headers.t ->
   (send:(message -> unit) -> unit) ->

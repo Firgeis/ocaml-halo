@@ -88,8 +88,7 @@ let wait_until_listening port =
   let rec loop () =
     try Unix.close (connect_to port)
     with Unix.Unix_error ((Unix.ECONNREFUSED | Unix.EINTR), _, _) ->
-      if Unix.gettimeofday () >= deadline then
-        fail "server did not start";
+      if Unix.gettimeofday () >= deadline then fail "server did not start";
       Unix.sleepf 0.02;
       loop ()
   in
@@ -100,8 +99,7 @@ let wait_for_exit pid =
   let rec loop () =
     match Unix.waitpid [ Unix.WNOHANG ] pid with
     | 0, _ ->
-        if Unix.gettimeofday () >= deadline then
-          fail "server did not stop";
+        if Unix.gettimeofday () >= deadline then fail "server did not stop";
         Unix.sleepf 0.02;
         loop ()
     | _, status -> status
@@ -205,7 +203,12 @@ let test_large_incremental_request_body () =
   let body = String.make (1024 * 1024) 'x' in
   let request_text =
     Printf.sprintf
-      "POST /stream-length HTTP/1.1\r\nHost: localhost\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
+      "POST /stream-length HTTP/1.1\r\n\
+       Host: localhost\r\n\
+       Content-Length: %d\r\n\
+       Connection: close\r\n\
+       \r\n\
+       %s"
       (String.length body) body
   in
   check_response "1048576\n" (request request_text)

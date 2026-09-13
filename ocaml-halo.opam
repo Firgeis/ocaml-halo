@@ -2,6 +2,7 @@
 opam-version: "2.0"
 synopsis: "Fast OCaml HTTP 1.1 server"
 description: "Fast Ocaml HTTP 1.1 server with C runtime for performance"
+maintainer: ["Ezequiel Lewin <firgeis@gmail.com>"]
 authors: ["Ezequiel Lewin <firgeis@gmail.com>"]
 license: "MIT"
 homepage: "https://github.com/firge/ocaml-halo"

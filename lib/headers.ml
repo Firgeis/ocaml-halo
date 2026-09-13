@@ -5,7 +5,6 @@ type media_type = {
 }
 
 let normalize_name name = String.lowercase_ascii name
-
 let trim = String.trim
 
 let split_once character value =
@@ -22,19 +21,15 @@ let header (request : Router.request) name =
   let wanted = normalize_name name in
   request.Router.headers
   |> List.find_map (fun (header_name, value) ->
-         if String.equal (normalize_name header_name) wanted then
-           Some value
-         else
-           None)
+      if String.equal (normalize_name header_name) wanted then Some value
+      else None)
 
 let headers (request : Router.request) name =
   let wanted = normalize_name name in
   request.Router.headers
   |> List.filter_map (fun (header_name, value) ->
-         if String.equal (normalize_name header_name) wanted then
-           Some value
-         else
-           None)
+      if String.equal (normalize_name header_name) wanted then Some value
+      else None)
 
 let parse_parameter parameter =
   match split_once '=' parameter with
@@ -51,8 +46,7 @@ let parse_media_type value =
       | Some (type_, subtype) ->
           let type_ = trim type_ in
           let subtype = trim subtype in
-          if String.equal type_ "" || String.equal subtype "" then
-            None
+          if String.equal type_ "" || String.equal subtype "" then None
           else
             let parameters = List.filter_map parse_parameter parameters in
             Some { type_; subtype; parameters })

@@ -6,7 +6,8 @@
   (source_tree ../vendor/s2n-tls)
   ../scripts/build_s2n_artifact.sh
   ../scripts/resolve_libcrypto_root.sh)
- (action (run bash ../scripts/build_s2n_artifact.sh lib %{target})))
+ (action
+  (run bash ../scripts/build_s2n_artifact.sh lib %{target})))
 
 (rule
  (target dllhalo_s2n.so)
@@ -14,7 +15,8 @@
   (source_tree ../vendor/s2n-tls)
   ../scripts/build_s2n_artifact.sh
   ../scripts/resolve_libcrypto_root.sh)
- (action (run bash ../scripts/build_s2n_artifact.sh shared %{target})))
+ (action
+  (run bash ../scripts/build_s2n_artifact.sh shared %{target})))
 
 (rule
  (target s2nc)
@@ -22,7 +24,8 @@
   (source_tree ../vendor/s2n-tls)
   ../scripts/build_s2n_artifact.sh
   ../scripts/resolve_libcrypto_root.sh)
- (action (run bash ../scripts/build_s2n_artifact.sh s2nc %{target})))
+ (action
+  (run bash ../scripts/build_s2n_artifact.sh s2nc %{target})))
 
 (foreign_library
  (archive_name halo_stubs)
@@ -79,9 +82,9 @@
   uv_unix_random_getrandom
   uv_unix_random_sysctl_linux)
  (include_dirs
- ../vendor/libuv/include
- ../vendor/libuv/src
- ../vendor/libuv/src/unix
+  ../vendor/libuv/include
+  ../vendor/libuv/src
+  ../vendor/libuv/src/unix
   ../vendor/s2n-tls
   ../vendor/s2n-tls/api
   ../vendor/s2n-tls/tls

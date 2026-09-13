@@ -1,16 +1,14 @@
 let is_digit = function '0' .. '9' -> true | _ -> false
 let is_lowercase_letter = function 'a' .. 'z' -> true | _ -> false
-
-let is_lower_hex_digit = function
-  | '0' .. '9' | 'a' .. 'f' -> true
-  | _ -> false
+let is_lower_hex_digit = function '0' .. '9' | 'a' .. 'f' -> true | _ -> false
 
 let is_printable character =
   let code = Char.code character in
   code >= 0x20 && code <= 0x7e
 
 let has_valid_range value ~offset ~length =
-  offset >= 0 && length >= 0 && offset <= String.length value
+  offset >= 0 && length >= 0
+  && offset <= String.length value
   && length <= String.length value - offset
 
 let substring_for_all predicate value ~offset ~length =
@@ -18,8 +16,7 @@ let substring_for_all predicate value ~offset ~length =
   else
     let limit = offset + length in
     let rec loop index =
-      index = limit
-      || (predicate value.[index] && loop (index + 1))
+      index = limit || (predicate value.[index] && loop (index + 1))
     in
     loop offset
 
@@ -28,8 +25,7 @@ let substring_exists predicate value ~offset ~length =
   else
     let limit = offset + length in
     let rec loop index =
-      index < limit
-      && (predicate value.[index] || loop (index + 1))
+      index < limit && (predicate value.[index] || loop (index + 1))
     in
     loop offset
 

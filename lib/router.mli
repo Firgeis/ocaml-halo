@@ -14,8 +14,7 @@ module Http_method : sig
   val to_string : t -> string
 end
 
-type http_method =
-  Http_method.t =
+type http_method = Http_method.t =
   | GET
   | HEAD
   | POST
@@ -31,21 +30,20 @@ module Status : sig
   type t
   type error = Invalid_status_code of int
 
-  (** Preferred constructor for dynamically selected status codes. *)
   val of_int : int -> (t, error) result
+  (** Preferred constructor for dynamically selected status codes. *)
 
+  val of_int_exn : int -> t
   (** [of_int_exn code] raises [Invalid_argument] unless [code] is between 100
       and 599. *)
-  val of_int_exn : int -> t
 
   val to_int : t -> int
   val is_informational : t -> bool
 
-  (** [reason_phrase status] is empty for a valid unregistered status. *)
   val reason_phrase : t -> string
+  (** [reason_phrase status] is empty for a valid unregistered status. *)
 
   val error_message : error -> string
-
   val continue : t
   val switching_protocols : t
   val processing : t
@@ -115,21 +113,19 @@ end
     characters. *)
 module Headers : sig
   type t
-
-  type error =
-    | Invalid_name of string
-    | Invalid_value of { name : string }
+  type error = Invalid_name of string | Invalid_value of { name : string }
 
   val empty : t
 
-  (** Default response headers for a server-sent event stream. *)
   val sse_defaults : t
+  (** Default response headers for a server-sent event stream. *)
 
-  (** Preferred constructor when fields are not already validated. *)
   val of_list : (string * string) list -> (t, error) result
+  (** Preferred constructor when fields are not already validated. *)
 
-  (** [of_list_exn fields] raises [Invalid_argument] on the first invalid field. *)
   val of_list_exn : (string * string) list -> t
+  (** [of_list_exn fields] raises [Invalid_argument] on the first invalid field.
+  *)
 
   val to_list : t -> (string * string) list
   val add : string -> string -> t -> (t, error) result
@@ -144,16 +140,9 @@ module Headers : sig
 end
 
 type request_target =
-  | Origin of {
-      path : string;
-      query : string option;
-    }
-  | Absolute of {
-      uri : string;
-    }
-  | Authority of {
-      authority : string;
-    }
+  | Origin of { path : string; query : string option }
+  | Absolute of { uri : string }
+  | Authority of { authority : string }
   | Asterisk
 
 type request = {
@@ -195,20 +184,20 @@ type response_body =
   | Fixed_body of string
   | Stream_body of (yield:(string -> unit) -> unit)
 
-(** An HTTP response whose status and headers have been validated. *)
 type response
+(** An HTTP response whose status and headers have been validated. *)
 
-(** A validated 1xx response. *)
 type informational_response
+(** A validated 1xx response. *)
 
 type response_outcome =
   | Completed
   | Aborted of exn * Printexc.raw_backtrace
   | Client_disconnected
-(** The terminal transport outcome of a response. [Completed] means the final
-    response write completed. [Aborted] means Halo aborted a committed stream
-    after a producer failure. [Client_disconnected] means the peer or transport
-    disappeared before the response completed. *)
+      (** The terminal transport outcome of a response. [Completed] means the
+          final response write completed. [Aborted] means Halo aborted a
+          committed stream after a producer failure. [Client_disconnected] means
+          the peer or transport disappeared before the response completed. *)
 
 module Response : sig
   type t = response
@@ -240,6 +229,7 @@ module Request : sig
   val raw_target : t -> string
   val target : t -> request_target
   val body : t -> Body.t
+
   val http_version : t -> int * int
   (** The HTTP protocol major and minor version received on the wire. Raises
       [Invalid_argument] for a synthetic request passed to [dispatch]. *)
@@ -251,6 +241,7 @@ module Request : sig
   val remote_address : t -> Unix.sockaddr
   val local_address : t -> Unix.sockaddr
   val is_tls : t -> bool
+
   val tls : t -> tls_info option
   (** [tls request] is [None] for plaintext and synthetic requests. *)
 
@@ -264,26 +255,22 @@ module Request : sig
 
   val on_response_terminated : t -> (response_outcome -> unit) -> unit
   (** Register a callback that runs exactly once when the response reaches a
-      terminal transport outcome. This includes buffered responses and
-      streams, and the callback may run after the handler has returned. *)
+      terminal transport outcome. This includes buffered responses and streams,
+      and the callback may run after the handler has returned. *)
 
   val header : t -> string -> string option
   val headers : t -> string -> string list
   val fold_headers : t -> init:'a -> f:('a -> string -> string -> 'a) -> 'a
   val copy_headers : t -> (string * string) list
 
+  val materialize : t -> request
   (** Copy request metadata and consume the unread request body. Body bytes
       already returned by [Body.read] are not included. *)
-  val materialize : t -> request
 end
 
 type handler = Request.t -> response
 type middleware = handler -> handler
-type pre_result =
-  | Continue
-  | Respond of response
-  | Rewrite of request_patch
-
+type pre_result = Continue | Respond of response | Rewrite of request_patch
 type pre_middleware = Request.t -> pre_result
 type t
 
@@ -302,26 +289,28 @@ module Matcher : sig
   val ( and+ ) : 'a t -> 'b t -> ('a * 'b) t
   val ( <*> ) : ('a -> 'b) t -> 'a t -> 'b t
 
-  (** [left *> right] runs [left], discards its value, then runs [right]. *)
   val ( *> ) : 'a t -> 'b t -> 'b t
+  (** [left *> right] runs [left], discards its value, then runs [right]. *)
 
+  val ( <* ) : 'a t -> 'b t -> 'a t
   (** [left <* right] runs [left], then [right], and discards the value from
       [right]. *)
-  val ( <* ) : 'a t -> 'b t -> 'a t
 
   val request_method_is : http_method -> unit t
 
-  (** Match one path segment. The initial slash is not a segment, while empty
-      segments created by repeated or trailing slashes are significant. The
-      root path [/] has no segments. *)
   val path_segment : string -> unit t
+  (** Match one path segment. The initial slash is not a segment, while empty
+      segments created by repeated or trailing slashes are significant. The root
+      path [/] has no segments. *)
+
   val string_parameter : string t
   val int_parameter : int t
 
-  (** Query parameter names and values are percent-decoded as URI octets per
-      RFC 3986. A literal [+] remains [+]; form-urlencoded decoding is a
-      separate convention. Invalid URI encoding produces [400 Bad Request]. *)
   val queryparam : string -> string option t
+  (** Query parameter names and values are percent-decoded as URI octets per RFC
+      3986. A literal [+] remains [+]; form-urlencoded decoding is a separate
+      convention. Invalid URI encoding produces [400 Bad Request]. *)
+
   val queryparams : string -> string list t
   val queryparam_required : string -> string t
   val int_queryparam : string -> int option t
@@ -330,10 +319,11 @@ module Matcher : sig
   val require_body : unit t
 end
 
+val route : ?template:string -> handler Matcher.t -> t
 (** [route ~template matcher] associates the matched route with a stable,
     low-cardinality template such as [/users/{id}]. Telemetry backends receive
     this value as [http.route]. Do not pass the request's concrete path. *)
-val route : ?template:string -> handler Matcher.t -> t
+
 val scope : unit Matcher.t -> t -> t
 val scope_path_segment : string -> t -> t
 val use_pre : pre_middleware -> t -> t
@@ -362,23 +352,26 @@ module Runtime : sig
     response
 end
 
+val make : ?headers:Headers.t -> status:Status.t -> string -> response
 (** Final-response constructors and modifiers raise [Invalid_argument] when
     given an informational status. *)
-val make : ?headers:Headers.t -> status:Status.t -> string -> response
+
 val with_status : Status.t -> response -> response
 val with_headers : Headers.t -> response -> response
 
+val with_header : string -> string -> response -> response
 (** [with_header name value response] replaces fields named [name]
     case-insensitively. It raises [Invalid_argument] for an invalid field. *)
-val with_header : string -> string -> response -> response
 
-(** [informational status headers] raises [Invalid_argument] unless [status]
-    is in the 1xx class. *)
 val informational : Status.t -> Headers.t -> informational_response
+(** [informational status headers] raises [Invalid_argument] unless [status] is
+    in the 1xx class. *)
+
 val with_content_type : string -> response -> response
 val text : Status.t -> string -> response
 val html : Status.t -> string -> response
 val json : Status.t -> string -> response
+
 val stream :
   ?headers:Headers.t ->
   status:Status.t ->

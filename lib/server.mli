@@ -1,10 +1,10 @@
+(** A thread-safe shutdown signal. *)
 module Shutdown : sig
   type t
 
   val create : unit -> t
   val request : t -> unit
 end
-(** A thread-safe shutdown signal. *)
 
 type controller_state = Server_backend.controller_state =
   | Normal
@@ -29,13 +29,16 @@ type runtime_metrics = Server_backend.runtime_metrics = {
 }
 
 type controller_config = Server_config.controller_config
+
 type tls_minimum_protocol_version = Server_config.tls_minimum_protocol_version =
   | TLS12
   | TLS13
+
 type tls_client_auth_mode = Server_config.tls_client_auth_mode =
   | Client_auth_none
   | Client_auth_optional
   | Client_auth_required
+
 type tls_client_auth_config = Server_config.tls_client_auth_config
 type tls_config = Server_config.tls_config
 type config = Server_config.t
@@ -77,9 +80,9 @@ val run :
     fiber. [on_ready] runs in a child fiber after listeners are bound.
 
     On shutdown, Halo closes its listeners and idle connections, lets active
-    requests and responses drain, and then force-closes anything remaining
-    after [shutdown_timeout_ms]. The default is
-    [default_shutdown_timeout_ms]. Zero requests an immediate force-stop.
+    requests and responses drain, and then force-closes anything remaining after
+    [shutdown_timeout_ms]. The default is [default_shutdown_timeout_ms]. Zero
+    requests an immediate force-stop.
 
     [telemetry] receives each request's full lifecycle, from the first plaintext
     byte observed by the C reactor through the terminal response write or

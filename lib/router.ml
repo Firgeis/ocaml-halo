@@ -34,8 +34,7 @@ module Http_method = struct
     | TRACE -> "TRACE"
 end
 
-type http_method =
-  Http_method.t =
+type http_method = Http_method.t =
   | GET
   | HEAD
   | POST
@@ -196,10 +195,7 @@ end
 
 module Headers = struct
   type t = (string * string) list
-
-  type error =
-    | Invalid_name of string
-    | Invalid_value of { name : string }
+  type error = Invalid_name of string | Invalid_value of { name : string }
 
   let is_tchar = function
     | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_'
@@ -289,16 +285,9 @@ module Headers = struct
 end
 
 type request_target =
-  | Origin of {
-      path : string;
-      query : string option;
-    }
-  | Absolute of {
-      uri : string;
-    }
-  | Authority of {
-      authority : string;
-    }
+  | Origin of { path : string; query : string option }
+  | Absolute of { uri : string }
+  | Authority of { authority : string }
   | Asterisk
 
 type request = {
@@ -335,16 +324,8 @@ type response_body =
   | Fixed_body of string
   | Stream_body of (yield:(string -> unit) -> unit)
 
-type response = {
-  status : Status.t;
-  headers : Headers.t;
-  body : response_body;
-}
-
-type informational_response = {
-  status : Status.t;
-  headers : Headers.t;
-}
+type response = { status : Status.t; headers : Headers.t; body : response_body }
+type informational_response = { status : Status.t; headers : Headers.t }
 
 type response_outcome =
   | Completed
@@ -398,23 +379,10 @@ type request_view = {
 
 type handler = request_view -> response
 type middleware = handler -> handler
-
-type pre_result =
-  | Continue
-  | Respond of response
-  | Rewrite of request_patch
-
+type pre_result = Continue | Respond of response | Rewrite of request_patch
 type pre_middleware = request_view -> pre_result
-
-type path_state = {
-  segments : string array;
-  index : int;
-}
-
-type queryparam = {
-  name : string;
-  value : string;
-}
+type path_state = { segments : string array; index : int }
+type queryparam = { name : string; value : string }
 
 type input = {
   request_view : request_view;
@@ -429,11 +397,7 @@ type route_match =
   | Route_rejected of response * middleware list * string option
   | Route_missing
 
-type route_eval = {
-  route_match : route_match;
-  effective_input : input;
-}
-
+type route_eval = { route_match : route_match; effective_input : input }
 type route_result = input -> route_eval
 
 type t = {
@@ -451,42 +415,33 @@ let header_from_list headers wanted =
   let wanted = normalize_header_name wanted in
   List.find_map
     (fun (name, value) ->
-      if String.equal (normalize_header_name name) wanted then
-        Some value
-      else
-        None)
+      if String.equal (normalize_header_name name) wanted then Some value
+      else None)
     headers
 
 let headers_from_list headers wanted =
   let wanted = normalize_header_name wanted in
   List.filter_map
     (fun (name, value) ->
-      if String.equal (normalize_header_name name) wanted then
-        Some value
-      else
-        None)
+      if String.equal (normalize_header_name name) wanted then Some value
+      else None)
     headers
 
 let queryparam_from_list queryparams wanted =
   List.find_map
     (fun queryparam ->
-      if String.equal queryparam.name wanted then
-        Some queryparam.value
-      else
-        None)
+      if String.equal queryparam.name wanted then Some queryparam.value
+      else None)
     queryparams
 
 let queryparams_from_list queryparams wanted =
   List.filter_map
     (fun queryparam ->
-      if String.equal queryparam.name wanted then
-        Some queryparam.value
-      else
-        None)
+      if String.equal queryparam.name wanted then Some queryparam.value
+      else None)
     queryparams
 
 let http_method_of_string = Http_method.of_string
-
 let string_of_http_method = Http_method.to_string
 
 let string_of_tls_protocol_version = function
@@ -496,8 +451,7 @@ let string_of_tls_protocol_version = function
   | TLS_1_1 -> "TLSv1.1"
   | TLS_1_2 -> "TLSv1.2"
   | TLS_1_3 -> "TLSv1.3"
-  | Unknown_tls_protocol_version version ->
-      Printf.sprintf "unknown(%d)" version
+  | Unknown_tls_protocol_version version -> Printf.sprintf "unknown(%d)" version
 
 let parse_request_target request_method raw_target =
   match raw_target with
@@ -540,9 +494,9 @@ module Req = struct
     | Target -> request_view.target
     | Body -> Body.read_all request_view.context.body
     | Copy_headers -> request_view.headers
-    | Materialize ->
+    | Materialize -> (
         let request_method_text = eval request_view Request_method_text in
-        (match http_method_of_string request_method_text with
+        match http_method_of_string request_method_text with
         | Some request_method ->
             {
               request_method;
@@ -556,28 +510,18 @@ module Req = struct
 end
 
 let split_path path =
-  if String.equal path "" || String.equal path "/" then
-    [||]
+  if String.equal path "" || String.equal path "/" then [||]
   else
     let offset = if path.[0] = '/' then 1 else 0 in
     String.sub path offset (String.length path - offset)
-    |> String.split_on_char '/'
-    |> Array.of_list
+    |> String.split_on_char '/' |> Array.of_list
 
-let is_alpha = function
-  | 'A' .. 'Z' | 'a' .. 'z' -> true
-  | _ -> false
-
-let is_digit = function
-  | '0' .. '9' -> true
-  | _ -> false
+let is_alpha = function 'A' .. 'Z' | 'a' .. 'z' -> true | _ -> false
+let is_digit = function '0' .. '9' -> true | _ -> false
 
 let is_hexdig character =
   is_digit character
-  ||
-  match character with
-  | 'A' .. 'F' | 'a' .. 'f' -> true
-  | _ -> false
+  || match character with 'A' .. 'F' | 'a' .. 'f' -> true | _ -> false
 
 let is_unreserved = function
   | '-' | '.' | '_' | '~' -> true
@@ -588,16 +532,13 @@ let is_sub_delim = function
   | _ -> false
 
 let is_pchar character =
-  is_unreserved character
-  || is_sub_delim character
-  || character = ':'
+  is_unreserved character || is_sub_delim character || character = ':'
   || character = '@'
 
 let validate_encoded_component ~is_literal_allowed value =
   let length = String.length value in
   let rec scan_from index =
-    if index = length then
-      true
+    if index = length then true
     else
       match value.[index] with
       | '%' ->
@@ -613,7 +554,7 @@ let validate_path path =
   String.length path > 0
   && path.[0] = '/'
   && validate_encoded_component path ~is_literal_allowed:(fun character ->
-         character = '/' || is_pchar character)
+      character = '/' || is_pchar character)
 
 let validate_query query =
   validate_encoded_component query ~is_literal_allowed:(fun character ->
@@ -633,12 +574,10 @@ let parse_queryparam_piece piece =
 let parse_queryparams = function
   | Origin { query = Some query; _ } ->
       if validate_query query then
-        query
-        |> String.split_on_char '&'
+        query |> String.split_on_char '&'
         |> List.filter (fun piece -> piece <> "")
         |> List.map parse_queryparam_piece
-      else
-        []
+      else []
   | Origin { query = None; _ } | Absolute _ | Authority _ | Asterisk -> []
 
 let validate_request_target = function
@@ -650,14 +589,14 @@ let split_target = function
   | Origin { path; _ } -> split_path path
   | Absolute _ | Authority _ | Asterisk -> [||]
 
-let materialize_request request_view =
-  Req.eval request_view Req.materialize
+let materialize_request request_view = Req.eval request_view Req.materialize
 
 let input_of_request_view request_view =
   {
     request_view;
     request_method = Req.eval request_view Req.request_method;
-    path = { segments = split_target (Req.eval request_view Req.target); index = 0 };
+    path =
+      { segments = split_target (Req.eval request_view Req.target); index = 0 };
     queryparams = parse_queryparams (Req.eval request_view Req.target);
     valid_target = validate_request_target (Req.eval request_view Req.target);
   }
@@ -699,18 +638,10 @@ let apply_request_patch (request_view : request_view) (patch : request_patch) =
 module Request = struct
   type t = request_view
 
-  let request_method_text request =
-    Req.eval request Req.request_method_text
-
-  let request_method request =
-    Req.eval request Req.request_method
-
-  let raw_target request =
-    Req.eval request Req.Raw_target
-
-  let target request =
-    Req.eval request Req.Target
-
+  let request_method_text request = Req.eval request Req.request_method_text
+  let request_method request = Req.eval request Req.request_method
+  let raw_target request = Req.eval request Req.Raw_target
+  let target request = Req.eval request Req.Target
   let body request = request.context.body
 
   let http_version request =
@@ -726,19 +657,20 @@ module Request = struct
 
   let remote_address request = (connection_info request).remote_address
   let local_address request = (connection_info request).local_address
+
   let tls request =
     match request.context.connection_info with
     | Some connection_info -> connection_info.tls
     | None -> None
 
   let is_tls request = Option.is_some (tls request)
-
   let is_early_data request = request.context.is_early_data
 
   let switch request =
     match request.context.request_switch with
     | Some switch -> switch
-    | None -> invalid_arg "request switch is unavailable outside a server handler"
+    | None ->
+        invalid_arg "request switch is unavailable outside a server handler"
 
   let id request =
     match request.context.request_id with
@@ -754,25 +686,14 @@ module Request = struct
     request.context.on_response_terminated callback
 
   let header request name = header_from_list request.headers name
-
   let headers request name = headers_from_list request.headers name
-
-  let fold_headers request ~init ~f =
-    fold_header_list request.headers ~init ~f
-
-  let copy_headers request =
-    Req.eval request Req.Copy_headers
-
-  let materialize request =
-    materialize_request request
+  let fold_headers request ~init ~f = fold_header_list request.headers ~init ~f
+  let copy_headers request = Req.eval request Req.Copy_headers
+  let materialize request = materialize_request request
 end
 
 module Matcher = struct
-  type 'a match_result =
-    | Match of 'a * input
-    | Reject of response
-    | No_match
-
+  type 'a match_result = Match of 'a * input | Reject of response | No_match
   type 'a t = input -> 'a match_result
 
   let pure value input = Match (value, input)
@@ -785,17 +706,15 @@ module Matcher = struct
 
   let both left right input =
     match left input with
-    | Match (left_value, next) ->
-        (match right next with
+    | Match (left_value, next) -> (
+        match right next with
         | Match (right_value, final) -> Match ((left_value, right_value), final)
         | Reject response -> Reject response
         | No_match -> No_match)
     | Reject response -> Reject response
     | No_match -> No_match
 
-  let apply mf mx =
-    map (fun (f, x) -> f x) (both mf mx)
-
+  let apply mf mx = map (fun (f, x) -> f x) (both mf mx)
   let ( let+ ) matcher f = map f matcher
   let ( and+ ) left right = both left right
   let ( <*> ) = apply
@@ -817,26 +736,19 @@ module Matcher = struct
     | No_match -> No_match
 
   let request_method_is expected input =
-    if input.request_method = Some expected then
-      Match ((), input)
-    else
-      No_match
+    if input.request_method = Some expected then Match ((), input) else No_match
 
   let next_segment input =
-    if input.path.index >= Array.length input.path.segments then
-      None
-    else
-      Some input.path.segments.(input.path.index)
+    if input.path.index >= Array.length input.path.segments then None
+    else Some input.path.segments.(input.path.index)
 
   let advance input =
-    {
-      input with
-      path = { input.path with index = input.path.index + 1 };
-    }
+    { input with path = { input.path with index = input.path.index + 1 } }
 
   let path_segment expected input =
     match next_segment input with
-    | Some segment when String.equal segment expected -> Match ((), advance input)
+    | Some segment when String.equal segment expected ->
+        Match ((), advance input)
     | _ -> No_match
 
   let string_parameter input =
@@ -878,10 +790,8 @@ module Matcher = struct
     | None -> No_match
 
   let path_end input =
-    if input.path.index = Array.length input.path.segments then
-      Match ((), input)
-    else
-      No_match
+    if input.path.index = Array.length input.path.segments then Match ((), input)
+    else No_match
 
   let require_body input =
     let has_defined_length =
@@ -892,15 +802,14 @@ module Matcher = struct
           || String.equal name "transfer-encoding")
         input.request_view.raw_headers
     in
-    if has_defined_length then
-      Match ((), input)
+    if has_defined_length then Match ((), input)
     else
       Reject
         {
           status = Status.length_required;
           headers =
             Headers.of_list_exn
-              [("Content-Type", "text/plain; charset=utf-8")];
+              [ ("Content-Type", "text/plain; charset=utf-8") ];
           body = Fixed_body "length required\n";
         }
 end
@@ -911,15 +820,17 @@ let to_route_result template matcher input =
     | Matcher.Match (handler, final)
       when final.path.index = Array.length final.path.segments ->
         Route_matched (handler, [], template)
-    | Matcher.Reject response ->
-        Route_rejected (response, [], template)
-    | Matcher.Match _ | Matcher.No_match ->
-        Route_missing
+    | Matcher.Reject response -> Route_rejected (response, [], template)
+    | Matcher.Match _ | Matcher.No_match -> Route_missing
   in
   { route_match; effective_input = input }
 
 let route ?template matcher =
-  { run = to_route_result template matcher; middleware = []; pre_middleware = [] }
+  {
+    run = to_route_result template matcher;
+    middleware = [];
+    pre_middleware = [];
+  }
 
 let attach_middleware middleware = function
   | Route_matched (handler, existing, template) ->
@@ -929,36 +840,35 @@ let attach_middleware middleware = function
   | Route_missing -> Route_missing
 
 let attach_middleware_eval middleware evaluation =
-  { evaluation with route_match = attach_middleware middleware evaluation.route_match }
+  {
+    evaluation with
+    route_match = attach_middleware middleware evaluation.route_match;
+  }
 
-type pre_run_result =
-  | Pre_continue
-  | Pre_respond of response
+type pre_run_result = Pre_continue | Pre_respond of response
 
 let rec run_pre_middleware middleware request_view rewritten =
   match middleware with
-  | [] -> Pre_continue, request_view, rewritten
+  | [] -> (Pre_continue, request_view, rewritten)
   | middleware :: rest -> (
       match middleware request_view with
       | Continue -> run_pre_middleware rest request_view rewritten
-      | Respond response -> Pre_respond response, request_view, rewritten
+      | Respond response -> (Pre_respond response, request_view, rewritten)
       | Rewrite patch ->
           let rewritten_request = apply_request_patch request_view patch in
           run_pre_middleware rest rewritten_request true)
 
 let run_router router input =
-  match router.pre_middleware, router.middleware with
+  match (router.pre_middleware, router.middleware) with
   | [], [] -> router.run input
-  | _ ->
+  | _ -> (
       let pre_result, request_view, rewritten =
-        run_pre_middleware (List.rev router.pre_middleware) input.request_view
-          false
+        run_pre_middleware
+          (List.rev router.pre_middleware)
+          input.request_view false
       in
       let effective_input =
-        if rewritten then
-          input_of_request_view request_view
-        else
-          input
+        if rewritten then input_of_request_view request_view else input
       in
       match pre_result with
       | Pre_respond response ->
@@ -968,6 +878,7 @@ let run_router router input =
           }
       | Pre_continue ->
           router.run effective_input |> attach_middleware_eval router.middleware
+      )
 
 let scope prefix_matcher router =
   let run input =
@@ -994,14 +905,15 @@ let use middleware router =
 
 let empty =
   {
-    run = (fun input -> { route_match = Route_missing; effective_input = input });
+    run =
+      (fun input -> { route_match = Route_missing; effective_input = input });
     middleware = [];
     pre_middleware = [];
   }
 
 let run_or_else left right input =
   match run_router left input with
-  | ({ route_match = Route_matched _ | Route_rejected _; _ } as evaluation) ->
+  | { route_match = Route_matched _ | Route_rejected _; _ } as evaluation ->
       evaluation
   | { route_match = Route_missing; _ } -> run_router right input
 
@@ -1010,13 +922,14 @@ let or_else left right =
 
 let ( <|> ) = or_else
 
-let all_http_methods = [GET; HEAD; POST; PATCH; PUT; DELETE; CONNECT; OPTIONS; TRACE]
+let all_http_methods =
+  [ GET; HEAD; POST; PATCH; PUT; DELETE; CONNECT; OPTIONS; TRACE ]
 
 let not_found_response () =
   {
     status = Status.not_found;
     headers =
-      Headers.of_list_exn [("Content-Type", "text/plain; charset=utf-8")];
+      Headers.of_list_exn [ ("Content-Type", "text/plain; charset=utf-8") ];
     body = Fixed_body "not found\n";
   }
 
@@ -1024,7 +937,7 @@ let bad_request_response () =
   {
     status = Status.bad_request;
     headers =
-      Headers.of_list_exn [("Content-Type", "text/plain; charset=utf-8")];
+      Headers.of_list_exn [ ("Content-Type", "text/plain; charset=utf-8") ];
     body = Fixed_body "bad request\n";
   }
 
@@ -1035,7 +948,8 @@ let method_not_allowed_response allowed_methods =
       Headers.of_list_exn
         [
           ( "Allow",
-            String.concat ", " (List.map string_of_http_method allowed_methods) );
+            String.concat ", " (List.map string_of_http_method allowed_methods)
+          );
           ("Content-Type", "text/plain; charset=utf-8");
         ];
     body = Fixed_body "method not allowed\n";
@@ -1043,24 +957,23 @@ let method_not_allowed_response allowed_methods =
 
 let allowed_methods_for_path router input =
   let matches_method method_ =
-    match (router.run { input with request_method = Some method_ }).route_match with
+    match
+      (router.run { input with request_method = Some method_ }).route_match
+    with
     | Route_matched _ | Route_rejected _ -> true
     | Route_missing -> false
   in
-  all_http_methods
-  |> List.filter matches_method
+  all_http_methods |> List.filter matches_method
 
 let apply_middleware middleware handler =
   List.fold_right (fun wrap next -> wrap next) middleware handler
 
 let dispatch_from_input ?(on_route = fun _template -> ()) router input =
-  if not input.valid_target then
-    bad_request_response ()
+  if not input.valid_target then bad_request_response ()
   else
     let evaluation = run_router router input in
     let effective_input = evaluation.effective_input in
-    if not effective_input.valid_target then
-      bad_request_response ()
+    if not effective_input.valid_target then bad_request_response ()
     else
       let fallback_handler _request =
         match effective_input.request_method with
@@ -1076,7 +989,8 @@ let dispatch_from_input ?(on_route = fun _template -> ()) router input =
           apply_middleware middleware handler effective_input.request_view
       | Route_rejected (response, middleware, template) ->
           Option.iter on_route template;
-          apply_middleware middleware (fun _request -> response)
+          apply_middleware middleware
+            (fun _request -> response)
             effective_input.request_view
       | Route_missing ->
           apply_middleware router.middleware fallback_handler
@@ -1121,9 +1035,10 @@ let dispatch router (request : request) =
     }
 
 module Runtime = struct
-  let dispatch ?on_route router (request : request) ~raw_headers ~body ~http_major
-      ~http_minor ~connection_info ~is_early_data ~request_id ~request_switch
-      ~send_informational ~on_disconnect ~on_response_terminated =
+  let dispatch ?on_route router (request : request) ~raw_headers ~body
+      ~http_major ~http_minor ~connection_info ~is_early_data ~request_id
+      ~request_switch ~send_informational ~on_disconnect ~on_response_terminated
+      =
     let request_view =
       {
         request_method_text = string_of_http_method request.request_method;
@@ -1177,15 +1092,14 @@ let with_header name value (response : response) =
 let informational status headers =
   if not (Status.is_informational status) then
     invalid_arg "informational response status must be 1xx"
-  else
-    { status; headers }
+  else { status; headers }
 
 let with_content_type content_type (response : response) =
   with_header "Content-Type" content_type response
 
 let response_with_content_type status content_type body =
   make ~status
-    ~headers:(Headers.of_list_exn [("Content-Type", content_type)])
+    ~headers:(Headers.of_list_exn [ ("Content-Type", content_type) ])
     body
 
 let text status body =

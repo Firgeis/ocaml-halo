@@ -3,8 +3,7 @@ open Bridge_backend
 
 module Http = struct
   let response_version http_major http_minor =
-    if http_major = 1 then Printf.sprintf "HTTP/1.%d" http_minor
-    else "HTTP/1.1"
+    if http_major = 1 then Printf.sprintf "HTTP/1.%d" http_minor else "HTTP/1.1"
 
   let status_forbids_body status =
     let code = Router.Status.to_int status in
@@ -37,16 +36,20 @@ module Http = struct
     Buffer.add_string buffer
       (Printf.sprintf "%s %d %s\r\n"
          (response_version http_major http_minor)
-         status_code (Router.Status.reason_phrase status));
-    Router.Headers.iter (fun name value -> add_header buffer (name, value)) headers;
+         status_code
+         (Router.Status.reason_phrase status));
+    Router.Headers.iter
+      (fun name value -> add_header buffer (name, value))
+      headers;
     add_connection_header buffer ~http_major ~http_minor ~keep_alive;
     buffer
 
   let serialize_response ~request_method ~http_major ~http_minor ~keep_alive
       ~status ~headers ~body =
     let buffer =
-      serialize_head ~capacity:(String.length body + 256) ~status ~headers
-        ~http_major ~http_minor ~keep_alive
+      serialize_head
+        ~capacity:(String.length body + 256)
+        ~status ~headers ~http_major ~http_minor ~keep_alive
     in
     if not (status_forbids_body status) then
       Buffer.add_string buffer
@@ -64,7 +67,8 @@ module Http = struct
     | Router.Fixed_body body ->
         serialize_response ~request_method ~http_major ~http_minor ~keep_alive
           ~status:(Router.Response.status response)
-          ~headers:(Router.Response.headers response) ~body
+          ~headers:(Router.Response.headers response)
+          ~body
     | Router.Stream_body _ -> invalid_arg "expected a fixed response"
 
   let serialize_informational ~http_major ~http_minor
@@ -72,7 +76,8 @@ module Http = struct
     serialize_response ~request_method:"GET" ~http_major ~http_minor
       ~keep_alive:true
       ~status:(Router.Informational_response.status response)
-      ~headers:(Router.Informational_response.headers response) ~body:""
+      ~headers:(Router.Informational_response.headers response)
+      ~body:""
 
   let serialize_stream_head ~request_method ~http_major ~http_minor ~keep_alive
       (response : Router.response) =
@@ -83,8 +88,8 @@ module Http = struct
       invalid_arg "streamed responses require a response body";
     let buffer =
       serialize_head ~capacity:256 ~status
-        ~headers:(Router.Response.headers response) ~http_major ~http_minor
-        ~keep_alive
+        ~headers:(Router.Response.headers response)
+        ~http_major ~http_minor ~keep_alive
     in
     Buffer.add_string buffer "Transfer-Encoding: chunked\r\n\r\n";
     Buffer.contents buffer
@@ -167,7 +172,9 @@ type t = {
   requests : (int64, request_state) Hashtbl.t;
   connection_infos : (int64, Router.connection_info) Hashtbl.t;
   metrics_waiters :
-    (int64, (Server_backend.runtime_metrics, exn) result Eio.Promise.u) Hashtbl.t;
+    ( int64,
+      (Server_backend.runtime_metrics, exn) result Eio.Promise.u )
+    Hashtbl.t;
   mutable next_metrics_query : int64;
   mutable draining : bool;
   listeners : (int64, listener) Hashtbl.t;
@@ -289,17 +296,14 @@ let dispatch_request listener (event : Reactor.request_event) state body
       let on_route =
         if state.observability_enabled then
           Some (fun template -> state.telemetry_route <- Some template)
-        else
-          None
+        else None
       in
       Eio.Switch.run ~name:"halo-request" @@ fun request_switch ->
       Router.Runtime.dispatch ?on_route listener.router request
-        ~raw_headers:event.raw_headers ~body
-        ~http_major:event.http_major ~http_minor:event.http_minor
-        ~connection_info
+        ~raw_headers:event.raw_headers ~body ~http_major:event.http_major
+        ~http_minor:event.http_minor ~connection_info
         ~is_early_data:event.is_early_data ~request_id:event.request_id
-        ~request_switch ~send_informational
-        ~on_disconnect:(on_disconnect state)
+        ~request_switch ~send_informational ~on_disconnect:(on_disconnect state)
         ~on_response_terminated:(on_response_terminated state)
 
 let handle_request listener (event : Reactor.request_event) state body
@@ -315,13 +319,13 @@ let handle_request listener (event : Reactor.request_event) state body
     send_response response
   with
   | exn when is_disconnect_exception exn -> completed := true
-  | exn ->
+  | exn -> (
       let backtrace = Printexc.get_raw_backtrace () in
       on_error event.request_id exn backtrace;
       if not !sent then
-        (try send_fixed Http.internal_server_error
-         with disconnect when is_disconnect_exception disconnect ->
-           completed := true)
+        try send_fixed Http.internal_server_error
+        with disconnect when is_disconnect_exception disconnect ->
+          completed := true)
 
 let run_handler runtime requests listener (event : Reactor.request_event) state
     ~connection_info ~is_draining on_error =
@@ -330,7 +334,7 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
   let sent = ref false in
   let body = make_body runtime state ~body_expected:event.body_expected in
   let keep_alive () =
-    event.keep_alive && not (is_draining ()) && Body.is_complete body
+    event.keep_alive && (not (is_draining ())) && Body.is_complete body
   in
   let await_response_completion () =
     match Eio.Promise.await state.completion with
@@ -442,12 +446,11 @@ let start_request t (event : Reactor.request_event) =
     match event.connection_info with
     | Some connection_info ->
         if event.connection_id <> 0L then
-          Hashtbl.replace t.connection_infos event.connection_id
-            connection_info;
+          Hashtbl.replace t.connection_infos event.connection_id connection_info;
         Some connection_info
     | None -> Hashtbl.find_opt t.connection_infos event.connection_id
   in
-  match connection_info, Hashtbl.find_opt t.listeners event.listener_id with
+  match (connection_info, Hashtbl.find_opt t.listeners event.listener_id) with
   | None, _ ->
       let exn =
         Reactor.Runtime_error "request connection metadata is missing"
@@ -476,15 +479,17 @@ let start_request t (event : Reactor.request_event) =
           request_body_size = 0L;
           response_body_size = 0L;
           observability_enabled =
-            (Telemetry.Lifecycle.enabled t.telemetry
-            || Metrics.Private.enabled t.metrics);
+            Telemetry.Lifecycle.enabled t.telemetry
+            || Metrics.Private.enabled t.metrics;
         }
       in
       Hashtbl.replace t.requests event.request_id state;
       Eio.Fiber.fork ~sw:t.bridge_switch (fun () ->
           let run_handler () =
             run_handler t.runtime t.requests listener event state
-              ~connection_info ~is_draining:(fun () -> t.draining) t.on_error
+              ~connection_info
+              ~is_draining:(fun () -> t.draining)
+              t.on_error
           in
           let metrics_request =
             Metrics.Private.start_request t.metrics ~method_:event.method_text
@@ -509,8 +514,7 @@ let start_request t (event : Reactor.request_event) =
               ~request_body_size:state.request_body_size
               ~response_body_size:state.response_body_size
           in
-          if not state.observability_enabled then
-            run_handler ()
+          if not state.observability_enabled then run_handler ()
           else
             let telemetry_span =
               Telemetry.Lifecycle.start_server_request t.telemetry
@@ -550,13 +554,14 @@ let replay_claim store (event : Reactor.replay_claim_event) =
       (fun () ->
         Eio_unix.sleep (Store.timeout_seconds store);
         Store.Unavailable)
-      (fun () -> Store.claim store ~identity:event.identity ~ttl_secs:event.ttl_secs)
+      (fun () ->
+        Store.claim store ~identity:event.identity ~ttl_secs:event.ttl_secs)
   with
   | Eio.Cancel.Cancelled _ as exn -> raise exn
   | exn ->
-    Reactor.trace "replay store failed claim=%Ld: %s" event.claim_id
-      (Printexc.to_string exn);
-    Store.Unavailable
+      Reactor.trace "replay store failed claim=%Ld: %s" event.claim_id
+        (Printexc.to_string exn);
+      Store.Unavailable
 
 let start_replay_claim t (event : Reactor.replay_claim_event) =
   let accept =
@@ -605,8 +610,7 @@ let observe_pre_dispatch_response t
                 method_ = event.method_text;
                 target = event.target;
                 headers = event.headers;
-                remote_parent =
-                  Telemetry.Trace_context.of_headers event.headers;
+                remote_parent = Telemetry.Trace_context.of_headers event.headers;
                 http_version = (event.http_major, event.http_minor);
                 connection_info;
                 is_early_data = event.is_early_data;

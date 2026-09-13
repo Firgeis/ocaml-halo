@@ -150,8 +150,8 @@ type server_request_result = {
     describe the terminal transport event, including the final response write.
     They may be absent if the request fiber is terminated by an unexpected
     runtime failure. [route], when present, is the low-cardinality template
-    explicitly supplied to [Router.route]. Body sizes count HTTP body octets
-    and exclude framing and headers. *)
+    explicitly supplied to [Router.route]. Body sizes count HTTP body octets and
+    exclude framing and headers. *)
 
 module type Observer = sig
   type span

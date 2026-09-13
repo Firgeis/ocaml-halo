@@ -9,16 +9,15 @@ let respond_with_headers headers respond =
   Result.fold ~ok:respond ~error:response_header_error headers
 
 let plain_text_headers =
-  Response_headers.of_list
-    [("Content-Type", "text/plain; charset=utf-8")]
+  Response_headers.of_list [ ("Content-Type", "text/plain; charset=utf-8") ]
 
 let informational_headers =
   Result.bind
-    (Response_headers.of_list [("X-Phase", "processing")])
+    (Response_headers.of_list [ ("X-Phase", "processing") ])
     (fun processing ->
       Response_headers.of_list
-        [("Link", "</style.css>; rel=preload; as=style")]
-      |> Result.map (fun early_hints -> processing, early_hints))
+        [ ("Link", "</style.css>; rel=preload; as=style") ]
+      |> Result.map (fun early_hints -> (processing, early_hints)))
 
 let int_env_or_default name default =
   match Sys.getenv_opt name with
@@ -41,9 +40,7 @@ let non_empty_env name =
   | None -> None
 
 let split_comma_separated value =
-  value
-  |> String.split_on_char ','
-  |> List.map String.trim
+  value |> String.split_on_char ',' |> List.map String.trim
   |> List.filter (fun item -> String.length item > 0)
 
 let int_env name =
@@ -60,8 +57,7 @@ let tls_minimum_protocol_version_from_env () =
   | Some "TLS12" | Some "tls12" -> Some Halo.Server.TLS12
   | Some "TLS13" | Some "tls13" -> Some Halo.Server.TLS13
   | Some _ ->
-      invalid_arg
-        "HALO_TLS_MIN_PROTOCOL_VERSION must be one of: TLS12, TLS13"
+      invalid_arg "HALO_TLS_MIN_PROTOCOL_VERSION must be one of: TLS12, TLS13"
 
 let tls_client_auth_from_env () =
   let mode =
@@ -81,8 +77,7 @@ let tls_client_auth_from_env () =
 
 let tls_config_from_env () =
   match
-    Sys.getenv_opt "HALO_TLS_CERT_CHAIN",
-    Sys.getenv_opt "HALO_TLS_PRIVATE_KEY"
+    (Sys.getenv_opt "HALO_TLS_CERT_CHAIN", Sys.getenv_opt "HALO_TLS_PRIVATE_KEY")
   with
   | None, None -> None
   | Some cert_chain_path, Some private_key_path ->
@@ -105,37 +100,40 @@ let tls_config_from_env () =
              (int_env "HALO_TLS_SESSION_TICKET_ENCRYPT_DECRYPT_LIFETIME_SECS")
            ?session_ticket_decrypt_lifetime_secs:
              (int_env "HALO_TLS_SESSION_TICKET_DECRYPT_LIFETIME_SECS")
-           ?session_ticket_initial_count:(int_env "HALO_TLS_SESSION_TICKET_COUNT")
+           ?session_ticket_initial_count:
+             (int_env "HALO_TLS_SESSION_TICKET_COUNT")
            ?server_keying_material_lifetime_secs:
              (int_env "HALO_TLS_KEYING_MATERIAL_LIFETIME_SECS")
            ?max_early_data_size:(int_env "HALO_TLS_MAX_EARLY_DATA_SIZE")
            ())
   | Some _, None ->
-      invalid_arg "HALO_TLS_PRIVATE_KEY is required when HALO_TLS_CERT_CHAIN is set"
+      invalid_arg
+        "HALO_TLS_PRIVATE_KEY is required when HALO_TLS_CERT_CHAIN is set"
   | None, Some _ ->
-      invalid_arg "HALO_TLS_CERT_CHAIN is required when HALO_TLS_PRIVATE_KEY is set"
+      invalid_arg
+        "HALO_TLS_CERT_CHAIN is required when HALO_TLS_PRIVATE_KEY is set"
 
 let visible_header_names request =
   Halo.Router.Request.fold_headers request ~init:[] ~f:(fun names name _value ->
       name :: names)
-  |> List.rev
-  |> String.concat ","
+  |> List.rev |> String.concat ","
 
 let add_example_header next request =
   next request |> Halo.Router.with_header "X-Example-Middleware" "post-route"
 
 let rewrite_legacy request =
-match Halo.Router.Request.raw_target request with
-| "/legacy" ->
-    Halo.Router.Rewrite
-      {
-        request_method = None;
-        raw_target = Some "/";
-        headers = None;
-        body = None;
-      }
-| "/forbidden" -> Halo.Router.Respond (Halo.Router.text Status.forbidden "forbidden\n")
-| _ -> Halo.Router.Continue
+  match Halo.Router.Request.raw_target request with
+  | "/legacy" ->
+      Halo.Router.Rewrite
+        {
+          request_method = None;
+          raw_target = Some "/";
+          headers = None;
+          body = None;
+        }
+  | "/forbidden" ->
+      Halo.Router.Respond (Halo.Router.text Status.forbidden "forbidden\n")
+  | _ -> Halo.Router.Continue
 
 let write_disconnect_marker () =
   match non_empty_env "HALO_STREAM_DISCONNECT_MARKER" with
@@ -158,200 +156,176 @@ let run_server clock =
                 Request.send_informational request
                   (informational Status.early_hints early_hints_headers);
                 text Status.ok "hello world\n"))
-      <|>
-      route
-        Matcher.(
-          let+ () =
-            request_method_is GET *> path_segment "explode" *> path_end
-          in
-          fun _request -> failwith "boom")
-      <|>
-      route
-        Matcher.(
-          let+ () = request_method_is GET *> path_segment "empty" *> path_end in
-          fun _request -> text Status.no_content "should not be sent")
-      <|>
-      route
-        Matcher.(
-          let+ () = request_method_is GET *> path_segment "cached" *> path_end in
-          fun _request -> text Status.not_modified "should not be sent")
-      <|>
-      route
-        Matcher.(
-          let+ () = request_method_is HEAD *> path_end in
-          fun _request -> text Status.ok "hello world\n")
-      <|>
-      route
-        Matcher.(
-          let+ () = request_method_is GET *> path_segment "stream" *> path_end in
-          fun _request ->
-            respond_with_headers plain_text_headers (fun headers ->
-                Halo.Stream.respond ~status:Status.ok ~headers (fun ~yield ->
-                    yield "hello ";
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "explode" *> path_end
+              in
+              fun _request -> failwith "boom")
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "empty" *> path_end
+              in
+              fun _request -> text Status.no_content "should not be sent")
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "cached" *> path_end
+              in
+              fun _request -> text Status.not_modified "should not be sent")
+      <|> route
+            Matcher.(
+              let+ () = request_method_is HEAD *> path_end in
+              fun _request -> text Status.ok "hello world\n")
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "stream" *> path_end
+              in
+              fun _request ->
+                respond_with_headers plain_text_headers (fun headers ->
+                    Halo.Stream.respond ~status:Status.ok ~headers
+                      (fun ~yield ->
+                        yield "hello ";
+                        Eio.Time.sleep clock 0.15;
+                        yield "world\n")))
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "stream"
+                *> path_segment "hold" *> path_end
+              in
+              fun _request ->
+                respond_with_headers plain_text_headers (fun headers ->
+                    Halo.Stream.respond ~status:Status.ok ~headers
+                      (fun ~yield ->
+                        yield "hello ";
+                        Eio.Time.sleep clock 60.0;
+                        yield "world\n")))
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "stream"
+                *> path_segment "explode" *> path_end
+              in
+              fun _request ->
+                respond_with_headers plain_text_headers (fun headers ->
+                    Halo.Stream.respond ~status:Status.ok ~headers
+                      (fun ~yield ->
+                        yield "hello ";
+                        raise Exit)))
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "sse" *> path_end
+              in
+              fun _request ->
+                Halo.Sse.respond (fun ~send ->
+                    send
+                      (Halo.Sse.event ~event:"message" ~id:"1"
+                         [ "hello"; "world" ]);
                     Eio.Time.sleep clock 0.15;
-                    yield "world\n")))
-      <|>
-      route
-        Matcher.(
-          let+ () =
-            request_method_is GET
-            *> path_segment "stream"
-            *> path_segment "hold"
-            *> path_end
-          in
-          fun _request ->
-            respond_with_headers plain_text_headers (fun headers ->
-                Halo.Stream.respond ~status:Status.ok ~headers (fun ~yield ->
-                    yield "hello ";
-                    Eio.Time.sleep clock 60.0;
-                    yield "world\n")))
-      <|>
-      route
-        Matcher.(
-          let+ () =
-            request_method_is GET
-            *> path_segment "stream"
-            *> path_segment "explode"
-            *> path_end
-          in
-          fun _request ->
-            respond_with_headers plain_text_headers (fun headers ->
-                Halo.Stream.respond ~status:Status.ok ~headers (fun ~yield ->
-                    yield "hello ";
-                    raise Exit)))
-      <|>
-      route
-        Matcher.(
-          let+ () = request_method_is GET *> path_segment "sse" *> path_end in
-          fun _request ->
-            Halo.Sse.respond (fun ~send ->
-                send
-                  (Halo.Sse.event ~event:"message" ~id:"1"
-                     ["hello"; "world"]);
-                Eio.Time.sleep clock 0.15;
-                send (Halo.Sse.comment "keep-alive");
-                send (Halo.Sse.event ~retry_ms:1500 ["done"])))
-      <|>
-      route
-        Matcher.(
-          let+ () =
-            request_method_is POST
-            *> path_segment "stream"
-            *> path_segment "disconnect"
-            *> path_end
-            *> require_body
-          in
-          fun request ->
-            Request.on_disconnect request write_disconnect_marker;
-            respond_with_headers plain_text_headers (fun headers ->
-                Halo.Stream.respond ~status:Status.ok ~headers (fun ~yield ->
-                    yield "hello ";
-                    ignore (Halo.Body.read (Request.body request)))))
-      <|>
-      route
-        Matcher.(
-          let+ () = request_method_is GET *> path_segment "headers" *> path_end in
-          fun _request ->
-            text Status.ok "headers\n"
-            |> with_content_type "text/custom"
-            |> with_header "X-Test" "1")
+                    send (Halo.Sse.comment "keep-alive");
+                    send (Halo.Sse.event ~retry_ms:1500 [ "done" ])))
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is POST *> path_segment "stream"
+                *> path_segment "disconnect" *> path_end *> require_body
+              in
+              fun request ->
+                Request.on_disconnect request write_disconnect_marker;
+                respond_with_headers plain_text_headers (fun headers ->
+                    Halo.Stream.respond ~status:Status.ok ~headers
+                      (fun ~yield ->
+                        yield "hello ";
+                        ignore (Halo.Body.read (Request.body request)))))
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "headers" *> path_end
+              in
+              fun _request ->
+                text Status.ok "headers\n"
+                |> with_content_type "text/custom"
+                |> with_header "X-Test" "1")
       |> use add_example_header
-      <|>
-      route
-        Matcher.(
-          let+ () =
-            request_method_is GET
-            *> path_segment "inspect"
-            *> path_segment "parse-only"
-            *> path_end
-          in
-          fun _request -> text Status.ok "ok\n")
-      <|>
-      route
-        Matcher.(
-          let+ () =
-            request_method_is GET
-            *> path_segment "inspect"
-            *> path_segment "headers"
-            *> path_end
-          in
-          fun request -> text Status.ok (visible_header_names request))
-      <|>
-      route
-        Matcher.(
-          let+ name =
-            request_method_is GET
-            *> path_segment "inspect"
-            *> path_segment "header"
-            *> string_parameter
-            <* path_end
-          in
-          fun request ->
-            let body =
-              match Halo.Router.Request.header request name with
-              | None -> "missing"
-              | Some value -> "value:" ^ value
-            in
-            text Status.ok body)
-      <|>
-      route
-        Matcher.(
-          let+ () = request_method_is GET *> path_segment "html" *> path_end in
-          fun _request -> html Status.ok "<h1>hello world</h1>\n")
-      <|>
-      route
-        Matcher.(
-          let+ () = request_method_is GET *> path_segment "json" *> path_end in
-          fun _request -> json Status.ok "{\"message\":\"hello world\"}")
-      <|>
-      route
-        Matcher.(
-          let+ query =
-            request_method_is GET
-            *> path_segment "query"
-            *> path_end
-            *> queryparam_required "q"
-          and+ plus = queryparam_required "plus" in
-          fun _request -> text Status.ok (query ^ "|" ^ plus))
-      <|>
-      route
-        Matcher.(
-          let+ () = request_method_is GET *> path_end in
-          fun _request -> text Status.ok "hello world\n")
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "inspect"
+                *> path_segment "parse-only" *> path_end
+              in
+              fun _request -> text Status.ok "ok\n")
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "inspect"
+                *> path_segment "headers" *> path_end
+              in
+              fun request -> text Status.ok (visible_header_names request))
+      <|> route
+            Matcher.(
+              let+ name =
+                request_method_is GET *> path_segment "inspect"
+                *> path_segment "header" *> string_parameter
+                <* path_end
+              in
+              fun request ->
+                let body =
+                  match Halo.Router.Request.header request name with
+                  | None -> "missing"
+                  | Some value -> "value:" ^ value
+                in
+                text Status.ok body)
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "html" *> path_end
+              in
+              fun _request -> html Status.ok "<h1>hello world</h1>\n")
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "json" *> path_end
+              in
+              fun _request -> json Status.ok "{\"message\":\"hello world\"}")
+      <|> route
+            Matcher.(
+              let+ query =
+                request_method_is GET *> path_segment "query" *> path_end
+                *> queryparam_required "q"
+              and+ plus = queryparam_required "plus" in
+              fun _request -> text Status.ok (query ^ "|" ^ plus))
+      <|> route
+            Matcher.(
+              let+ () = request_method_is GET *> path_end in
+              fun _request -> text Status.ok "hello world\n")
       |> use_pre rewrite_legacy
-      <|>
-      route
-        Matcher.(
-          let+ () =
-            request_method_is POST
-            *> path_segment "submit"
-            *> path_end
-            *> require_body
-          in
-          fun (request : Halo.Router.Request.t) ->
-            text Status.ok
-              ("submitted:"
-              ^ Halo.Body.read_all (Halo.Router.Request.body request)))
-      <|>
-      route
-        Matcher.(
-          let+ () =
-            request_method_is PATCH
-            *> path_segment "submit"
-            *> path_end
-            *> require_body
-          in
-          fun (request : Halo.Router.Request.t) ->
-            text Status.ok
-              ("patched:"
-              ^ Halo.Body.read_all (Halo.Router.Request.body request))))
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is POST *> path_segment "submit" *> path_end
+                *> require_body
+              in
+              fun (request : Halo.Router.Request.t) ->
+                text Status.ok
+                  ("submitted:"
+                  ^ Halo.Body.read_all (Halo.Router.Request.body request)))
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is PATCH *> path_segment "submit" *> path_end
+                *> require_body
+              in
+              fun (request : Halo.Router.Request.t) ->
+                text Status.ok
+                  ("patched:"
+                  ^ Halo.Body.read_all (Halo.Router.Request.body request))))
   in
-  let request_timeout_ms =
-    int_env_or_default "HALO_REQUEST_TIMEOUT_MS" 30000
-  in
-  let idle_timeout_ms =
-    int_env_or_default "HALO_IDLE_TIMEOUT_MS" 5000
-  in
+  let request_timeout_ms = int_env_or_default "HALO_REQUEST_TIMEOUT_MS" 30000 in
+  let idle_timeout_ms = int_env_or_default "HALO_IDLE_TIMEOUT_MS" 5000 in
   let max_request_line_size =
     int_env_or_default "HALO_MAX_REQUEST_LINE_SIZE"
       Halo.Server.Config.default_max_request_line_size
@@ -369,15 +343,13 @@ let run_server clock =
       Halo.Server.default_shutdown_timeout_ms
   in
   let config =
-    Halo.Server.Config.create ~port:8080
-      ~max_request_line_size ~max_header_size ~max_body_size ~request_timeout_ms
-      ~idle_timeout_ms
-      ?tls:(tls_config_from_env ())
-      router
+    Halo.Server.Config.create ~port:8080 ~max_request_line_size ~max_header_size
+      ~max_body_size ~request_timeout_ms ~idle_timeout_ms
+      ?tls:(tls_config_from_env ()) router
   in
   Printf.printf "server on %s:%d using %s\n%!" config.host config.port
     (Halo.Server.runtime_backend_name ());
-  Halo.Server.run ~shutdown_timeout_ms [config]
+  Halo.Server.run ~shutdown_timeout_ms [ config ]
 
 let () =
   try Eio_main.run @@ fun env -> run_server (Eio.Stdenv.clock env)

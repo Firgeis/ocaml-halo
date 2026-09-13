@@ -11,15 +11,11 @@ type benchmark_case = {
   expected_status : int;
 }
 
-type sample = {
-  nanoseconds_per_operation : float;
-  bytes_per_operation : float;
-}
+type sample = { nanoseconds_per_operation : float; bytes_per_operation : float }
 
 let samples = ref 5
-let route_counts = ref [100; 1_000; 10_000]
+let route_counts = ref [ 100; 1_000; 10_000 ]
 let iterations_override = ref None
-
 let ok_response = text Status.ok "ok\n"
 
 let request request_method raw_target =
@@ -36,9 +32,7 @@ let make_route index =
   route
     Matcher.(
       let+ () =
-        request_method_is GET
-        *> path_segment "routes"
-        *> path_segment segment
+        request_method_is GET *> path_segment "routes" *> path_segment segment
         *> path_end
       in
       fun _request -> ok_response)
@@ -54,7 +48,11 @@ let make_router count =
 let benchmark_cases count =
   let target index = Printf.sprintf "/routes/%d" index in
   [
-    { name = "hit-first"; request = request GET (target 0); expected_status = 200 };
+    {
+      name = "hit-first";
+      request = request GET (target 0);
+      expected_status = 200;
+    };
     {
       name = "hit-middle";
       request = request GET (target (count / 2));
@@ -81,7 +79,8 @@ let status response = Response.status response |> Status.to_int
 
 let dispatch_and_check router benchmark_case =
   let actual =
-    dispatch (Sys.opaque_identity router)
+    dispatch
+      (Sys.opaque_identity router)
       (Sys.opaque_identity benchmark_case.request)
     |> status
   in
@@ -116,10 +115,8 @@ let median values =
   let sorted = Array.of_list values in
   Array.sort Float.compare sorted;
   let length = Array.length sorted in
-  if length mod 2 = 1 then
-    sorted.(length / 2)
-  else
-    (sorted.((length / 2) - 1) +. sorted.(length / 2)) /. 2.0
+  if length mod 2 = 1 then sorted.(length / 2)
+  else (sorted.((length / 2) - 1) +. sorted.(length / 2)) /. 2.0
 
 let measure router benchmark_case iterations =
   let warmup_iterations = max 5 (iterations / 10) in
@@ -129,10 +126,16 @@ let measure router benchmark_case iterations =
   let results =
     List.init !samples (fun _ -> run_sample router benchmark_case iterations)
   in
-  let times = List.map (fun sample -> sample.nanoseconds_per_operation) results in
-  let allocations = List.map (fun sample -> sample.bytes_per_operation) results in
-  median times, List.fold_left min Float.infinity times,
-  List.fold_left max Float.neg_infinity times, median allocations
+  let times =
+    List.map (fun sample -> sample.nanoseconds_per_operation) results
+  in
+  let allocations =
+    List.map (fun sample -> sample.bytes_per_operation) results
+  in
+  ( median times,
+    List.fold_left min Float.infinity times,
+    List.fold_left max Float.neg_infinity times,
+    median allocations )
 
 let parse_positive name value =
   match int_of_string_opt value with
@@ -146,8 +149,7 @@ let set_iterations value =
 
 let set_route_counts value =
   let counts =
-    value
-    |> String.split_on_char ','
+    value |> String.split_on_char ','
     |> List.map (parse_positive "--route-counts")
   in
   match counts with
@@ -172,7 +174,8 @@ let () =
     (fun argument -> raise (Arg.Bad ("unexpected argument: " ^ argument)))
     "router_bench [options]";
   Printf.printf
-    "routes  case          iterations   median ns/op      min      max       B/op\n";
+    "routes  case          iterations   median ns/op      min      max       \
+     B/op\n";
   List.iter
     (fun count ->
       let router = make_router count in

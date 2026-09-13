@@ -4,13 +4,8 @@
     [Server.collect_metrics] to combine request measurements with a fresh
     reactor snapshot before encoding it for an exporter. *)
 
-type attribute_value =
-  | String of string
-  | Int of int64
-  | Bool of bool
-
+type attribute_value = String of string | Int of int64 | Bool of bool
 type attribute = string * attribute_value
-
 type number = Int of int64 | Float of float
 
 type histogram = {
@@ -59,6 +54,7 @@ val snapshot : t -> snapshot
 
 module Prometheus : sig
   val content_type : string
+
   val encode : snapshot -> string
   (** Encode Prometheus text exposition format 0.0.4. OpenTelemetry dots are
       translated to underscores, units become conventional suffixes, and

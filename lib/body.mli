@@ -5,8 +5,8 @@ val read : t -> string option
     Consumed chunks are not retained. Calls are serialized for each body. *)
 
 val read_all : t -> string
-(** Consume and return all unread body data. Bytes previously returned by
-    [read] are not included. Returns the empty string when no data remains. *)
+(** Consume and return all unread body data. Bytes previously returned by [read]
+    are not included. Returns the empty string when no data remains. *)
 
 val is_complete : t -> bool
 

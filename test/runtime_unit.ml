@@ -15,12 +15,9 @@ let contains needle haystack =
   let needle_length = String.length needle in
   let haystack_length = String.length haystack in
   let rec search index =
-    if index + needle_length > haystack_length then
-      false
-    else if String.sub haystack index needle_length = needle then
-      true
-    else
-      search (index + 1)
+    if index + needle_length > haystack_length then false
+    else if String.sub haystack index needle_length = needle then true
+    else search (index + 1)
   in
   search 0
 
@@ -77,8 +74,7 @@ let run_process ?input ?(close_stdin = true) command =
       close_in_noerr error_channel)
     (fun () ->
       Option.iter (write_all output_channel) input;
-      if close_stdin then
-        close_out output_channel;
+      if close_stdin then close_out output_channel;
       let stdout = In_channel.input_all input_channel in
       let stderr = In_channel.input_all error_channel in
       let status =
@@ -96,28 +92,23 @@ let run_s2nc ?ticket_out ?ticket_in ?early_data_file ?send_file ?input ?alpn
       Filename.quote (tls_cert_fixture_path ());
       "--name localhost";
     ]
-    @
-    (match ticket_out with
-    | None -> []
-    | Some path -> ["--ticket-out"; Filename.quote path])
-    @
-    (match ticket_in with
-    | None -> []
-    | Some path -> ["--ticket-in"; Filename.quote path])
-    @
-    (match early_data_file with
-    | None -> []
-    | Some path -> ["--early-data"; Filename.quote path])
-    @
-    (match send_file with
-    | None -> []
-    | Some path -> ["--send-file"; Filename.quote path])
-    @
-    (match alpn with
-    | None -> []
-    | Some protocols -> ["--alpn"; Filename.quote protocols])
-    @ (if echo then ["--echo"] else [])
-    @ ["127.0.0.1"; string_of_int port]
+    @ (match ticket_out with
+      | None -> []
+      | Some path -> [ "--ticket-out"; Filename.quote path ])
+    @ (match ticket_in with
+      | None -> []
+      | Some path -> [ "--ticket-in"; Filename.quote path ])
+    @ (match early_data_file with
+      | None -> []
+      | Some path -> [ "--early-data"; Filename.quote path ])
+    @ (match send_file with
+      | None -> []
+      | Some path -> [ "--send-file"; Filename.quote path ])
+    @ (match alpn with
+      | None -> []
+      | Some protocols -> [ "--alpn"; Filename.quote protocols ])
+    @ (if echo then [ "--echo" ] else [])
+    @ [ "127.0.0.1"; string_of_int port ]
   in
   run_process ?input ~close_stdin (String.concat " " args)
 
@@ -161,7 +152,9 @@ let with_live_config_groups ?max_in_flight_requests ?on_error ?telemetry
         (started, server))
       config_groups
   in
-  let runnings = List.map (fun (started, _) -> Eio.Promise.await started) servers in
+  let runnings =
+    List.map (fun (started, _) -> Eio.Promise.await started) servers
+  in
   let outcome =
     try
       Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) f;
@@ -222,8 +215,7 @@ let read_socket_until socket until =
   let chunk = Bytes.create 256 in
   let rec read () =
     let contents = Buffer.contents response in
-    if contains until contents then
-      contents
+    if contains until contents then contents
     else
       match Unix.read socket chunk 0 (Bytes.length chunk) with
       | 0 -> contents
@@ -281,7 +273,8 @@ let run_response_outcome_test ?on_error router client =
     (with_live_server ~router ?on_error (fun () ->
          client ();
          ignore (wait_for_response_outcome observed)));
-  Alcotest.(check int) "callback runs exactly once" 1
+  Alcotest.(check int)
+    "callback runs exactly once" 1
     (Atomic.get callback_count);
   match Atomic.get observed with
   | Some outcome -> outcome
@@ -337,20 +330,29 @@ let test_failed_stream_reports_aborted () =
                 failwith "stream outcome marker")))
   in
   let outcome =
-    run_response_outcome_test ~on_error:(fun _ _ _ -> ()) router (fun () ->
+    run_response_outcome_test
+      ~on_error:(fun _ _ _ -> ())
+      router
+      (fun () ->
         let response =
           plaintext_request ~until:"unreachable response marker"
-            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
+            "GET / HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Connection: keep-alive\r\n\
+             \r\n"
         in
-        Alcotest.(check bool) "partial stream was sent" true
+        Alcotest.(check bool)
+          "partial stream was sent" true
           (contains "partial\n" response);
-        Alcotest.(check bool) "stream terminator was omitted" false
+        Alcotest.(check bool)
+          "stream terminator was omitted" false
           (contains "\r\n0\r\n\r\n" response))
   in
   match outcome with
   | Observed_aborted message ->
-      Alcotest.(check string) "producer exception is preserved"
-        "Failure(\"stream outcome marker\")" message
+      Alcotest.(check string)
+        "producer exception is preserved" "Failure(\"stream outcome marker\")"
+        message
   | _ -> fail "expected aborted response outcome"
 
 let test_peer_disconnect_reports_client_disconnected () =
@@ -389,8 +391,7 @@ let wait_for_telemetry observed =
 
 let find_metric_by_status snapshot name status =
   let status_attribute : Halo.Metrics.attribute =
-    ( "http.response.status_code",
-      Halo.Metrics.Int (Int64.of_int status) )
+    ("http.response.status_code", Halo.Metrics.Int (Int64.of_int status))
   in
   match
     List.find_opt
@@ -427,9 +428,7 @@ let test_request_telemetry_covers_transport_lifecycle () =
       ignore (Atomic.fetch_and_add finish_count 1);
       Atomic.set observed (Some (request, result))
   end in
-  let telemetry =
-    Halo.Telemetry.of_observer (module Observer)
-  in
+  let telemetry = Halo.Telemetry.of_observer (module Observer) in
   let router =
     Halo.Router.(
       route ~template:"/users/{id}"
@@ -446,58 +445,63 @@ let test_request_telemetry_covers_transport_lifecycle () =
     (with_live_server ~router ~telemetry (fun () ->
          let response =
            plaintext_request ~until:"created\n"
-             ("GET /users/42?full=1 HTTP/1.1\r\n"
-             ^ "Host: localhost\r\n"
-             ^ "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-"
-             ^ "00f067aa0ba902b7-01\r\n"
-             ^ "tracestate: rojo=00f067aa0ba902b7,congo=t61rcWkgMzE\r\n"
-             ^ "Connection: close\r\n\r\n")
+             ("GET /users/42?full=1 HTTP/1.1\r\n" ^ "Host: localhost\r\n"
+            ^ "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-"
+            ^ "00f067aa0ba902b7-01\r\n"
+            ^ "tracestate: rojo=00f067aa0ba902b7,congo=t61rcWkgMzE\r\n"
+            ^ "Connection: close\r\n\r\n")
          in
-         Alcotest.(check bool) "response status" true
+         Alcotest.(check bool)
+           "response status" true
            (contains "HTTP/1.1 201 Created" response);
          ignore (wait_for_telemetry observed)));
   let request, result = wait_for_telemetry observed in
   Alcotest.(check int) "finished exactly once" 1 (Atomic.get finish_count);
-  Alcotest.(check bool) "handler runs inside telemetry scope" true
+  Alcotest.(check bool)
+    "handler runs inside telemetry scope" true
     (Atomic.get handler_saw_scope);
   Alcotest.(check string) "method" "GET" request.method_;
   Alcotest.(check string) "raw target" "/users/42?full=1" request.target;
-  Alcotest.(check (pair int int)) "HTTP version" (1, 1)
-    request.http_version;
-  Alcotest.(check bool) "trace context header is available" true
+  Alcotest.(check (pair int int)) "HTTP version" (1, 1) request.http_version;
+  Alcotest.(check bool)
+    "trace context header is available" true
     (List.mem
-       ( "traceparent",
-         "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" )
+       ("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
        request.headers);
   let remote_parent =
     match request.remote_parent with
     | Some remote_parent -> remote_parent
     | None -> fail "expected parsed remote trace context"
   in
-  Alcotest.(check string) "remote trace ID"
-    "4bf92f3577b34da6a3ce929d0e0e4736"
+  Alcotest.(check string)
+    "remote trace ID" "4bf92f3577b34da6a3ce929d0e0e4736"
     (Halo.Telemetry.Trace_context.trace_id remote_parent);
-  Alcotest.(check string) "remote span ID" "00f067aa0ba902b7"
+  Alcotest.(check string)
+    "remote span ID" "00f067aa0ba902b7"
     (Halo.Telemetry.Trace_context.span_id remote_parent);
-  Alcotest.(check bool) "remote parent is sampled" true
+  Alcotest.(check bool)
+    "remote parent is sampled" true
     (Halo.Telemetry.Trace_context.sampled remote_parent);
-  Alcotest.(check (list (pair string string))) "remote tracestate"
+  Alcotest.(check (list (pair string string)))
+    "remote tracestate"
     [ ("rojo", "00f067aa0ba902b7"); ("congo", "t61rcWkgMzE") ]
     (Halo.Telemetry.Trace_context.tracestate remote_parent);
-  Alcotest.(check bool) "first-byte monotonic timestamp" true
+  Alcotest.(check bool)
+    "first-byte monotonic timestamp" true
     (Int64.compare request.start_monotonic_ns 0L > 0);
-  Alcotest.(check bool) "first-byte Unix timestamp" true
+  Alcotest.(check bool)
+    "first-byte Unix timestamp" true
     (Option.fold ~none:false
        ~some:(fun timestamp -> Int64.compare timestamp 0L > 0)
        request.start_time_unix_ns);
-  Alcotest.(check (option string)) "route template" (Some "/users/{id}")
-    result.route;
-  Alcotest.(check (option int)) "response status" (Some 201)
-    result.status_code;
+  Alcotest.(check (option string))
+    "route template" (Some "/users/{id}") result.route;
+  Alcotest.(check (option int)) "response status" (Some 201) result.status_code;
   (match result.outcome with
   | Some Halo.Router.Completed -> ()
   | _ -> fail "expected completed telemetry outcome");
-  Alcotest.(check bool) "terminal timestamp follows first byte" true
+  Alcotest.(check bool)
+    "terminal timestamp follows first byte" true
     (Option.fold ~none:false
        ~some:(fun timestamp ->
          Int64.compare timestamp request.start_monotonic_ns >= 0)
@@ -523,29 +527,31 @@ let test_pre_dispatch_parser_failure_is_observed () =
     (with_live_server ~telemetry ~metrics (fun () ->
          let response =
            plaintext_request ~until:"bad request\n"
-             ("GET /invalid HTTP/1.1\r\n"
-             ^ "Host: localhost\r\n"
-             ^ "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-"
-             ^ "00f067aa0ba902b7-01\r\n"
-             ^ "Host: duplicate\r\nConnection: close\r\n\r\n")
+             ("GET /invalid HTTP/1.1\r\n" ^ "Host: localhost\r\n"
+            ^ "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-"
+            ^ "00f067aa0ba902b7-01\r\n"
+            ^ "Host: duplicate\r\nConnection: close\r\n\r\n")
          in
-         Alcotest.(check bool) "parser response status" true
+         Alcotest.(check bool)
+           "parser response status" true
            (contains "HTTP/1.1 400 Bad Request" response);
          ignore (wait_for_telemetry observed)));
   let request, result = wait_for_telemetry observed in
   Alcotest.(check string) "parser method" "GET" request.method_;
   Alcotest.(check string) "parser target" "/invalid" request.target;
-  Alcotest.(check (pair int int)) "parser HTTP version" (1, 1)
-    request.http_version;
-  Alcotest.(check bool) "parser trace context" true
+  Alcotest.(check (pair int int))
+    "parser HTTP version" (1, 1) request.http_version;
+  Alcotest.(check bool)
+    "parser trace context" true
     (Option.is_some request.remote_parent);
   Alcotest.(check (option string)) "parser route" None result.route;
-  Alcotest.(check (option int)) "parser telemetry status" (Some 400)
-    result.status_code;
+  Alcotest.(check (option int))
+    "parser telemetry status" (Some 400) result.status_code;
   (match result.outcome with
   | Some Halo.Router.Completed -> ()
   | _ -> fail "expected completed parser-error telemetry outcome");
-  Alcotest.(check bool) "parser terminal timestamp" true
+  Alcotest.(check bool)
+    "parser terminal timestamp" true
     (Option.fold ~none:false
        ~some:(fun timestamp -> timestamp >= request.start_monotonic_ns)
        result.end_monotonic_ns);
@@ -560,8 +566,11 @@ let test_pre_dispatch_parser_failure_is_observed () =
        | None -> assert false);
   find_metric_by_status snapshot "http.server.response.body.size" 400
   |> check_histogram_count_and_sum "parser response bytes" 1L 12.0;
-  let requests = find_metric_by_status snapshot "halo.http.server.requests" 400 in
-  Alcotest.(check bool) "parser 4xx status class" true
+  let requests =
+    find_metric_by_status snapshot "halo.http.server.requests" 400
+  in
+  Alcotest.(check bool)
+    "parser 4xx status class" true
     (List.mem
        ("http.response.status_class", Halo.Metrics.String "4xx")
        requests.attributes)
@@ -591,7 +600,9 @@ let test_pre_dispatch_admission_rejection_is_observed () =
             text Status.ok "slow\n")
       <|> route
             Matcher.(
-              let+ () = request_method_is GET *> path_segment "fast" *> path_end in
+              let+ () =
+                request_method_is GET *> path_segment "fast" *> path_end
+              in
               fun _request ->
                 ignore (Atomic.fetch_and_add fast_handler_calls 1);
                 text Status.ok "fast\n"))
@@ -604,32 +615,43 @@ let test_pre_dispatch_admission_rejection_is_observed () =
            ~finally:(fun () -> Unix.close slow)
            (fun () ->
              write_socket_all slow
-               "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+               "GET /slow HTTP/1.1\r\n\
+                Host: localhost\r\n\
+                Connection: close\r\n\
+                \r\n";
              Unix.sleepf 0.03;
              let rejected =
                plaintext_request ~until:"server overloaded\n"
-                 "GET /fast HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                 "GET /fast HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Connection: close\r\n\
+                  \r\n"
              in
-             Alcotest.(check bool) "admission response status" true
+             Alcotest.(check bool)
+               "admission response status" true
                (contains "HTTP/1.1 503 Service Unavailable" rejected);
              ignore (wait_for_telemetry observed);
              ignore (read_socket_until slow "slow\n"))));
-  Alcotest.(check int) "rejected handler did not run" 0
+  Alcotest.(check int)
+    "rejected handler did not run" 0
     (Atomic.get fast_handler_calls);
   let request, result = wait_for_telemetry observed in
   Alcotest.(check string) "admission method" "GET" request.method_;
   Alcotest.(check string) "admission target" "/fast" request.target;
   Alcotest.(check (option string)) "admission route" None result.route;
-  Alcotest.(check (option int)) "admission telemetry status" (Some 503)
-    result.status_code;
+  Alcotest.(check (option int))
+    "admission telemetry status" (Some 503) result.status_code;
   (match result.outcome with
   | Some Halo.Router.Completed -> ()
   | _ -> fail "expected completed admission telemetry outcome");
   assert_int64_equal "admission response body size" 18L
     result.response_body_size;
   let snapshot = Halo.Metrics.snapshot metrics in
-  let requests = find_metric_by_status snapshot "halo.http.server.requests" 503 in
-  Alcotest.(check bool) "admission 5xx status class" true
+  let requests =
+    find_metric_by_status snapshot "halo.http.server.requests" 503
+  in
+  Alcotest.(check bool)
+    "admission 5xx status class" true
     (List.mem
        ("http.response.status_class", Halo.Metrics.String "5xx")
        requests.attributes);
@@ -652,15 +674,15 @@ let test_invalid_trace_context_does_not_fail_request () =
     (with_live_server ~telemetry (fun () ->
          let response =
            plaintext_request ~until:"hello world\n"
-             ("GET / HTTP/1.1\r\n"
-             ^ "Host: localhost\r\n"
-             ^ "traceparent: 00-00000000000000000000000000000000-"
-             ^ "00f067aa0ba902b7-01\r\n"
-             ^ "Connection: close\r\n\r\n")
+             ("GET / HTTP/1.1\r\n" ^ "Host: localhost\r\n"
+            ^ "traceparent: 00-00000000000000000000000000000000-"
+            ^ "00f067aa0ba902b7-01\r\n" ^ "Connection: close\r\n\r\n")
          in
-         Alcotest.(check bool) "response status" true
+         Alcotest.(check bool)
+           "response status" true
            (contains "HTTP/1.1 200 OK" response)));
-  Alcotest.(check bool) "invalid parent is ignored" true
+  Alcotest.(check bool)
+    "invalid parent is ignored" true
     (Atomic.get saw_missing_parent)
 
 let test_telemetry_observer_failures_do_not_fail_requests () =
@@ -674,12 +696,9 @@ let test_telemetry_observer_failures_do_not_fail_requests () =
       ignore (run ());
       failwith "telemetry scope failure"
 
-    let finish_server_request () _result =
-      failwith "telemetry finish failure"
+    let finish_server_request () _result = failwith "telemetry finish failure"
   end in
-  let telemetry =
-    Halo.Telemetry.of_observer (module Failing_observer)
-  in
+  let telemetry = Halo.Telemetry.of_observer (module Failing_observer) in
   let router =
     Halo.Router.(
       route
@@ -695,10 +714,10 @@ let test_telemetry_observer_failures_do_not_fail_requests () =
            plaintext_request ~until:"healthy\n"
              "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
          in
-         Alcotest.(check bool) "request succeeds" true
+         Alcotest.(check bool)
+           "request succeeds" true
            (contains "HTTP/1.1 200 OK" response)));
-  Alcotest.(check int) "handler runs exactly once" 1
-    (Atomic.get handler_calls)
+  Alcotest.(check int) "handler runs exactly once" 1 (Atomic.get handler_calls)
 
 let test_handler_error_reports_raw_backtrace () =
   let previous_backtrace_status = Printexc.backtrace_status () in
@@ -725,26 +744,29 @@ let test_handler_error_reports_raw_backtrace () =
         (with_live_server ~router ~on_error (fun () ->
              let response =
                plaintext_request ~until:"internal server error\n"
-                 "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                 "GET / HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Connection: close\r\n\
+                  \r\n"
              in
-             Alcotest.(check bool) "handler failure returns 500" true
+             Alcotest.(check bool)
+               "handler failure returns 500" true
                (contains "HTTP/1.1 500 Internal Server Error" response)));
       match Atomic.get reported with
       | None -> fail "expected on_error to be called"
       | Some (request_id, exn, backtrace_length) ->
-          Alcotest.(check bool) "request id is populated" true
+          Alcotest.(check bool)
+            "request id is populated" true
             (Int64.compare request_id 0L > 0);
-          Alcotest.(check string) "exception is preserved"
-            "Failure(\"handler backtrace marker\")" exn;
-          Alcotest.(check bool) "raw backtrace is populated" true
-            (backtrace_length > 0))
+          Alcotest.(check string)
+            "exception is preserved" "Failure(\"handler backtrace marker\")" exn;
+          Alcotest.(check bool)
+            "raw backtrace is populated" true (backtrace_length > 0))
 
 let tls_resumption_config ?session_ticket_keys_path () =
-  Halo.Server.Config.tls
-    ~cert_chain_path:(tls_cert_fixture_path ())
+  Halo.Server.Config.tls ~cert_chain_path:(tls_cert_fixture_path ())
     ~private_key_path:(tls_key_fixture_path ())
-    ~minimum_protocol_version:Halo.Server.TLS13
-    ~session_tickets_enabled:true
+    ~minimum_protocol_version:Halo.Server.TLS13 ~session_tickets_enabled:true
     ?session_ticket_encrypt_decrypt_lifetime_secs:
       (match session_ticket_keys_path with
       | Some _ -> Some (10 * 365 * 24 * 60 * 60)
@@ -756,11 +778,9 @@ let tls_resumption_config ?session_ticket_keys_path () =
     ?session_ticket_keys_path ()
 
 let tls_early_data_config () =
-  Halo.Server.Config.tls
-    ~cert_chain_path:(tls_cert_fixture_path ())
+  Halo.Server.Config.tls ~cert_chain_path:(tls_cert_fixture_path ())
     ~private_key_path:(tls_key_fixture_path ())
-    ~minimum_protocol_version:Halo.Server.TLS13
-    ~session_tickets_enabled:true
+    ~minimum_protocol_version:Halo.Server.TLS13 ~session_tickets_enabled:true
     ~session_ticket_keys_path:(tls_ticket_keys_fixture_path ())
     ~session_ticket_encrypt_decrypt_lifetime_secs:(10 * 365 * 24 * 60 * 60)
     ~session_ticket_decrypt_lifetime_secs:(10 * 365 * 24 * 60 * 60)
@@ -793,7 +813,12 @@ let transport_router =
           in
           text Status.ok
             (Printf.sprintf
-               "http=%d.%d\nremote=%s\nlocal=%s\ntls-status=%b\n%s\naccessors=%b\n"
+               "http=%d.%d\n\
+                remote=%s\n\
+                local=%s\n\
+                tls-status=%b\n\
+                %s\n\
+                accessors=%b\n"
                http_major http_minor
                (string_of_sockaddr connection.remote_address)
                (string_of_sockaddr connection.local_address)
@@ -808,24 +833,28 @@ let test_plaintext_request_exposes_transport_metadata () =
            plaintext_request ~until:"accessors=true\n"
              "GET / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n"
          in
-         Alcotest.(check bool) "HTTP version" true
+         Alcotest.(check bool)
+           "HTTP version" true
            (contains "http=1.0\n" response);
-         Alcotest.(check bool) "remote address" true
+         Alcotest.(check bool)
+           "remote address" true
            (contains "remote=127.0.0.1:" response);
-         Alcotest.(check bool) "local address" true
+         Alcotest.(check bool)
+           "local address" true
            (contains "local=127.0.0.1:8443\n" response);
-         Alcotest.(check bool) "plaintext TLS status" true
+         Alcotest.(check bool)
+           "plaintext TLS status" true
            (contains "tls-status=false\nplaintext\n" response);
-         Alcotest.(check bool) "address accessors" true
+         Alcotest.(check bool)
+           "address accessors" true
            (contains "accessors=true\n" response)))
 
 let test_tls_request_exposes_negotiated_transport_metadata () =
   let tls =
-    Halo.Server.Config.tls
-      ~cert_chain_path:(tls_cert_fixture_path ())
+    Halo.Server.Config.tls ~cert_chain_path:(tls_cert_fixture_path ())
       ~private_key_path:(tls_key_fixture_path ())
-      ~minimum_protocol_version:Halo.Server.TLS13
-      ~alpn_protocols:[ "http/1.1" ] ()
+      ~minimum_protocol_version:Halo.Server.TLS13 ~alpn_protocols:[ "http/1.1" ]
+      ()
   in
   ignore
     (with_live_server ~tls ~router:transport_router (fun () ->
@@ -839,13 +868,15 @@ let test_tls_request_exposes_negotiated_transport_metadata () =
          if not (contains "tls-status=true\n" result.stdout) then
            fail "expected TLS transport response\nstdout:\n%s\nstderr:\n%s"
              result.stdout result.stderr;
-         Alcotest.(check bool) "TLS request HTTP version" true
+         Alcotest.(check bool)
+           "TLS request HTTP version" true
            (contains "http=1.1\n" result.stdout);
-         Alcotest.(check bool) "negotiated TLS metadata" true
-           (contains
-              "tls=TLSv1.3;sni=localhost;alpn=http/1.1;cipher=true\n"
+         Alcotest.(check bool)
+           "negotiated TLS metadata" true
+           (contains "tls=TLSv1.3;sni=localhost;alpn=http/1.1;cipher=true\n"
               result.stdout);
-         Alcotest.(check bool) "TLS local address" true
+         Alcotest.(check bool)
+           "TLS local address" true
            (contains "local=127.0.0.1:8443\n" result.stdout)))
 
 let test_keep_alive_requests_share_connection_metadata () =
@@ -873,53 +904,50 @@ let test_keep_alive_requests_share_connection_metadata () =
            ~finally:(fun () -> Unix.close socket)
            (fun () ->
              write_socket_all socket
-               "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n";
+               "GET / HTTP/1.1\r\n\
+                Host: localhost\r\n\
+                Connection: keep-alive\r\n\
+                \r\n";
              let first = read_socket_until socket "first\n" in
-             Alcotest.(check bool) "first request receives metadata" true
-               (contains "first\n" first);
+             Alcotest.(check bool)
+               "first request receives metadata" true (contains "first\n" first);
              write_socket_all socket
                "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
              let second = read_socket_until socket "shared\n" in
-             Alcotest.(check bool) "keep-alive metadata is shared" true
+             Alcotest.(check bool)
+               "keep-alive metadata is shared" true
                (contains "shared\n" second));
          let fresh =
            plaintext_request ~until:"new\n"
              "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
          in
-         Alcotest.(check bool) "new connection receives new metadata" true
-           (contains "new\n" fresh)))
+         Alcotest.(check bool)
+           "new connection receives new metadata" true (contains "new\n" fresh)))
 
 let test_runtime_metrics_defaults () =
   let metrics = with_live_server (fun () -> ()) in
-      Alcotest.(check bool)
-        "utilization is normalized"
-        true
-        (metrics.utilization >= 0.0 && metrics.utilization <= 1.0);
-      assert_int64_equal "active connections" 0L metrics.active_connections;
-      assert_int64_equal "active requests" 0L metrics.active_requests;
-      assert_int64_equal "accepted connections" 0L metrics.accepted_connections;
-      assert_int64_equal "rejected connections" 0L metrics.rejected_connections;
-      assert_int64_equal "completed requests" 0L metrics.completed_requests;
-      assert_int64_equal "tls full handshakes" 0L metrics.tls_full_handshakes;
-      assert_int64_equal "tls resumed handshakes" 0L
-        metrics.tls_resumed_handshakes;
-      assert_int64_equal "tls handshake failures" 0L
-        metrics.tls_handshake_failures;
-      assert_int64_equal "event queue depth" 0L metrics.event_queue_depth;
-      assert_int64_equal "command queue depth" 0L metrics.command_queue_depth;
-      Alcotest.(check string)
-        "controller state"
-        "normal"
-        (controller_state metrics.controller_state);
-      Alcotest.(check bool)
-        "backpressure disabled"
-        false
-        metrics.backpressure_enabled
+  Alcotest.(check bool)
+    "utilization is normalized" true
+    (metrics.utilization >= 0.0 && metrics.utilization <= 1.0);
+  assert_int64_equal "active connections" 0L metrics.active_connections;
+  assert_int64_equal "active requests" 0L metrics.active_requests;
+  assert_int64_equal "accepted connections" 0L metrics.accepted_connections;
+  assert_int64_equal "rejected connections" 0L metrics.rejected_connections;
+  assert_int64_equal "completed requests" 0L metrics.completed_requests;
+  assert_int64_equal "tls full handshakes" 0L metrics.tls_full_handshakes;
+  assert_int64_equal "tls resumed handshakes" 0L metrics.tls_resumed_handshakes;
+  assert_int64_equal "tls handshake failures" 0L metrics.tls_handshake_failures;
+  assert_int64_equal "event queue depth" 0L metrics.event_queue_depth;
+  assert_int64_equal "command queue depth" 0L metrics.command_queue_depth;
+  Alcotest.(check string)
+    "controller state" "normal"
+    (controller_state metrics.controller_state);
+  Alcotest.(check bool)
+    "backpressure disabled" false metrics.backpressure_enabled
 
 let test_request_metrics_cover_live_server () =
   let collector =
-    Halo.Metrics.create ~duration_buckets:[ 1.0 ]
-      ~size_buckets:[ 4.0; 8.0 ] ()
+    Halo.Metrics.create ~duration_buckets:[ 1.0 ] ~size_buckets:[ 4.0; 8.0 ] ()
   in
   let router =
     Halo.Router.(
@@ -935,9 +963,10 @@ let test_request_metrics_cover_live_server () =
          let response =
            plaintext_request ~until:"created\n"
              ("POST / HTTP/1.1\r\nHost: localhost\r\n"
-             ^ "Content-Length: 5\r\nConnection: close\r\n\r\nhello")
+            ^ "Content-Length: 5\r\nConnection: close\r\n\r\nhello")
          in
-         Alcotest.(check bool) "response status" true
+         Alcotest.(check bool)
+           "response status" true
            (contains "HTTP/1.1 201 Created" response)));
   let snapshot = Halo.Metrics.snapshot collector in
   let route point =
@@ -959,16 +988,20 @@ let test_request_metrics_cover_live_server () =
     | Halo.Metrics.Histogram histogram -> histogram.sum
     | _ -> fail "live metric %s was not a histogram" name
   in
-  Alcotest.(check (float 0.0)) "request bytes" 5.0
+  Alcotest.(check (float 0.0))
+    "request bytes" 5.0
     (histogram_sum "http.server.request.body.size");
-  Alcotest.(check (float 0.0)) "response bytes" 8.0
+  Alcotest.(check (float 0.0))
+    "response bytes" 8.0
     (histogram_sum "http.server.response.body.size");
   let requests = find "halo.http.server.requests" in
-  Alcotest.(check bool) "2xx status class" true
+  Alcotest.(check bool)
+    "2xx status class" true
     (List.mem
        ("http.response.status_class", Halo.Metrics.String "2xx")
        requests.attributes);
-  Alcotest.(check bool) "runtime points collected" true
+  Alcotest.(check bool)
+    "runtime points collected" true
     (List.exists
        (fun point ->
          String.equal point.Halo.Metrics.name "halo.runtime.queue.depth")
@@ -979,12 +1012,11 @@ let test_tls_metrics_count_full_and_resumed_handshakes_with_explicit_keys () =
       with_temp_file_contents "halo-request" ".txt"
         "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         (fun request_path ->
-          let ticket_request =
-            "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
-          in
+          let ticket_request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" in
           let tls =
             tls_resumption_config
-              ~session_ticket_keys_path:(tls_ticket_keys_fixture_path ()) ()
+              ~session_ticket_keys_path:(tls_ticket_keys_fixture_path ())
+              ()
           in
           let metrics =
             with_live_tls_server tls (fun () ->
@@ -994,7 +1026,8 @@ let test_tls_metrics_count_full_and_resumed_handshakes_with_explicit_keys () =
                 in
                 assert_process_success first;
                 assert_nonempty_file session_path;
-                Alcotest.(check bool) "first response body" true
+                Alcotest.(check bool)
+                  "first response body" true
                   (contains "hello world\n" first.stdout);
                 let second =
                   run_s2nc ~ticket_in:session_path ~send_file:request_path
@@ -1003,17 +1036,17 @@ let test_tls_metrics_count_full_and_resumed_handshakes_with_explicit_keys () =
                 assert_process_success second)
           in
           assert_int64_equal "full handshakes" 1L metrics.tls_full_handshakes;
-          assert_int64_equal "resumed handshakes" 1L metrics.tls_resumed_handshakes;
-          assert_int64_equal "handshake failures" 0L metrics.tls_handshake_failures))
+          assert_int64_equal "resumed handshakes" 1L
+            metrics.tls_resumed_handshakes;
+          assert_int64_equal "handshake failures" 0L
+            metrics.tls_handshake_failures))
 
 let test_tls_metrics_count_ephemeral_resumption_and_restart_invalidation () =
   with_temp_path "halo-session" ".bin" (fun session_path ->
       with_temp_file_contents "halo-request" ".txt"
         "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         (fun request_path ->
-          let ticket_request =
-            "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
-          in
+          let ticket_request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" in
           let metrics_first_run =
             with_live_tls_server (tls_resumption_config ()) (fun () ->
                 let first =
@@ -1035,9 +1068,10 @@ let test_tls_metrics_count_ephemeral_resumption_and_restart_invalidation () =
                 in
                 assert_process_success fresh)
           in
-          assert_int64_equal "restart invalidates saved session full handshakes" 1L
-            metrics_second_run.tls_full_handshakes;
-          assert_int64_equal "restart invalidates saved session resumed handshakes" 0L
+          assert_int64_equal "restart invalidates saved session full handshakes"
+            1L metrics_second_run.tls_full_handshakes;
+          assert_int64_equal
+            "restart invalidates saved session resumed handshakes" 0L
             metrics_second_run.tls_resumed_handshakes))
 
 let test_tls_early_data_defaults_to_425_and_rejects_replay () =
@@ -1045,9 +1079,7 @@ let test_tls_early_data_defaults_to_425_and_rejects_replay () =
       with_temp_file_contents "halo-early" ".txt"
         "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         (fun early_data_path ->
-          let ticket_request =
-            "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
-          in
+          let ticket_request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" in
           let tls = tls_early_data_config () in
           let metrics =
             with_live_tls_server tls (fun () ->
@@ -1059,13 +1091,15 @@ let test_tls_early_data_defaults_to_425_and_rejects_replay () =
                 assert_nonempty_file session_path;
                 let first_early =
                   run_s2nc ~ticket_in:session_path
-                    ~early_data_file:early_data_path ~echo:true ~close_stdin:false
-                    ()
+                    ~early_data_file:early_data_path ~echo:true
+                    ~close_stdin:false ()
                 in
                 assert_process_success first_early;
-                Alcotest.(check bool) "early data accepted" true
+                Alcotest.(check bool)
+                  "early data accepted" true
                   (contains "Early Data status: ACCEPTED" first_early.stdout);
-                if not (contains "HTTP/1.1 425 Too Early" first_early.stdout) then
+                if not (contains "HTTP/1.1 425 Too Early" first_early.stdout)
+                then
                   fail "expected 425 response\nstdout:\n%s\nstderr:\n%s"
                     first_early.stdout first_early.stderr;
                 let replay =
@@ -1073,11 +1107,14 @@ let test_tls_early_data_defaults_to_425_and_rejects_replay () =
                     ~early_data_file:early_data_path ~close_stdin:true ()
                 in
                 assert_process_success replay;
-                Alcotest.(check bool) "early data replay rejected" true
+                Alcotest.(check bool)
+                  "early data replay rejected" true
                   (contains "Early Data status: REJECTED" replay.stdout))
           in
-          assert_int64_equal "0-rtt full handshakes" 1L metrics.tls_full_handshakes;
-          Alcotest.(check bool) "0-rtt resumed handshakes present" true
+          assert_int64_equal "0-rtt full handshakes" 1L
+            metrics.tls_full_handshakes;
+          Alcotest.(check bool)
+            "0-rtt resumed handshakes present" true
             (metrics.tls_resumed_handshakes >= 1L);
           assert_int64_equal "0-rtt handshake failures" 0L
             metrics.tls_handshake_failures))
@@ -1110,18 +1147,21 @@ let test_tls_early_data_policy_opts_in_and_marks_request () =
                  in
                  assert_process_success prime;
                  assert_nonempty_file session_path;
-                 Alcotest.(check bool) "ordinary request marker" true
+                 Alcotest.(check bool)
+                   "ordinary request marker" true
                    (contains "regular\n" prime.stdout);
                  let early =
                    run_s2nc ~ticket_in:session_path
-                     ~early_data_file:early_data_path ~echo:true ~close_stdin:false
-                     ()
+                     ~early_data_file:early_data_path ~echo:true
+                     ~close_stdin:false ()
                  in
                  assert_process_success early;
-                 Alcotest.(check bool) "early data accepted" true
+                 Alcotest.(check bool)
+                   "early data accepted" true
                    (contains "Early Data status: ACCEPTED" early.stdout);
                  if not (contains "early\n" early.stdout) then
-                   fail "expected early response marker\nstdout:\n%s\nstderr:\n%s"
+                   fail
+                     "expected early response marker\nstdout:\n%s\nstderr:\n%s"
                      early.stdout early.stderr))))
 
 let test_tls_early_data_replay_is_atomic_across_runtimes () =
@@ -1139,7 +1179,8 @@ let test_tls_early_data_replay_is_atomic_across_runtimes () =
           let tls = tls_early_data_config () in
           let config port = Halo.Server.Config.create ~port ~tls router in
           ignore
-            (with_live_config_groups [ [ config 8443 ]; [ config 8444 ] ]
+            (with_live_config_groups
+               [ [ config 8443 ]; [ config 8444 ] ]
                (fun () ->
                  let prime =
                    run_s2nc ~port:8443 ~ticket_out:session_path
@@ -1164,12 +1205,15 @@ let test_tls_early_data_replay_is_atomic_across_runtimes () =
                  let count_status status =
                    List.fold_left
                      (fun count result ->
-                       if contains status result.stdout then count + 1 else count)
+                       if contains status result.stdout then count + 1
+                       else count)
                      0 results
                  in
-                 Alcotest.(check int) "one runtime accepts early data" 1
+                 Alcotest.(check int)
+                   "one runtime accepts early data" 1
                    (count_status "Early Data status: ACCEPTED");
-                 Alcotest.(check int) "one runtime rejects the replay" 1
+                 Alcotest.(check int)
+                   "one runtime rejects the replay" 1
                    (count_status "Early Data status: REJECTED")))))
 
 let test_tls_custom_replay_store_contract () =
@@ -1219,28 +1263,34 @@ let test_tls_custom_replay_store_contract () =
                    result
                  in
                  let unavailable = offer ~close_stdin:true () in
-                 Alcotest.(check bool) "unavailable rejects early data" true
+                 Alcotest.(check bool)
+                   "unavailable rejects early data" true
                    (contains "Early Data status: REJECTED" unavailable.stdout);
                  let timed_out = offer ~close_stdin:true () in
-                 Alcotest.(check bool) "timeout rejects early data" true
+                 Alcotest.(check bool)
+                   "timeout rejects early data" true
                    (contains "Early Data status: REJECTED" timed_out.stdout);
                  let failed = offer ~close_stdin:true () in
-                 Alcotest.(check bool) "exception rejects early data" true
+                 Alcotest.(check bool)
+                   "exception rejects early data" true
                    (contains "Early Data status: REJECTED" failed.stdout);
                  let fresh = offer ~echo:true ~close_stdin:false () in
-                 Alcotest.(check bool) "fresh claim accepts early data" true
+                 Alcotest.(check bool)
+                   "fresh claim accepts early data" true
                    (contains "Early Data status: ACCEPTED" fresh.stdout);
                  let duplicate = offer ~close_stdin:true () in
-                 Alcotest.(check bool) "duplicate rejects early data" true
+                 Alcotest.(check bool)
+                   "duplicate rejects early data" true
                    (contains "Early Data status: REJECTED" duplicate.stdout)));
           Alcotest.(check int) "claim callback count" 5 (Atomic.get calls);
-          Alcotest.(check bool) "all offers use the same digest" true
+          Alcotest.(check bool)
+            "all offers use the same digest" true
             (Atomic.get identities_match);
           (match Atomic.get first_identity with
           | None -> fail "expected the replay store to receive an identity"
           | Some identity ->
-              Alcotest.(check int) "SHA-256 identity length" 32
-                (String.length identity));
+              Alcotest.(check int)
+                "SHA-256 identity length" 32 (String.length identity));
           assert_int64_equal "maximum TLS 1.3 ticket TTL" 604800L
             (Atomic.get observed_ttl)))
 
@@ -1276,12 +1326,14 @@ let test_tls_blocking_replay_store_does_not_block_timeout () =
                      ~early_data_file:early_data_path ~close_stdin:true ()
                  in
                  assert_process_success early;
-                 Alcotest.(check bool) "blocking callback started" true
+                 Alcotest.(check bool)
+                   "blocking callback started" true
                    (Atomic.get callback_started);
                  Alcotest.(check bool)
                    "timeout completes before blocking callback" false
                    (Atomic.get callback_finished);
-                 Alcotest.(check bool) "timeout rejects early data" true
+                 Alcotest.(check bool)
+                   "timeout rejects early data" true
                    (contains "Early Data status: REJECTED" early.stdout)))))
 
 let test_blocking_replay_store_deadline_and_capacity () =
@@ -1302,9 +1354,11 @@ let test_blocking_replay_store_deadline_and_capacity () =
       (fun () -> Store.claim store ~identity:"identity" ~ttl_secs:1L)
   in
   Alcotest.(check bool) "timeout wins" true (result = Store.Unavailable);
-  Alcotest.(check bool) "callback remains isolated" false
+  Alcotest.(check bool)
+    "callback remains isolated" false
     (Atomic.get callback_finished);
-  Alcotest.(check bool) "occupied capacity rejects another claim" true
+  Alcotest.(check bool)
+    "occupied capacity rejects another claim" true
     (Store.claim store ~identity:"other" ~ttl_secs:1L = Store.Unavailable)
 
 let () =
@@ -1358,8 +1412,10 @@ let () =
             `Slow
             test_tls_metrics_count_full_and_resumed_handshakes_with_explicit_keys;
           Alcotest.test_case
-            "ephemeral keys resume within a process and invalidate after restart"
-            `Slow test_tls_metrics_count_ephemeral_resumption_and_restart_invalidation;
+            "ephemeral keys resume within a process and invalidate after \
+             restart"
+            `Slow
+            test_tls_metrics_count_ephemeral_resumption_and_restart_invalidation;
           Alcotest.test_case "early data defaults to 425 and rejects replay"
             `Slow test_tls_early_data_defaults_to_425_and_rejects_replay;
           Alcotest.test_case "early data policy opts in and marks request" `Slow

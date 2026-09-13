@@ -13,23 +13,25 @@ type request_event = {
   keep_alive : bool;
   body_expected : bool;
   is_early_data : bool;
-  (** Zero for a one-shot request; stable across a keep-alive connection. *)
+      (** Zero for a one-shot request; stable across a keep-alive connection. *)
   connection_id : int64;
-  (** Present only on the first request of a cached connection, or on a
-      one-shot request. *)
+      (** Present only on the first request of a cached connection, or on a
+          one-shot request. *)
   connection_info : Router.connection_info option;
-  (** C-reactor timestamp captured at the first plaintext request byte. *)
+      (** C-reactor timestamp captured at the first plaintext request byte. *)
   start_monotonic_ns : int64;
-  (** Unix-epoch timestamp captured alongside [start_monotonic_ns]. *)
+      (** Unix-epoch timestamp captured alongside [start_monotonic_ns]. *)
   start_time_unix_ns : int64 option;
 }
 
 type body_chunk_event = { request_id : int64; chunk : string }
+
 type terminal_event = {
   request_id : int64;
   end_monotonic_ns : int64;
   request_body_size : int64;
 }
+
 type pre_dispatch_response_event = {
   request_id : int64;
   method_text : string;
@@ -47,6 +49,7 @@ type pre_dispatch_response_event = {
   response_body_size : int64;
   completed : bool;
 }
+
 type metrics_event = { query_id : int64; payload : string }
 
 type replay_claim_event = {
@@ -56,11 +59,7 @@ type replay_claim_event = {
   ttl_secs : int64;
 }
 
-type unknown_event = {
-  kind : int;
-  request_id : int64;
-  payload : string;
-}
+type unknown_event = { kind : int; request_id : int64; payload : string }
 
 type event =
   | Request of request_event

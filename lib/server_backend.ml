@@ -1,12 +1,7 @@
 (* Reactor-domain backend. Public lifecycle is defined in [Server]. *)
 type t
 type server
-
-type controller_state =
-  | Normal
-  | Busy
-  | Saturated
-  | Recovering
+type controller_state = Normal | Busy | Saturated | Recovering
 
 type runtime_metrics = {
   utilization : float;
@@ -25,13 +20,16 @@ type runtime_metrics = {
 }
 
 type controller_config = Server_config.controller_config
+
 type tls_minimum_protocol_version = Server_config.tls_minimum_protocol_version =
   | TLS12
   | TLS13
+
 type tls_client_auth_mode = Server_config.tls_client_auth_mode =
   | Client_auth_none
   | Client_auth_optional
   | Client_auth_required
+
 type tls_client_auth_config = Server_config.tls_client_auth_config
 type tls_config = Server_config.tls_config
 type runtime_error = string
@@ -193,8 +191,7 @@ let listen runtime (config : config) =
   in
   let tls = create_server_tls_args config.tls in
   create_server_raw runtime ~host:config.host ~port:config.port
-    ~backlog:config.backlog
-    ~max_request_line_size:config.max_request_line_size
+    ~backlog:config.backlog ~max_request_line_size:config.max_request_line_size
     ~max_header_size:config.max_header_size ~max_body_size:config.max_body_size
     ~request_timeout_ms:config.request_timeout_ms
     ~idle_timeout_ms:config.idle_timeout_ms ~tls_enabled:tls.enabled

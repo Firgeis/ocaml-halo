@@ -24,26 +24,26 @@ let test_extract_and_serialize () =
       ]
     |> require_context
   in
-  Alcotest.(check string) "trace ID" trace_id
-    (Trace_context.trace_id context);
-  Alcotest.(check string) "span ID" parent_span_id
+  Alcotest.(check string) "trace ID" trace_id (Trace_context.trace_id context);
+  Alcotest.(check string)
+    "span ID" parent_span_id
     (Trace_context.span_id context);
   Alcotest.(check int) "trace flags" 3 (Trace_context.trace_flags context);
   Alcotest.(check bool) "sampled" true (Trace_context.sampled context);
-  Alcotest.(check (list (pair string string))) "tracestate"
+  Alcotest.(check (list (pair string string)))
+    "tracestate"
     [ ("rojo", "00f067aa0ba902b7"); ("congo", "t61rcWkgMzE") ]
     (Trace_context.tracestate context);
-  Alcotest.(check string) "canonical traceparent"
+  Alcotest.(check string)
+    "canonical traceparent"
     (traceparent ~flags:"03" ())
     (Trace_context.traceparent context);
-  Alcotest.(check (option string)) "canonical tracestate"
-    (Some trace_state)
+  Alcotest.(check (option string))
+    "canonical tracestate" (Some trace_state)
     (Trace_context.tracestate_header context);
-  Alcotest.(check (list (pair string string))) "propagation headers"
-    [
-      ("traceparent", traceparent ~flags:"03" ());
-      ("tracestate", trace_state);
-    ]
+  Alcotest.(check (list (pair string string)))
+    "propagation headers"
+    [ ("traceparent", traceparent ~flags:"03" ()); ("tracestate", trace_state) ]
     (Trace_context.to_headers context)
 
 let test_make_context () =
@@ -53,14 +53,18 @@ let test_make_context () =
     |> require_context
   in
   Alcotest.(check bool) "not sampled" false (Trace_context.sampled context);
-  Alcotest.(check string) "serialized"
+  Alcotest.(check string)
+    "serialized"
     (traceparent ~flags:"00" ())
     (Trace_context.traceparent context);
-  Alcotest.(check bool) "uppercase trace ID is invalid" true
-    (Trace_context.make ~trace_id:(String.uppercase_ascii trace_id)
+  Alcotest.(check bool)
+    "uppercase trace ID is invalid" true
+    (Trace_context.make
+       ~trace_id:(String.uppercase_ascii trace_id)
        ~span_id:parent_span_id ~trace_flags:0 ~tracestate:[]
     = None);
-  Alcotest.(check bool) "trace flags must fit one byte" true
+  Alcotest.(check bool)
+    "trace flags must fit one byte" true
     (Trace_context.make ~trace_id ~span_id:parent_span_id ~trace_flags:256
        ~tracestate:[]
     = None)
@@ -79,15 +83,15 @@ let test_invalid_traceparent_is_ignored () =
   in
   List.iter
     (fun value ->
-      Alcotest.(check bool) (Printf.sprintf "invalid %S" value) true
+      Alcotest.(check bool)
+        (Printf.sprintf "invalid %S" value)
+        true
         (Trace_context.of_headers [ ("traceparent", value) ] = None))
     invalid;
-  Alcotest.(check bool) "duplicate traceparent" true
+  Alcotest.(check bool)
+    "duplicate traceparent" true
     (Trace_context.of_headers
-       [
-         ("traceparent", traceparent ());
-         ("TraceParent", traceparent ());
-       ]
+       [ ("traceparent", traceparent ()); ("TraceParent", traceparent ()) ]
     = None)
 
 let test_future_traceparent_version () =
@@ -95,8 +99,8 @@ let test_future_traceparent_version () =
   let context =
     Trace_context.of_headers [ ("traceparent", value) ] |> require_context
   in
-  Alcotest.(check string) "future version fields are retained"
-    (traceparent ())
+  Alcotest.(check string)
+    "future version fields are retained" (traceparent ())
     (Trace_context.traceparent context)
 
 let test_invalid_tracestate_is_discarded () =
@@ -106,7 +110,8 @@ let test_invalid_tracestate_is_discarded () =
         [ ("traceparent", traceparent ()); ("tracestate", tracestate) ]
       |> require_context
     in
-    Alcotest.(check (list (pair string string))) label []
+    Alcotest.(check (list (pair string string)))
+      label []
       (Trace_context.tracestate context)
   in
   check "duplicate keys" "vendor=one,vendor=two";
@@ -150,26 +155,26 @@ let wait_for_process process ~timeout =
 
 let signal_process process signal =
   if process.status = None then
-    try Unix.kill process.pid signal with
-    | Unix.Unix_error (Unix.ESRCH, _, _) -> ()
+    try Unix.kill process.pid signal
+    with Unix.Unix_error (Unix.ESRCH, _, _) -> ()
 
 let stop_process process =
   match poll_process process with
   | Some status -> status
-  | None ->
+  | None -> (
       signal_process process Sys.sigterm;
-      (match wait_for_process process ~timeout:5.0 with
+      match wait_for_process process ~timeout:5.0 with
       | Some status -> status
-      | None ->
+      | None -> (
           signal_process process Sys.sigkill;
           match wait_for_process process ~timeout:2.0 with
           | Some status -> status
           | None -> fail "collector process %d could not be reaped" process.pid)
+      )
 
 let string_of_process_status = function
   | Unix.WEXITED code -> Printf.sprintf "exited with code %d" code
-  | Unix.WSIGNALED signal ->
-      Printf.sprintf "terminated by signal %d" signal
+  | Unix.WSIGNALED signal -> Printf.sprintf "terminated by signal %d" signal
   | Unix.WSTOPPED signal -> Printf.sprintf "stopped by signal %d" signal
 
 let collector_path () =
@@ -194,13 +199,13 @@ let can_connect port =
     ~finally:(fun () -> Unix.close socket)
     (fun () ->
       try
-        Unix.connect socket
-          (Unix.ADDR_INET (Unix.inet_addr_loopback, port));
+        Unix.connect socket (Unix.ADDR_INET (Unix.inet_addr_loopback, port));
         true
       with
       | Unix.Unix_error
-          ((Unix.ECONNREFUSED | Unix.ECONNRESET | Unix.ETIMEDOUT), _, _) ->
-          false)
+          ((Unix.ECONNREFUSED | Unix.ECONNRESET | Unix.ETIMEDOUT), _, _)
+      ->
+        false)
 
 let wait_for_collector process ~port ~log_path =
   let deadline = Unix.gettimeofday () +. 10.0 in
@@ -224,9 +229,7 @@ let wait_for_collector process ~port ~log_path =
 let start_collector ~config_path ~log_path =
   let executable = collector_path () in
   let input = Unix.openfile "/dev/null" [ Unix.O_RDONLY ] 0 in
-  let log =
-    Unix.openfile log_path [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600
-  in
+  let log = Unix.openfile log_path [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
   Fun.protect
     ~finally:(fun () ->
       Unix.close input;
@@ -235,8 +238,7 @@ let start_collector ~config_path ~log_path =
       let argv = [| executable; "--config"; config_path |] in
       { pid = Unix.create_process executable argv input log log; status = None })
 
-let remove_if_present path =
-  try Sys.remove path with Sys_error _ -> ()
+let remove_if_present path = try Sys.remove path with Sys_error _ -> ()
 
 let with_collector ~port run =
   let config_path = Filename.temp_file "halo-otelcol" ".yaml" in
@@ -245,7 +247,27 @@ let with_collector ~port run =
   remove_if_present output_path;
   let config =
     Printf.sprintf
-      "receivers:\n  otlp:\n    protocols:\n      http:\n        endpoint: 127.0.0.1:%d\nexporters:\n  file:\n    path: %S\n    format: json\n    flush_interval: 10ms\nservice:\n  telemetry:\n    logs:\n      level: warn\n  pipelines:\n    traces:\n      receivers: [otlp]\n      exporters: [file]\n    metrics:\n      receivers: [otlp]\n      exporters: [file]\n"
+      "receivers:\n\
+      \  otlp:\n\
+      \    protocols:\n\
+      \      http:\n\
+      \        endpoint: 127.0.0.1:%d\n\
+       exporters:\n\
+      \  file:\n\
+      \    path: %S\n\
+      \    format: json\n\
+      \    flush_interval: 10ms\n\
+       service:\n\
+      \  telemetry:\n\
+      \    logs:\n\
+      \      level: warn\n\
+      \  pipelines:\n\
+      \    traces:\n\
+      \      receivers: [otlp]\n\
+      \      exporters: [file]\n\
+      \    metrics:\n\
+      \      receivers: [otlp]\n\
+      \      exporters: [file]\n"
       port output_path
   in
   Out_channel.with_open_bin config_path (fun channel ->
@@ -312,8 +334,7 @@ let request_halo_raw port request =
   Fun.protect
     ~finally:(fun () -> Unix.close socket)
     (fun () ->
-      Unix.connect socket
-        (Unix.ADDR_INET (Unix.inet_addr_loopback, port));
+      Unix.connect socket (Unix.ADDR_INET (Unix.inet_addr_loopback, port));
       write_all socket request;
       Unix.shutdown socket Unix.SHUTDOWN_SEND;
       read_all socket)
@@ -321,7 +342,12 @@ let request_halo_raw port request =
 let request_halo port =
   request_halo_raw port
     (Printf.sprintf
-       "GET /otel/42 HTTP/1.1\r\nHost: localhost\r\ntraceparent: %s\r\ntracestate: %s\r\nConnection: close\r\n\r\n"
+       "GET /otel/42 HTTP/1.1\r\n\
+        Host: localhost\r\n\
+        traceparent: %s\r\n\
+        tracestate: %s\r\n\
+        Connection: close\r\n\
+        \r\n"
        (traceparent ()) trace_state)
 
 let result_error label = function
@@ -342,8 +368,7 @@ let wait_for_metric_status metrics status =
   let deadline = Unix.gettimeofday () +. 5.0 in
   let rec loop () =
     let observed =
-      Halo.Metrics.snapshot metrics
-      |> fun snapshot ->
+      Halo.Metrics.snapshot metrics |> fun snapshot ->
       List.exists (metric_has_status status) snapshot.Halo.Metrics.points
     in
     if observed then ()
@@ -405,8 +430,7 @@ let run_halo_export ~collector_port ~server_port
   in
   let running = Eio.Promise.await started in
   let request_outcome =
-    try
-      Ok (run_requests env sw server_port)
+    try Ok (run_requests env sw server_port)
     with exn -> Error (exn, Printexc.get_raw_backtrace ())
   in
   (match request_outcome with
@@ -425,8 +449,7 @@ let run_halo_export ~collector_port ~server_port
     with exn -> Error (exn, Printexc.get_raw_backtrace ())
   in
   let flush_error =
-    Halo.Telemetry.Processor.force_flush processor
-    |> result_error "force flush"
+    Halo.Telemetry.Processor.force_flush processor |> result_error "force flush"
   in
   let shutdown_error =
     Halo.Telemetry.Processor.shutdown processor
@@ -448,19 +471,22 @@ let json_field name = function
       match List.assoc_opt name fields with
       | Some value -> value
       | None -> fail "OTLP JSON object has no %S field" name)
-  | json -> fail "expected an OTLP JSON object, got %s" (Yojson.Safe.to_string json)
+  | json ->
+      fail "expected an OTLP JSON object, got %s" (Yojson.Safe.to_string json)
 
 let json_list_field name json =
   match json_field name json with
   | `List values -> values
-  | value -> fail "OTLP JSON field %S is not a list: %s" name
-               (Yojson.Safe.to_string value)
+  | value ->
+      fail "OTLP JSON field %S is not a list: %s" name
+        (Yojson.Safe.to_string value)
 
 let json_string_field name json =
   match json_field name json with
   | `String value -> value
-  | value -> fail "OTLP JSON field %S is not a string: %s" name
-               (Yojson.Safe.to_string value)
+  | value ->
+      fail "OTLP JSON field %S is not a string: %s" name
+        (Yojson.Safe.to_string value)
 
 let json_int64_field name json =
   match json_field name json with
@@ -469,8 +495,9 @@ let json_int64_field name json =
       | Some value -> value
       | None -> fail "OTLP JSON field %S is not an int64: %s" name value)
   | `Int value -> Int64.of_int value
-  | value -> fail "OTLP JSON field %S is not an int64: %s" name
-               (Yojson.Safe.to_string value)
+  | value ->
+      fail "OTLP JSON field %S is not an int64: %s" name
+        (Yojson.Safe.to_string value)
 
 let json_float_field name json =
   match json_field name json with
@@ -480,8 +507,9 @@ let json_float_field name json =
       match Float.of_string_opt value with
       | Some value -> value
       | None -> fail "OTLP JSON field %S is not a float: %s" name value)
-  | value -> fail "OTLP JSON field %S is not a float: %s" name
-               (Yojson.Safe.to_string value)
+  | value ->
+      fail "OTLP JSON field %S is not a float: %s" name
+        (Yojson.Safe.to_string value)
 
 let attribute_value_opt key owner =
   let attributes = json_list_field "attributes" owner in
@@ -490,8 +518,7 @@ let attribute_value_opt key owner =
     | attribute :: rest ->
         if json_string_field "key" attribute = key then
           Some (json_field "value" attribute)
-        else
-          find rest
+        else find rest
   in
   find attributes
 
@@ -503,8 +530,9 @@ let attribute_value key owner =
 let string_attribute key owner =
   match json_field "stringValue" (attribute_value key owner) with
   | `String value -> value
-  | value -> fail "OTLP attribute %S is not a string: %s" key
-               (Yojson.Safe.to_string value)
+  | value ->
+      fail "OTLP attribute %S is not a string: %s" key
+        (Yojson.Safe.to_string value)
 
 let int64_attribute key owner =
   json_int64_field "intValue" (attribute_value key owner)
@@ -521,8 +549,7 @@ let find_exported_span documents expected_name =
           | scope_spans :: remaining_scopes -> (
               match
                 List.find_opt
-                  (fun span ->
-                    json_string_field "name" span = expected_name)
+                  (fun span -> json_string_field "name" span = expected_name)
                   (json_list_field "spans" scope_spans)
               with
               | Some span -> Some (resource_spans, scope_spans, span)
@@ -533,14 +560,13 @@ let find_exported_span documents expected_name =
   let resource_spans =
     List.filter_map
       (function
-        | `Assoc fields -> List.assoc_opt "resourceSpans" fields
-        | _ -> None)
+        | `Assoc fields -> List.assoc_opt "resourceSpans" fields | _ -> None)
       documents
     |> List.concat_map (function
-         | `List values -> values
-         | value ->
-             fail "OTLP resourceSpans is not a list: %s"
-               (Yojson.Safe.to_string value))
+      | `List values -> values
+      | value ->
+          fail "OTLP resourceSpans is not a list: %s"
+            (Yojson.Safe.to_string value))
   in
   match find_resource_spans resource_spans with
   | Some result -> result
@@ -550,14 +576,13 @@ let find_exported_metric documents expected_name =
   let resource_metrics =
     List.filter_map
       (function
-        | `Assoc fields -> List.assoc_opt "resourceMetrics" fields
-        | _ -> None)
+        | `Assoc fields -> List.assoc_opt "resourceMetrics" fields | _ -> None)
       documents
     |> List.concat_map (function
-         | `List values -> values
-         | value ->
-             fail "OTLP resourceMetrics is not a list: %s"
-               (Yojson.Safe.to_string value))
+      | `List values -> values
+      | value ->
+          fail "OTLP resourceMetrics is not a list: %s"
+            (Yojson.Safe.to_string value))
   in
   let rec find_resources = function
     | [] -> fail "collector did not export metric %S" expected_name
@@ -584,8 +609,7 @@ let find_metric_data_point metric aggregation status =
     json_field aggregation metric
     |> json_list_field "dataPoints"
     |> List.find_opt (fun point ->
-           int64_attribute_opt "http.response.status_code" point
-           = Some expected)
+        int64_attribute_opt "http.response.status_code" point = Some expected)
   with
   | Some point -> point
   | None ->
@@ -594,11 +618,10 @@ let find_metric_data_point metric aggregation status =
         status
 
 let parse_json_lines contents =
-  contents
-  |> String.split_on_char '\n'
+  contents |> String.split_on_char '\n'
   |> List.filter_map (fun line ->
-         let line = String.trim line in
-         if line = "" then None else Some (Yojson.Safe.from_string line))
+      let line = String.trim line in
+      if line = "" then None else Some (Yojson.Safe.from_string line))
 
 let wait_for_export path =
   let deadline = Unix.gettimeofday () +. 5.0 in
@@ -616,13 +639,13 @@ let wait_for_export path =
                    documents
                  && List.exists
                       (function
-                        | `Assoc fields -> List.mem_assoc "resourceMetrics" fields
+                        | `Assoc fields ->
+                            List.mem_assoc "resourceMetrics" fields
                         | _ -> false)
                       documents ->
               Ok documents
           | _ -> Error "not all telemetry signals have been flushed"
-        else
-          Error "the export file does not exist"
+        else Error "the export file does not exist"
       with
       | Yojson.Json_error message -> Error message
       | Sys_error message -> Error message
@@ -646,65 +669,87 @@ let test_export_to_reference_collector () =
             Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
                 request_halo port))
       in
-      Alcotest.(check bool) "Halo response status" true
+      Alcotest.(check bool)
+        "Halo response status" true
         (String.starts_with ~prefix:"HTTP/1.1 200 OK\r\n" response);
       let documents = wait_for_export output_path in
       let resource_spans, scope_spans, span =
         find_exported_span documents "GET /otel/{id}"
       in
       let resource = json_field "resource" resource_spans in
-      Alcotest.(check string) "service name" "halo-otel-integration"
+      Alcotest.(check string)
+        "service name" "halo-otel-integration"
         (string_attribute "service.name" resource);
       let scope = json_field "scope" scope_spans in
-      Alcotest.(check string) "instrumentation scope" "ocaml-halo"
+      Alcotest.(check string)
+        "instrumentation scope" "ocaml-halo"
         (json_string_field "name" scope);
-      Alcotest.(check string) "propagated trace ID" trace_id
+      Alcotest.(check string)
+        "propagated trace ID" trace_id
         (String.lowercase_ascii (json_string_field "traceId" span));
-      Alcotest.(check string) "parent span ID" parent_span_id
+      Alcotest.(check string)
+        "parent span ID" parent_span_id
         (String.lowercase_ascii (json_string_field "parentSpanId" span));
       let span_id = json_string_field "spanId" span in
       Alcotest.(check int) "span ID length" 16 (String.length span_id);
-      Alcotest.(check bool) "span ID is nonzero" false
+      Alcotest.(check bool)
+        "span ID is nonzero" false
         (String.equal span_id "0000000000000000");
-      Alcotest.(check string) "propagated tracestate" trace_state
+      Alcotest.(check string)
+        "propagated tracestate" trace_state
         (json_string_field "traceState" span);
-      Alcotest.(check string) "HTTP method" "GET"
+      Alcotest.(check string)
+        "HTTP method" "GET"
         (string_attribute "http.request.method" span);
-      Alcotest.(check string) "HTTP route" "/otel/{id}"
+      Alcotest.(check string)
+        "HTTP route" "/otel/{id}"
         (string_attribute "http.route" span);
-      Alcotest.(check int64) "HTTP status" 200L
+      Alcotest.(check int64)
+        "HTTP status" 200L
         (int64_attribute "http.response.status_code" span);
-      Alcotest.(check int64) "HTTP request body size" 0L
+      Alcotest.(check int64)
+        "HTTP request body size" 0L
         (int64_attribute "http.request.body.size" span);
-      Alcotest.(check int64) "HTTP response body size" 9L
+      Alcotest.(check int64)
+        "HTTP response body size" 9L
         (int64_attribute "http.response.body.size" span);
       let start_time = json_int64_field "startTimeUnixNano" span in
       let end_time = json_int64_field "endTimeUnixNano" span in
-      Alcotest.(check bool) "C request start time is populated" true
+      Alcotest.(check bool)
+        "C request start time is populated" true
         (Int64.compare start_time 0L > 0);
-      Alcotest.(check bool) "span ends after it starts" true
+      Alcotest.(check bool)
+        "span ends after it starts" true
         (Int64.compare end_time start_time >= 0);
       let metric_resource, metric_scope, duration =
         find_exported_metric documents "http.server.request.duration"
       in
-      Alcotest.(check string) "metrics service name" "halo-otel-integration"
-        (string_attribute "service.name" (json_field "resource" metric_resource));
-      Alcotest.(check string) "metrics instrumentation scope" "ocaml-halo"
+      Alcotest.(check string)
+        "metrics service name" "halo-otel-integration"
+        (string_attribute "service.name"
+           (json_field "resource" metric_resource));
+      Alcotest.(check string)
+        "metrics instrumentation scope" "ocaml-halo"
         (json_string_field "name" (json_field "scope" metric_scope));
       let data_point =
         json_field "histogram" duration
         |> json_list_field "dataPoints"
         |> List.hd
       in
-      Alcotest.(check int64) "request duration count" 1L
+      Alcotest.(check int64)
+        "request duration count" 1L
         (json_int64_field "count" data_point);
-      Alcotest.(check string) "metric route" "/otel/{id}"
+      Alcotest.(check string)
+        "metric route" "/otel/{id}"
         (string_attribute "http.route" data_point);
       let _runtime_resource, _runtime_scope, queue =
         find_exported_metric documents "halo.runtime.queue.depth"
       in
-      let queue_points = json_field "gauge" queue |> json_list_field "dataPoints" in
-      Alcotest.(check bool) "event and command queue points" true
+      let queue_points =
+        json_field "gauge" queue |> json_list_field "dataPoints"
+      in
+      Alcotest.(check bool)
+        "event and command queue points" true
         (List.exists
            (fun point -> String.equal (string_attribute "queue" point) "event")
            queue_points
@@ -717,42 +762,56 @@ let check_pre_dispatch_export documents ~status ~path ~response_body_size =
   let _resource_spans, _scope_spans, span =
     find_exported_span documents "GET"
   in
-  Alcotest.(check string) "propagated trace ID" trace_id
+  Alcotest.(check string)
+    "propagated trace ID" trace_id
     (String.lowercase_ascii (json_string_field "traceId" span));
-  Alcotest.(check string) "parent span ID" parent_span_id
+  Alcotest.(check string)
+    "parent span ID" parent_span_id
     (String.lowercase_ascii (json_string_field "parentSpanId" span));
-  Alcotest.(check string) "propagated tracestate" trace_state
+  Alcotest.(check string)
+    "propagated tracestate" trace_state
     (json_string_field "traceState" span);
-  Alcotest.(check string) "HTTP method" "GET"
+  Alcotest.(check string)
+    "HTTP method" "GET"
     (string_attribute "http.request.method" span);
   Alcotest.(check string) "URL path" path (string_attribute "url.path" span);
-  Alcotest.(check string) "HTTP version" "1.1"
+  Alcotest.(check string)
+    "HTTP version" "1.1"
     (string_attribute "network.protocol.version" span);
-  Alcotest.(check bool) "no route attribute" false
+  Alcotest.(check bool)
+    "no route attribute" false
     (Option.is_some (attribute_value_opt "http.route" span));
-  Alcotest.(check int64) "HTTP status" (Int64.of_int status)
+  Alcotest.(check int64)
+    "HTTP status" (Int64.of_int status)
     (int64_attribute "http.response.status_code" span);
-  Alcotest.(check int64) "HTTP request body size" 0L
+  Alcotest.(check int64)
+    "HTTP request body size" 0L
     (int64_attribute "http.request.body.size" span);
-  Alcotest.(check int64) "HTTP response body size"
+  Alcotest.(check int64)
+    "HTTP response body size"
     (Int64.of_int response_body_size)
     (int64_attribute "http.response.body.size" span);
   let start_time = json_int64_field "startTimeUnixNano" span in
   let end_time = json_int64_field "endTimeUnixNano" span in
-  Alcotest.(check bool) "C request start time is populated" true
+  Alcotest.(check bool)
+    "C request start time is populated" true
     (Int64.compare start_time 0L > 0);
-  Alcotest.(check bool) "span ends after it starts" true
+  Alcotest.(check bool)
+    "span ends after it starts" true
     (Int64.compare end_time start_time >= 0);
 
   let _duration_resource, _duration_scope, duration =
     find_exported_metric documents "http.server.request.duration"
   in
   let duration_point = find_metric_data_point duration "histogram" status in
-  Alcotest.(check int64) "request duration count" 1L
+  Alcotest.(check int64)
+    "request duration count" 1L
     (json_int64_field "count" duration_point);
-  Alcotest.(check string) "metric method" "GET"
+  Alcotest.(check string)
+    "metric method" "GET"
     (string_attribute "http.request.method" duration_point);
-  Alcotest.(check bool) "metric has no route" false
+  Alcotest.(check bool)
+    "metric has no route" false
     (Option.is_some (attribute_value_opt "http.route" duration_point));
 
   let _body_resource, _body_scope, response_body =
@@ -761,9 +820,11 @@ let check_pre_dispatch_export documents ~status ~path ~response_body_size =
   let response_body_point =
     find_metric_data_point response_body "histogram" status
   in
-  Alcotest.(check int64) "response body histogram count" 1L
+  Alcotest.(check int64)
+    "response body histogram count" 1L
     (json_int64_field "count" response_body_point);
-  Alcotest.(check (float 0.000_001)) "response body histogram sum"
+  Alcotest.(check (float 0.000_001))
+    "response body histogram sum"
     (Float.of_int response_body_size)
     (json_float_field "sum" response_body_point);
 
@@ -771,15 +832,19 @@ let check_pre_dispatch_export documents ~status ~path ~response_body_size =
     find_exported_metric documents "halo.http.server.requests"
   in
   let requests_point = find_metric_data_point requests "sum" status in
-  Alcotest.(check int64) "request counter" 1L
+  Alcotest.(check int64)
+    "request counter" 1L
     (json_int64_field "asInt" requests_point);
-  Alcotest.(check string) "status class"
+  Alcotest.(check string)
+    "status class"
     (Printf.sprintf "%dxx" (status / 100))
     (string_attribute "http.response.status_class" requests_point);
-  Alcotest.(check string) "response outcome" "completed"
+  Alcotest.(check string)
+    "response outcome" "completed"
     (string_attribute "halo.response.outcome" requests_point);
   if status >= 500 then
-    Alcotest.(check string) "metric error type" (string_of_int status)
+    Alcotest.(check string)
+      "metric error type" (string_of_int status)
       (string_attribute "error.type" requests_point)
 
 let test_export_pre_dispatch_parser_failure () =
@@ -788,7 +853,13 @@ let test_export_pre_dispatch_parser_failure () =
       let server_port = unused_tcp_port () in
       let request =
         Printf.sprintf
-          "GET /invalid HTTP/1.1\r\nHost: localhost\r\ntraceparent: %s\r\ntracestate: %s\r\nHost: duplicate\r\nConnection: close\r\n\r\n"
+          "GET /invalid HTTP/1.1\r\n\
+           Host: localhost\r\n\
+           traceparent: %s\r\n\
+           tracestate: %s\r\n\
+           Host: duplicate\r\n\
+           Connection: close\r\n\
+           \r\n"
           (traceparent ()) trace_state
       in
       let response =
@@ -797,7 +868,8 @@ let test_export_pre_dispatch_parser_failure () =
             Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
                 request_halo_raw port request))
       in
-      Alcotest.(check bool) "parser response status" true
+      Alcotest.(check bool)
+        "parser response status" true
         (String.starts_with ~prefix:"HTTP/1.1 400 Bad Request\r\n" response);
       wait_for_export output_path
       |> check_pre_dispatch_export ~status:400 ~path:"/invalid"
@@ -831,9 +903,8 @@ let test_export_pre_dispatch_admission_rejection () =
                     text Status.ok "unexpected\n"))
       in
       let rejected_response, slow_response =
-        run_halo_export ~collector_port ~server_port
-          ~max_in_flight_requests:1 ~expected_status:503 ~router
-          (fun env sw port ->
+        run_halo_export ~collector_port ~server_port ~max_in_flight_requests:1
+          ~expected_status:503 ~router (fun env sw port ->
             let domain_request request =
               Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
                   request_halo_raw port request)
@@ -841,7 +912,10 @@ let test_export_pre_dispatch_admission_rejection () =
             let slow =
               Eio.Fiber.fork_promise ~sw (fun () ->
                   domain_request
-                    "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    "GET /slow HTTP/1.1\r\n\
+                     Host: localhost\r\n\
+                     Connection: close\r\n\
+                     \r\n")
             in
             Eio.Promise.await handler_started;
             let rejected =
@@ -851,17 +925,25 @@ let test_export_pre_dispatch_admission_rejection () =
                 (fun () ->
                   domain_request
                     (Printf.sprintf
-                       "GET /rejected HTTP/1.1\r\nHost: localhost\r\ntraceparent: %s\r\ntracestate: %s\r\nConnection: close\r\n\r\n"
+                       "GET /rejected HTTP/1.1\r\n\
+                        Host: localhost\r\n\
+                        traceparent: %s\r\n\
+                        tracestate: %s\r\n\
+                        Connection: close\r\n\
+                        \r\n"
                        (traceparent ()) trace_state))
             in
             (rejected, Eio.Promise.await_exn slow))
       in
-      Alcotest.(check bool) "admission response status" true
+      Alcotest.(check bool)
+        "admission response status" true
         (String.starts_with ~prefix:"HTTP/1.1 503 Service Unavailable\r\n"
            rejected_response);
-      Alcotest.(check bool) "slow response status" true
+      Alcotest.(check bool)
+        "slow response status" true
         (String.starts_with ~prefix:"HTTP/1.1 200 OK\r\n" slow_response);
-      Alcotest.(check int) "rejected handler did not run" 0
+      Alcotest.(check int)
+        "rejected handler did not run" 0
         (Atomic.get rejected_handler_calls);
       wait_for_export output_path
       |> check_pre_dispatch_export ~status:503 ~path:"/rejected"

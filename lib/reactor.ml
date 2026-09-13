@@ -47,6 +47,7 @@ type request_event = {
 }
 
 type body_chunk_event = { request_id : int64; chunk : string }
+
 type terminal_event = {
   request_id : int64;
   end_monotonic_ns : int64;
@@ -80,11 +81,7 @@ type replay_claim_event = {
   ttl_secs : int64;
 }
 
-type unknown_event = {
-  kind : int;
-  request_id : int64;
-  payload : string;
-}
+type unknown_event = { kind : int; request_id : int64; payload : string }
 
 type event =
   | Request of request_event
@@ -116,7 +113,8 @@ external enable_raw :
 external event_fd : Server_backend.t -> Unix.file_descr
   = "ocaml_halo_bridge_event_fd"
 
-external drain_wakeup : Server_backend.t -> unit = "ocaml_halo_bridge_drain_wakeup"
+external drain_wakeup : Server_backend.t -> unit
+  = "ocaml_halo_bridge_drain_wakeup"
 
 external poll_event_raw : Server_backend.t -> raw_event option
   = "ocaml_halo_bridge_poll_event"
@@ -174,8 +172,8 @@ let pre_dispatch_response_of_raw (raw : raw_event) ~start_monotonic_ns
       Int64_encoding.of_big_endian raw.payload ~offset:16 )
   with
   | 25, Some status_code, Some request_body_size, Some response_body_size
-    when status_code >= 100L && status_code <= 599L
-         && request_body_size >= 0L && response_body_size >= 0L
+    when status_code >= 100L && status_code <= 599L && request_body_size >= 0L
+         && response_body_size >= 0L
          && (raw.payload.[24] = '\000' || raw.payload.[24] = '\001') ->
       Some
         {
@@ -260,7 +258,11 @@ let event_of_raw (raw : raw_event) =
       | Some event -> Pre_dispatch_response event
       | None ->
           Unknown
-            { kind = raw.kind; request_id = raw.request_id; payload = raw.payload })
+            {
+              kind = raw.kind;
+              request_id = raw.request_id;
+              payload = raw.payload;
+            })
   | kind -> Unknown { kind; request_id = raw.request_id; payload = raw.payload }
 
 let poll_event runtime = Option.map event_of_raw (poll_event_raw runtime)
@@ -388,7 +390,8 @@ let metrics_of_payload payload =
         tls_handshake_failures = Int64.of_string tls_handshake_failures;
         event_queue_depth = Int64.of_string event_queue_depth;
         command_queue_depth = Int64.of_string command_queue_depth;
-        controller_state = controller_state_of_int (int_of_string controller_state);
+        controller_state =
+          controller_state_of_int (int_of_string controller_state);
         backpressure_enabled = int_of_string backpressure_enabled <> 0;
       }
   | _ -> raise (Runtime_error "malformed runtime metrics event")

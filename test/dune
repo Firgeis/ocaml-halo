@@ -2,17 +2,25 @@
  (name integration_http)
  (modules integration_http)
  (libraries unix alcotest)
-  (deps
+ (deps
+  %{exe:demo_server.exe}
+  fixtures/tls-cert.pem
+  fixtures/tls-key.pem
+  fixtures/tls-ticket-keys-malformed.txt)
+ (action
+  (setenv
+   HALO_SERVER_BIN
    %{exe:demo_server.exe}
-   fixtures/tls-cert.pem
-   fixtures/tls-key.pem
-   fixtures/tls-ticket-keys-malformed.txt)
-  (action
-   (setenv HALO_SERVER_BIN %{exe:demo_server.exe}
-    (setenv HALO_TLS_CERT_FIXTURE %{dep:fixtures/tls-cert.pem}
-     (setenv HALO_TLS_KEY_FIXTURE %{dep:fixtures/tls-key.pem}
-      (setenv HALO_TLS_TICKET_KEYS_MALFORMED_FIXTURE %{dep:fixtures/tls-ticket-keys-malformed.txt}
-       (run %{test})))))))
+   (setenv
+    HALO_TLS_CERT_FIXTURE
+    %{dep:fixtures/tls-cert.pem}
+    (setenv
+     HALO_TLS_KEY_FIXTURE
+     %{dep:fixtures/tls-key.pem}
+     (setenv
+      HALO_TLS_TICKET_KEYS_MALFORMED_FIXTURE
+      %{dep:fixtures/tls-ticket-keys-malformed.txt}
+      (run %{test})))))))
 
 (executable
  (name demo_server)
@@ -38,12 +46,14 @@
  (name concurrency_integration)
  (modules concurrency_integration)
  (libraries unix alcotest)
- (deps
-  %{exe:concurrency_server.exe}
-  %{exe:multi_server.exe})
+ (deps %{exe:concurrency_server.exe} %{exe:multi_server.exe})
  (action
-  (setenv HALO_CONCURRENCY_SERVER_BIN %{exe:concurrency_server.exe}
-   (setenv HALO_MULTI_SERVER_BIN %{exe:multi_server.exe}
+  (setenv
+   HALO_CONCURRENCY_SERVER_BIN
+   %{exe:concurrency_server.exe}
+   (setenv
+    HALO_MULTI_SERVER_BIN
+    %{exe:multi_server.exe}
     (run %{test})))))
 
 (test
@@ -67,7 +77,9 @@
  (libraries ocaml-halo eio_main unix alcotest yojson)
  (deps ../vendor/otelcol/otelcol)
  (action
-  (setenv HALO_OTELCOL_BIN %{dep:../vendor/otelcol/otelcol}
+  (setenv
+   HALO_OTELCOL_BIN
+   %{dep:../vendor/otelcol/otelcol}
    (run %{test}))))
 
 (test
@@ -90,10 +102,18 @@
   fixtures/tls-ticket-keys.txt
   ../c/s2nc)
  (action
-  (setenv HALO_TLS_CERT_FIXTURE %{dep:fixtures/tls-cert.pem}
-   (setenv HALO_TLS_KEY_FIXTURE %{dep:fixtures/tls-key.pem}
-    (setenv HALO_TLS_TICKET_KEYS_FIXTURE %{dep:fixtures/tls-ticket-keys.txt}
-     (setenv HALO_S2NC_BIN %{dep:../c/s2nc}
+  (setenv
+   HALO_TLS_CERT_FIXTURE
+   %{dep:fixtures/tls-cert.pem}
+   (setenv
+    HALO_TLS_KEY_FIXTURE
+    %{dep:fixtures/tls-key.pem}
+    (setenv
+     HALO_TLS_TICKET_KEYS_FIXTURE
+     %{dep:fixtures/tls-ticket-keys.txt}
+     (setenv
+      HALO_S2NC_BIN
+      %{dep:../c/s2nc}
       (run %{test})))))))
 
 (test

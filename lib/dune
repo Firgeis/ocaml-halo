@@ -1,4 +1,4 @@
- (library
+(library
  (name halo)
  (public_name ocaml-halo)
  (modules
@@ -27,8 +27,4 @@
  (libraries eio eio.unix uri)
  (foreign_archives ../c/halo_stubs ../c/halo_s2n)
  (c_library_flags
-  (-lcrypto
-   -lpthread
-   -ldl
-   -lrt
-   -lm)))
+  (-lcrypto -lpthread -ldl -lrt -lm)))

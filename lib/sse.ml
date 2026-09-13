@@ -5,21 +5,18 @@ type event = {
   retry_ms : int option;
 }
 
-type message =
-  | Event of event
-  | Comment of string
+type message = Event of event | Comment of string
 
 let default_headers = Router.Headers.sse_defaults
-
 let event ?event ?id ?retry_ms data = Event { event; data; id; retry_ms }
 let comment line = Comment line
 
 let add_prefixed_lines buffer prefix value =
   String.split_on_char '\n' value
   |> List.iter (fun line ->
-         Buffer.add_string buffer prefix;
-         Buffer.add_string buffer line;
-         Buffer.add_string buffer "\n")
+      Buffer.add_string buffer prefix;
+      Buffer.add_string buffer line;
+      Buffer.add_string buffer "\n")
 
 let encode_message = function
   | Comment line ->

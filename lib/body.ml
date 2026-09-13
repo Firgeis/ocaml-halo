@@ -4,21 +4,17 @@ type t = {
   mutable ended : bool;
 }
 
-let create ~read =
-  {
-    pull = read;
-    mutex = Eio.Mutex.create ();
-    ended = false;
-  }
+let create ~read = { pull = read; mutex = Eio.Mutex.create (); ended = false }
 
 let of_string value =
   let pending = ref (if String.length value = 0 then None else Some value) in
-  let body = create ~read:(fun () ->
-      match !pending with
-      | None -> None
-      | Some chunk ->
-          pending := None;
-          Some chunk)
+  let body =
+    create ~read:(fun () ->
+        match !pending with
+        | None -> None
+        | Some chunk ->
+            pending := None;
+            Some chunk)
   in
   if String.length value = 0 then body.ended <- true;
   body
