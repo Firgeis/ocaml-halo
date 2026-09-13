@@ -15,6 +15,7 @@
  (depends
   (conf-libssl :build)
   (conf-pkg-config :build)
+  (conf-cmake :build)
   eio
   uri
   (eio_main :with-test)

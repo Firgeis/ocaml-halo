@@ -71,7 +71,12 @@ jobs:
 
       - name: Install OpenSSL toolchain on macOS
         if: runner.os == 'macOS'
-        run: brew install openssl@3 pkg-config
+        run: |
+          brew install openssl@3 pkg-config
+          openssl_prefix="$(brew --prefix openssl@3)"
+          echo "CPATH=${openssl_prefix}/include${CPATH:+:${CPATH}}" >> "${GITHUB_ENV}"
+          echo "LIBRARY_PATH=${openssl_prefix}/lib${LIBRARY_PATH:+:${LIBRARY_PATH}}" >> "${GITHUB_ENV}"
+          echo "PKG_CONFIG_PATH=${openssl_prefix}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}" >> "${GITHUB_ENV}"
 
       - name: Extract source archive
         run: tar -xzf "dist/${{ needs.package.outputs.archive_name }}"

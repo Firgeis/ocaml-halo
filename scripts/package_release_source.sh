@@ -69,6 +69,7 @@ rsync -a \
 mkdir -p "${staging_dir}/scripts"
 rsync -a \
   "${repo_root}/scripts/build_s2n_artifact.sh" \
+  "${repo_root}/scripts/build_libuv_artifact.sh" \
   "${repo_root}/scripts/resolve_libcrypto_root.sh" \
   "${staging_dir}/scripts/"
 

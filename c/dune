@@ -27,6 +27,22 @@
  (action
   (run bash ../scripts/build_s2n_artifact.sh s2nc %{target})))
 
+(rule
+ (target libhalo_uv.a)
+ (deps
+  (source_tree ../vendor/libuv)
+  ../scripts/build_libuv_artifact.sh)
+ (action
+  (run bash ../scripts/build_libuv_artifact.sh static %{target})))
+
+(rule
+ (target dllhalo_uv.so)
+ (deps
+  (source_tree ../vendor/libuv)
+  ../scripts/build_libuv_artifact.sh)
+ (action
+  (run bash ../scripts/build_libuv_artifact.sh shared %{target})))
+
 (foreign_library
  (archive_name halo_stubs)
  (language c)
@@ -45,42 +61,7 @@
   halo_utils
   llhttp_api
   llhttp_generated
-  llhttp_native
-  uv_fs_poll
-  uv_idna
-  uv_inet
-  uv_random
-  uv_strscpy
-  uv_strtok
-  uv_thread_common
-  uv_threadpool
-  uv_timer
-  uv_common
-  uv_data_getter_setters
-  uv_version
-  uv_unix_async
-  uv_unix_core
-  uv_unix_dl
-  uv_unix_fs
-  uv_unix_getaddrinfo
-  uv_unix_getnameinfo
-  uv_unix_loop_watcher
-  uv_unix_loop
-  uv_unix_pipe
-  uv_unix_poll
-  uv_unix_process
-  uv_unix_random_devurandom
-  uv_unix_signal
-  uv_unix_stream
-  uv_unix_tcp
-  uv_unix_thread
-  uv_unix_tty
-  uv_unix_udp
-  uv_unix_proctitle
-  uv_unix_linux
-  uv_unix_procfs_exepath
-  uv_unix_random_getrandom
-  uv_unix_random_sysctl_linux)
+  llhttp_native)
  (include_dirs
   ../vendor/libuv/include
   ../vendor/libuv/src

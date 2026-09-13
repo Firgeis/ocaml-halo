@@ -25,6 +25,6 @@
   reactor
   request_runtime)
  (libraries eio eio.unix uri)
- (foreign_archives ../c/halo_stubs ../c/halo_s2n)
+ (foreign_archives ../c/halo_stubs ../c/halo_s2n ../c/halo_uv)
  (c_library_flags
   (-lcrypto -lpthread -ldl -lrt -lm)))
