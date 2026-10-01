@@ -10,6 +10,7 @@ bug-reports: "https://github.com/firge/ocaml-halo/issues"
 depends: [
   "dune" {>= "3.15"}
   "conf-libssl" {build}
+  "conf-zlib" {build}
   "conf-pkg-config" {build}
   "conf-cmake" {build}
   "eio"

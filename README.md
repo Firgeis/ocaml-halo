@@ -105,6 +105,54 @@ let observe next request =
 The callback runs exactly once for buffered and streamed responses, including
 after the handler has returned.
 
+## Response compression
+
+Enable buffered gzip compression on a router or scope:
+
+```ocaml
+let router =
+  Halo.Router.use
+    (Halo.Compression.middleware ~min_body_size:1024 ~level:6 ())
+    router
+```
+
+Compression negotiates all `Accept-Encoding` fields, honors quality values and
+exclusions, and merges `Vary: Accept-Encoding`. Explicit `identity` preferences
+participate in negotiation; implicit identity is a fallback. A missing or empty
+header uses identity. If no available representation is acceptable, the
+middleware returns an empty 406 response.
+
+The defaults compress text, JavaScript, JSON, XML and SVG bodies of at least
+1 KiB. Streams, server-sent events, partial responses, existing content encodings,
+and `Cache-Control: no-transform` are excluded. Compression keeps the original
+when gzip would increase its size, unless the client excludes identity. Strong
+ETags become weak and original digest headers are removed. HEAD selects the
+same buffered representation as GET, while the transport omits its body.
+Use `~compressible:(fun media_type -> ...)` to customize the media-type rules.
+
+For an explicit asset path, use the precompressed file handler:
+
+```ocaml
+let css_handler cwd =
+  Halo.Compression.file
+    ~headers:(Halo.Router.Headers.of_list_exn
+      [ "Cache-Control", "public, max-age=3600" ])
+    ~content_type:"text/css; charset=utf-8"
+    Eio.Path.(cwd / "public/app.css")
+```
+
+The handler serves GET/HEAD and chooses `app.css`, `app.css.gz` or `app.css.br`
+according to client preferences. Ties prefer Brotli, then gzip. Generate
+sidecars during the asset build; missing sidecars or ones older than the original
+are ignored. Each variant preserves the original MIME type and gets its own
+strong ETag. `If-None-Match` is checked against the selected variant.
+
+Assets and dynamic responses are buffered in memory. The file helper sends full
+representations for Range requests and does not map request URLs to paths; pass
+an application-selected path from a confined Eio directory. Runtime compression
+uses system zlib. Serving `.br` sidecars requires no Brotli library; runtime
+Brotli and streaming compression are not provided.
+
 ## Telemetry
 
 `Halo.Telemetry` provides no-op-by-default OpenTelemetry integration. Use its
@@ -324,3 +372,6 @@ make build
 make test
 make run
 ```
+
+Compression tests require the `gzip` command for independent decompression and
+checksum verification.

@@ -21,6 +21,7 @@
   otlp_http_transport
   body
   headers
+  compression
   router
   metrics
   telemetry
@@ -41,5 +42,5 @@
  (libraries eio eio.unix uri)
  (foreign_archives ../c/halo_stubs ../c/halo_s2n ../c/halo_uv)
  (c_library_flags
-  (-lcrypto -lpthread -lm
+  (-lcrypto -lpthread -lm -lz
    (:include system_c_library_flags.sexp))))

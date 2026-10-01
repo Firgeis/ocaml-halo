@@ -51,6 +51,7 @@
   halo_bridge_commands
   halo_bridge_events
   halo_bridge_stubs
+  halo_compression
   halo_io
   halo_parser
   halo_request

@@ -14,6 +14,7 @@
  (source (github firge/ocaml-halo))
  (depends
   (conf-libssl :build)
+  (conf-zlib :build)
   (conf-pkg-config :build)
   (conf-cmake :build)
   eio

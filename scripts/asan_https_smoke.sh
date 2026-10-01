@@ -15,13 +15,25 @@ ASAN_OPTIONS_VALUE="${ASAN_OPTIONS:-detect_leaks=0:abort_on_error=1:halt_on_erro
 SERVER_PID=""
 
 cleanup() {
-  if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill -INT "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" || true
+  local exit_status=$?
+  local server_status=0
+  trap - EXIT INT TERM
+  if [[ -n "$SERVER_PID" ]]; then
+    if kill -0 "$SERVER_PID" 2>/dev/null; then
+      kill -INT "$SERVER_PID" 2>/dev/null || true
+    fi
+    # Sanitizers can report failures during server shutdown.
+    wait "$SERVER_PID" || server_status=$?
+    if (( exit_status == 0 )); then
+      exit_status=$server_status
+    fi
   fi
+  exit "$exit_status"
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 DYLD_LIBRARY_PATH="$ROOT_DIR/vendor/s2n-tls/lib" \
 LD_LIBRARY_PATH="$ROOT_DIR/vendor/s2n-tls/lib" \

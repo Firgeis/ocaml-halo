@@ -62,6 +62,13 @@
  (libraries ocaml-halo alcotest))
 
 (test
+ (name compression_unit)
+ (modules compression_unit)
+ (libraries ocaml-halo eio_main unix alcotest)
+ (action
+  (setenv HALO_GZIP_BIN %{bin:gzip} (run %{test}))))
+
+(test
  (name body_unit)
  (modules body_unit)
  (libraries ocaml-halo alcotest))

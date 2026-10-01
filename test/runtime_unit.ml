@@ -233,6 +233,104 @@ let plaintext_request ~until request =
       write_socket_all socket request;
       read_socket_until socket until)
 
+let compression_wire_request request =
+  let socket = connect_plaintext () in
+  Fun.protect
+    ~finally:(fun () -> Unix.close socket)
+    (fun () ->
+      write_socket_all socket request;
+      let response = Buffer.create 256 in
+      let chunk = Bytes.create 4096 in
+      let rec read () =
+        match Unix.read socket chunk 0 (Bytes.length chunk) with
+        | 0 -> Buffer.contents response
+        | count ->
+            Buffer.add_subbytes response chunk 0 count;
+            read ()
+      in
+      read ())
+
+let compression_wire_parts response =
+  let rec find index =
+    if index + 4 > String.length response then
+      fail "missing HTTP response headers"
+    else if String.sub response index 4 = "\r\n\r\n" then
+      ( String.sub response 0 index,
+        String.sub response (index + 4) (String.length response - index - 4) )
+    else find (index + 1)
+  in
+  find 0
+
+let test_buffered_compression_over_http () =
+  let payload = String.make 4096 'x' in
+  let expected = Halo.Compression.gzip payload in
+  let router =
+    Halo.Router.route
+      (Halo.Router.Matcher.pure (fun _request ->
+           Halo.Router.text Halo.Router.Status.ok payload
+           |> Halo.Router.with_header "Content-Length" "999999"))
+    |> Halo.Router.use (Halo.Compression.middleware ())
+  in
+  ignore
+    (with_live_server ~router (fun () ->
+         List.iter
+           (fun (method_, version) ->
+             let wire =
+               compression_wire_request
+                 (Printf.sprintf
+                    "%s / HTTP/%s\r\n\
+                     Host: localhost\r\n\
+                     Accept-Encoding: br\r\n\
+                     Accept-Encoding: gzip\r\n\
+                     Connection: close\r\n\
+                     \r\n"
+                    method_ version)
+             in
+             let headers, body = compression_wire_parts wire in
+             Alcotest.(check bool)
+               "gzip header" true
+               (contains "Content-Encoding: gzip\r\n" (headers ^ "\r\n"));
+             Alcotest.(check bool)
+               "wire length describes compressed bytes" true
+               (contains
+                  (Printf.sprintf "Content-Length: %d\r\n"
+                     (String.length expected))
+                  (headers ^ "\r\n"));
+             Alcotest.(check bool)
+               "wire Vary" true
+               (contains "Vary: Accept-Encoding" headers);
+             Alcotest.(check string)
+               "wire representation"
+               (if method_ = "HEAD" then "" else expected)
+               body)
+           [ ("GET", "1.1"); ("HEAD", "1.1"); ("GET", "1.0") ];
+         let wire =
+           compression_wire_request
+             "GET / HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept-Encoding: gzip;q=0\r\n\
+              Connection: close\r\n\
+              \r\n"
+         in
+         let headers, body = compression_wire_parts wire in
+         Alcotest.(check string) "wire identity" payload body;
+         Alcotest.(check bool)
+           "no encoding on identity" false
+           (contains "Content-Encoding:" headers);
+         let wire =
+           compression_wire_request
+             "GET / HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept-Encoding: br, identity;q=0\r\n\
+              Connection: close\r\n\
+              \r\n"
+         in
+         let headers, body = compression_wire_parts wire in
+         Alcotest.(check bool)
+           "wire 406" true
+           (contains "HTTP/1.1 406 Not Acceptable" headers);
+         Alcotest.(check string) "wire 406 empty" "" body))
+
 type observed_response_outcome =
   | Observed_completed
   | Observed_aborted of string
@@ -1364,6 +1462,11 @@ let test_blocking_replay_store_deadline_and_capacity () =
 let () =
   Alcotest.run "runtime"
     [
+      ( "compression",
+        [
+          Alcotest.test_case "buffered gzip over HTTP" `Quick
+            test_buffered_compression_over_http;
+        ] );
       ( "transport metadata",
         [
           Alcotest.test_case "plaintext request" `Quick
