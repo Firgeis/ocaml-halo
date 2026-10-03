@@ -106,7 +106,7 @@ void halo_bridge_destroy(struct halo_runtime* runtime) {
 
   while ((event = bridge->event_head) != NULL) {
     bridge->event_head = event->next;
-    halo_bridge_event_destroy(event);
+    free(event);
   }
   while ((command = bridge->command_head) != NULL) {
     bridge->command_head = command->next;

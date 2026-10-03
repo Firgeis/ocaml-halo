@@ -5,25 +5,15 @@
 
 #define HALO_PRE_DISPATCH_RESPONSE_PAYLOAD_SIZE 25U
 
-void halo_bridge_event_destroy(struct halo_bridge_event* event) {
-  size_t index;
+/* Descriptors precede byte storage so every typed region stays aligned. */
+_Static_assert(sizeof(struct halo_bridge_event)
+                 % _Alignof(struct halo_bridge_request_data) == 0,
+               "request metadata must be aligned after the event header");
+_Static_assert(sizeof(struct halo_bridge_request_data)
+                 % _Alignof(struct halo_bridge_header) == 0,
+               "header descriptors must be aligned after request metadata");
 
-  if (event == NULL)
-    return;
-  free(event->method_text);
-  free(event->target);
-  for (index = 0; index < event->header_count; index++) {
-    free(event->headers[index].name);
-    free(event->headers[index].value);
-  }
-  free(event->headers);
-  free(event->transport);
-  free(event->payload);
-  free(event);
-}
-
-static int halo_bridge_copy_transport(struct halo_bridge_event* event,
-                                      struct halo_client* client) {
+struct halo_bridge_transport_source {
   struct sockaddr_storage remote_address;
   struct sockaddr_storage local_address;
   int remote_address_len;
@@ -34,26 +24,32 @@ static int halo_bridge_copy_transport(struct halo_bridge_event* event,
   size_t server_name_len;
   size_t application_protocol_len;
   size_t cipher_len;
-  size_t storage_len;
-  struct halo_bridge_transport* transport;
-  unsigned char* cursor;
+  uint8_t tls_protocol_version;
+};
+
+static int halo_bridge_prepare_transport(
+    struct halo_bridge_transport_source* source,
+    struct halo_client* client,
+    size_t* allocation_size) {
   int tls_protocol_version;
 
-  remote_address_len = (int) sizeof(remote_address);
-  local_address_len = (int) sizeof(local_address);
+  source->remote_address_len = (int) sizeof(source->remote_address);
+  source->local_address_len = (int) sizeof(source->local_address);
   if (uv_tcp_getpeername(&client->handle,
-                         (struct sockaddr*) &remote_address,
-                         &remote_address_len) != 0
+                         (struct sockaddr*) &source->remote_address,
+                         &source->remote_address_len) != 0
       || uv_tcp_getsockname(&client->handle,
-                            (struct sockaddr*) &local_address,
-                            &local_address_len) != 0
-      || remote_address_len <= 0 || remote_address_len > UINT16_MAX
-      || local_address_len <= 0 || local_address_len > UINT16_MAX)
+                            (struct sockaddr*) &source->local_address,
+                            &source->local_address_len) != 0
+      || source->remote_address_len <= 0
+      || source->remote_address_len > (int) sizeof(source->remote_address)
+      || source->local_address_len <= 0
+      || source->local_address_len > (int) sizeof(source->local_address))
     return -1;
 
-  server_name = NULL;
-  application_protocol = NULL;
-  cipher = NULL;
+  source->server_name = NULL;
+  source->application_protocol = NULL;
+  source->cipher = NULL;
   tls_protocol_version = 0;
   if (client->tls_conn != NULL) {
     tls_protocol_version =
@@ -63,54 +59,168 @@ static int halo_bridge_copy_transport(struct halo_bridge_event* event,
     if (tls_protocol_version <= 0)
       tls_protocol_version = UINT8_MAX;
     else {
-      server_name = s2n_get_server_name(client->tls_conn);
-      application_protocol = s2n_get_application_protocol(client->tls_conn);
-      cipher = s2n_connection_get_cipher(client->tls_conn);
+      source->server_name = s2n_get_server_name(client->tls_conn);
+      source->application_protocol =
+        s2n_get_application_protocol(client->tls_conn);
+      source->cipher = s2n_connection_get_cipher(client->tls_conn);
     }
   }
 
-  server_name_len = server_name == NULL ? 0 : strlen(server_name);
-  application_protocol_len =
-    application_protocol == NULL ? 0 : strlen(application_protocol);
-  cipher_len = cipher == NULL ? 0 : strlen(cipher);
-  if (server_name_len > UINT16_MAX
-      || application_protocol_len > UINT16_MAX
-      || cipher_len > UINT16_MAX)
+  source->tls_protocol_version = (uint8_t) tls_protocol_version;
+  source->server_name_len =
+    source->server_name == NULL ? 0 : strlen(source->server_name);
+  source->application_protocol_len = source->application_protocol == NULL
+    ? 0 : strlen(source->application_protocol);
+  source->cipher_len = source->cipher == NULL ? 0 : strlen(source->cipher);
+  if (source->server_name_len > UINT16_MAX
+      || source->application_protocol_len > UINT16_MAX
+      || source->cipher_len > UINT16_MAX)
     return -1;
 
-  storage_len = (size_t) remote_address_len + (size_t) local_address_len
-    + server_name_len + application_protocol_len + cipher_len;
-  if (storage_len > SIZE_MAX - sizeof(*transport))
-    return -1;
-  transport = malloc(sizeof(*transport) + storage_len);
-  if (transport == NULL)
-    return -1;
-
-  transport->remote_address_len = (uint16_t) remote_address_len;
-  transport->local_address_len = (uint16_t) local_address_len;
-  transport->server_name_len = (uint16_t) server_name_len;
-  transport->application_protocol_len =
-    (uint16_t) application_protocol_len;
-  transport->cipher_len = (uint16_t) cipher_len;
-  transport->tls_protocol_version = (uint8_t) tls_protocol_version;
-  cursor = transport->storage;
-  memcpy(cursor, &remote_address, (size_t) remote_address_len);
-  cursor += remote_address_len;
-  memcpy(cursor, &local_address, (size_t) local_address_len);
-  cursor += local_address_len;
-  if (server_name_len > 0) {
-    memcpy(cursor, server_name, server_name_len);
-    cursor += server_name_len;
-  }
-  if (application_protocol_len > 0) {
-    memcpy(cursor, application_protocol, application_protocol_len);
-    cursor += application_protocol_len;
-  }
-  if (cipher_len > 0)
-    memcpy(cursor, cipher, cipher_len);
-
-  event->transport = transport;
+  *allocation_size = sizeof(struct halo_bridge_transport)
+    + (size_t) source->remote_address_len + (size_t) source->local_address_len
+    + source->server_name_len + source->application_protocol_len
+    + source->cipher_len;
   return 0;
+}
+
+static void halo_bridge_store_transport(
+    struct halo_bridge_transport* transport,
+    const struct halo_bridge_transport_source* source) {
+  unsigned char* cursor;
+
+  transport->remote_address_len = (uint16_t) source->remote_address_len;
+  transport->local_address_len = (uint16_t) source->local_address_len;
+  transport->server_name_len = (uint16_t) source->server_name_len;
+  transport->application_protocol_len =
+    (uint16_t) source->application_protocol_len;
+  transport->cipher_len = (uint16_t) source->cipher_len;
+  transport->tls_protocol_version = source->tls_protocol_version;
+  cursor = transport->storage;
+  memcpy(cursor, &source->remote_address, (size_t) source->remote_address_len);
+  cursor += source->remote_address_len;
+  memcpy(cursor, &source->local_address, (size_t) source->local_address_len);
+  cursor += source->local_address_len;
+  if (source->server_name_len > 0) {
+    memcpy(cursor, source->server_name, source->server_name_len);
+    cursor += source->server_name_len;
+  }
+  if (source->application_protocol_len > 0) {
+    memcpy(cursor, source->application_protocol, source->application_protocol_len);
+    cursor += source->application_protocol_len;
+  }
+  if (source->cipher_len > 0)
+    memcpy(cursor, source->cipher, source->cipher_len);
+}
+
+static int halo_bridge_add_size(size_t* total, size_t amount) {
+  if (amount > SIZE_MAX - *total)
+    return -1;
+  *total += amount;
+  return 0;
+}
+
+static char* halo_bridge_store_bytes(char** cursor,
+                                     const char* source,
+                                     size_t length) {
+  char* destination;
+
+  if (length == 0)
+    return NULL;
+  destination = *cursor;
+  memcpy(destination, source, length);
+  *cursor += length;
+  return destination;
+}
+
+static struct halo_bridge_event* halo_bridge_request_event(
+    struct halo_client* client,
+    enum halo_bridge_event_kind kind,
+    const char* method_text,
+    size_t method_len,
+    int include_transport,
+    size_t payload_len) {
+  const struct halo_request* request;
+  struct halo_bridge_transport_source transport_source;
+  struct halo_bridge_request_data* data;
+  struct halo_bridge_event* event;
+  size_t transport_size;
+  size_t allocation_size;
+  size_t index;
+  char* cursor;
+
+  request = &client->request;
+  transport_size = 0;
+  if (include_transport
+      && halo_bridge_prepare_transport(&transport_source, client,
+                                        &transport_size) != 0)
+    return NULL;
+
+  allocation_size = sizeof(*event) + sizeof(*data);
+  if (request->header_count > SIZE_MAX / sizeof(*data->headers)
+      || halo_bridge_add_size(&allocation_size,
+                               request->header_count * sizeof(*data->headers)) != 0
+      || halo_bridge_add_size(&allocation_size, transport_size) != 0
+      || halo_bridge_add_size(&allocation_size, method_len) != 0
+      || halo_bridge_add_size(&allocation_size, request->url_len) != 0
+      || halo_bridge_add_size(&allocation_size, payload_len) != 0)
+    return NULL;
+  for (index = 0; index < request->header_count; index++) {
+    if (halo_bridge_add_size(&allocation_size,
+                             request->headers[index].name_len) != 0
+        || halo_bridge_add_size(&allocation_size,
+                                 request->headers[index].value_len) != 0)
+      return NULL;
+  }
+
+  event = malloc(allocation_size);
+  if (event == NULL)
+    return NULL;
+  memset(event, 0, sizeof(*event));
+  event->kind = kind;
+  event->listener_id = client->listener_ref->bridge_listener_id;
+  data = (struct halo_bridge_request_data*) (event + 1);
+  memset(data, 0, sizeof(*data));
+  event->request = data;
+  cursor = (char*) (data + 1);
+  if (request->header_count > 0)
+    data->headers = (struct halo_bridge_header*) cursor;
+  data->header_count = request->header_count;
+  cursor += request->header_count * sizeof(*data->headers);
+  if (include_transport) {
+    data->transport = (struct halo_bridge_transport*) cursor;
+    halo_bridge_store_transport(data->transport, &transport_source);
+    cursor += transport_size;
+  }
+  data->method_text = halo_bridge_store_bytes(&cursor, method_text, method_len);
+  data->method_len = method_len;
+  data->target = halo_bridge_store_bytes(&cursor, request->url, request->url_len);
+  data->target_len = request->url_len;
+  for (index = 0; index < request->header_count; index++) {
+    const struct halo_header* source;
+    struct halo_bridge_header* destination;
+
+    source = &request->headers[index];
+    destination = &data->headers[index];
+    destination->name =
+      halo_bridge_store_bytes(&cursor, source->name, source->name_len);
+    destination->name_len = source->name_len;
+    destination->value =
+      halo_bridge_store_bytes(&cursor, source->value, source->value_len);
+    destination->value_len = source->value_len;
+    destination->is_hop_by_hop = source->is_hop_by_hop;
+  }
+  if (payload_len > 0)
+    event->payload = cursor;
+  event->payload_len = payload_len;
+  assert((size_t) (cursor - (char*) event) + payload_len == allocation_size);
+  data->http_major = request->http_major;
+  data->http_minor = request->http_minor;
+  data->keep_alive = client->should_keep_alive;
+  data->body_expected = request->content_length > 0
+    || (client->parser.flags & F_CHUNKED) != 0;
+  data->is_early_data = client->request_is_early_data;
+  return event;
 }
 
 static void halo_bridge_notify(struct halo_bridge* bridge) {
@@ -296,35 +406,27 @@ static struct halo_bridge_event* halo_bridge_simple_event(
   return event;
 }
 
-static int halo_bridge_copy_request_headers(struct halo_bridge_event* event,
-                                            const struct halo_request* request) {
-  size_t index;
+static struct halo_bridge_event* halo_bridge_payload_event(
+    enum halo_bridge_event_kind kind,
+    uint64_t request_id,
+    const char* payload,
+    size_t payload_len) {
+  struct halo_bridge_event* event;
 
-  if (request->header_count == 0)
-    return 0;
-
-  event->headers = calloc(request->header_count, sizeof(*event->headers));
-  if (event->headers == NULL)
-    return -1;
-
-  for (index = 0; index < request->header_count; index++) {
-    const struct halo_header* source;
-    struct halo_bridge_header* destination;
-
-    source = &request->headers[index];
-    destination = &event->headers[index];
-    destination->name = halo_bridge_copy_bytes(source->name, source->name_len);
-    destination->name_len = source->name_len;
-    destination->value = halo_bridge_copy_bytes(source->value,
-                                                source->value_len);
-    destination->value_len = source->value_len;
-    destination->is_hop_by_hop = source->is_hop_by_hop;
-    event->header_count = index + 1;
-    if ((source->name_len > 0 && destination->name == NULL)
-        || (source->value_len > 0 && destination->value == NULL))
-      return -1;
+  if (payload_len > SIZE_MAX - sizeof(*event))
+    return NULL;
+  event = malloc(sizeof(*event) + payload_len);
+  if (event == NULL)
+    return NULL;
+  memset(event, 0, sizeof(*event));
+  event->kind = kind;
+  event->request_id = request_id;
+  if (payload_len > 0) {
+    event->payload = (char*) (event + 1);
+    memcpy(event->payload, payload, payload_len);
   }
-  return 0;
+  event->payload_len = payload_len;
+  return event;
 }
 
 static void halo_bridge_encode_uint64(unsigned char* destination,
@@ -356,31 +458,26 @@ int halo_bridge_dispatch_replay_claim(struct halo_client* client,
   if (bridge == NULL)
     return -1;
 
-  event = halo_bridge_simple_event(HALO_BRIDGE_REPLAY_CLAIM, 0);
+  event = halo_bridge_payload_event(HALO_BRIDGE_REPLAY_CLAIM, 0,
+                                    (const char*) identity, identity_len);
   if (event == NULL)
     return -1;
   event->listener_id = client->listener_ref->bridge_listener_id;
   event->auxiliary = ttl_secs;
-  event->payload = halo_bridge_copy_bytes((const char*) identity, identity_len);
-  event->payload_len = identity_len;
-  if (event->payload == NULL) {
-    halo_bridge_event_destroy(event);
-    return -1;
-  }
 
   claim_id = ++bridge->next_replay_claim_id;
   if (claim_id == 0)
     claim_id = ++bridge->next_replay_claim_id;
   event->request_id = claim_id;
   if (halo_bridge_register_replay_claim(bridge, client, claim_id) != 0) {
-    halo_bridge_event_destroy(event);
+    free(event);
     return -1;
   }
   client->bridge_replay_claim_id = claim_id;
   if (halo_bridge_push_event(bridge, event) != 0) {
     client->bridge_replay_claim_id = 0;
     (void) halo_bridge_unregister_replay_claim(bridge, claim_id);
-    halo_bridge_event_destroy(event);
+    free(event);
     return -1;
   }
   return 0;
@@ -447,37 +544,17 @@ int halo_bridge_dispatch_request(struct halo_client* client) {
   }
 
   request = &client->request;
-  event = calloc(1, sizeof(*event));
+  event = halo_bridge_request_event(client, HALO_BRIDGE_REQUEST,
+                                    request->method_text, request->method_len,
+                                    first_request_on_connection, 0);
   if (event == NULL) {
     halo_bridge_release_request(bridge);
     return -1;
   }
-  event->kind = HALO_BRIDGE_REQUEST;
-  event->listener_id = client->listener_ref->bridge_listener_id;
   event->auxiliary = client->bridge_connection_id;
-  event->method_text = halo_bridge_copy_bytes(request->method_text,
-                                              request->method_len);
-  event->method_len = request->method_len;
-  event->target = halo_bridge_copy_bytes(request->url, request->url_len);
-  event->target_len = request->url_len;
-  event->http_major = request->http_major;
-  event->http_minor = request->http_minor;
-  event->keep_alive = client->should_keep_alive;
-  event->body_expected = request->content_length > 0
-    || (client->parser.flags & F_CHUNKED) != 0;
-  event->is_early_data = client->request_is_early_data;
   if (runtime->telemetry_enabled) {
     event->monotonic_time_ns = client->request_start_monotonic_ns;
     event->unix_time_ns = client->request_start_unix_ns;
-  }
-  if ((request->method_len > 0 && event->method_text == NULL)
-      || (request->url_len > 0 && event->target == NULL)
-      || (first_request_on_connection
-          && halo_bridge_copy_transport(event, client) != 0)
-      || halo_bridge_copy_request_headers(event, request) != 0) {
-    halo_bridge_event_destroy(event);
-    halo_bridge_release_request(bridge);
-    return -1;
   }
 
   request_id = ++bridge->next_request_id;
@@ -486,7 +563,7 @@ int halo_bridge_dispatch_request(struct halo_client* client) {
   event->request_id = request_id;
   if (halo_bridge_register_client(bridge, client, request_id) != 0) {
     halo_bridge_release_request(bridge);
-    halo_bridge_event_destroy(event);
+    free(event);
     return -1;
   }
   client->bridge_request_id = request_id;
@@ -494,7 +571,7 @@ int halo_bridge_dispatch_request(struct halo_client* client) {
     client->bridge_request_id = 0;
     halo_bridge_unregister_client(bridge, request_id);
     halo_bridge_release_request(bridge);
-    halo_bridge_event_destroy(event);
+    free(event);
     return -1;
   }
   return 0;
@@ -509,18 +586,12 @@ int halo_bridge_emit_body_chunk(struct halo_client* client,
   if (client == NULL || client->bridge_request_id == 0)
     return -1;
   runtime = client->handle.loop->data;
-  event = halo_bridge_simple_event(HALO_BRIDGE_BODY_CHUNK,
-                                   client->bridge_request_id);
+  event = halo_bridge_payload_event(HALO_BRIDGE_BODY_CHUNK,
+                                    client->bridge_request_id, data, length);
   if (event == NULL)
     return -1;
-  event->payload = halo_bridge_copy_bytes(data, length);
-  event->payload_len = length;
-  if (length > 0 && event->payload == NULL) {
-    halo_bridge_event_destroy(event);
-    return -1;
-  }
   if (halo_bridge_push_event(runtime->bridge, event) != 0) {
-    halo_bridge_event_destroy(event);
+    free(event);
     return -1;
   }
   return 0;
@@ -538,7 +609,7 @@ int halo_bridge_emit_body_end(struct halo_client* client) {
   if (event == NULL)
     return -1;
   if (halo_bridge_push_event(runtime->bridge, event) != 0) {
-    halo_bridge_event_destroy(event);
+    free(event);
     return -1;
   }
   return 0;
@@ -589,6 +660,8 @@ void halo_bridge_observe_pre_dispatch_response(struct halo_client* client,
   struct halo_bridge* bridge;
   struct halo_bridge_event* event;
   const struct halo_request* request;
+  const char* method_text;
+  size_t method_len;
   uint64_t request_id;
   uint64_t end_monotonic_ns;
 
@@ -605,45 +678,28 @@ void halo_bridge_observe_pre_dispatch_response(struct halo_client* client,
 
   end_monotonic_ns = uv_hrtime();
   request = &client->request;
-  event = calloc(1, sizeof(*event));
-  if (event == NULL)
-    return;
-  event->kind = HALO_BRIDGE_PRE_DISPATCH_RESPONSE;
-  event->listener_id = client->listener_ref->bridge_listener_id;
   if (request->method_seen && request->method_len > 0) {
-    event->method_text = halo_bridge_copy_bytes(request->method_text,
-                                                request->method_len);
-    event->method_len = request->method_len;
+    method_text = request->method_text;
+    method_len = request->method_len;
   }
   else {
-    event->method_text = halo_bridge_copy_bytes(unknown_method,
-                                                sizeof(unknown_method) - 1);
-    event->method_len = sizeof(unknown_method) - 1;
+    method_text = unknown_method;
+    method_len = sizeof(unknown_method) - 1;
   }
-  event->target = halo_bridge_copy_bytes(request->url, request->url_len);
-  event->target_len = request->url_len;
-  event->http_major = llhttp_get_http_major(&client->parser);
-  event->http_minor = llhttp_get_http_minor(&client->parser);
-  if (request->http_major != 0) {
-    event->http_major = request->http_major;
-    event->http_minor = request->http_minor;
+  event = halo_bridge_request_event(client, HALO_BRIDGE_PRE_DISPATCH_RESPONSE,
+                                    method_text, method_len, 1,
+                                    HALO_PRE_DISPATCH_RESPONSE_PAYLOAD_SIZE);
+  if (event == NULL)
+    return;
+  if (request->http_major == 0) {
+    event->request->http_major = llhttp_get_http_major(&client->parser);
+    event->request->http_minor = llhttp_get_http_minor(&client->parser);
   }
-  event->is_early_data = client->request_is_early_data;
   event->monotonic_time_ns = end_monotonic_ns;
   if (client->request_start_monotonic_ns != 0)
     event->monotonic_time_ns = client->request_start_monotonic_ns;
   event->unix_time_ns = client->request_start_unix_ns;
   event->auxiliary = end_monotonic_ns;
-  event->payload = malloc(HALO_PRE_DISPATCH_RESPONSE_PAYLOAD_SIZE);
-  event->payload_len = HALO_PRE_DISPATCH_RESPONSE_PAYLOAD_SIZE;
-  if (event->method_text == NULL
-      || (request->url_len > 0 && event->target == NULL)
-      || event->payload == NULL
-      || halo_bridge_copy_request_headers(event, request) != 0
-      || halo_bridge_copy_transport(event, client) != 0) {
-    halo_bridge_event_destroy(event);
-    return;
-  }
   halo_bridge_encode_uint64((unsigned char*) event->payload,
                             (uint64_t) status_code);
   halo_bridge_encode_uint64((unsigned char*) event->payload + 8,
@@ -659,7 +715,7 @@ void halo_bridge_observe_pre_dispatch_response(struct halo_client* client,
     request_id = ++bridge->next_request_id;
   event->request_id = request_id;
   if (halo_bridge_push_event(bridge, event) != 0)
-    halo_bridge_event_destroy(event);
+    free(event);
 }
 
 void halo_bridge_connection_closed(struct halo_client* client) {
@@ -739,15 +795,10 @@ int halo_bridge_emit_metrics(struct halo_runtime* runtime, uint64_t query_id) {
                     runtime->controller.backpressure_enabled);
   if (length < 0 || (size_t) length >= sizeof(payload))
     return -1;
-  event = halo_bridge_simple_event(HALO_BRIDGE_METRICS, query_id);
+  event = halo_bridge_payload_event(HALO_BRIDGE_METRICS, query_id,
+                                    payload, (size_t) length);
   if (event == NULL)
     return -1;
-  event->payload = halo_bridge_copy_bytes(payload, (size_t) length);
-  event->payload_len = (size_t) length;
-  if (length > 0 && event->payload == NULL) {
-    halo_bridge_event_destroy(event);
-    return -1;
-  }
   halo_bridge_push_required_event(runtime->bridge, event);
   return 0;
 }

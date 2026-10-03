@@ -54,8 +54,8 @@ struct halo_bridge_header {
 
 /* Request-only transport metadata. The trailing storage contains, in order,
  * the remote sockaddr, local sockaddr, SNI, ALPN protocol, and cipher name.
- * Keeping it in one exact-size allocation avoids adding worst-case address
- * and TLS buffers to every bridge event. A zero TLS version means plaintext. */
+ * It occupies an exact-size region of its request event, avoiding worst-case
+ * address and TLS buffers in every event. A zero TLS version means plaintext. */
 struct halo_bridge_transport {
   uint16_t remote_address_len;
   uint16_t local_address_len;
@@ -66,29 +66,36 @@ struct halo_bridge_transport {
   unsigned char storage[];
 };
 
-struct halo_bridge_event {
-  enum halo_bridge_event_kind kind;
-  uint64_t request_id;
-  uint64_t listener_id;
+/* Present only on request and pre-dispatch response events. Descriptors,
+ * transport metadata, and string bytes share the event's allocation. */
+struct halo_bridge_request_data {
   char* method_text;
   size_t method_len;
   char* target;
   size_t target_len;
   struct halo_bridge_header* headers;
   size_t header_count;
-  int http_major;
-  int http_minor;
-  int keep_alive;
-  int body_expected;
-  int is_early_data;
   struct halo_bridge_transport* transport;
-  /* Connection ID for request events; replay TTL for replay-claim events. */
+  uint8_t http_major;
+  uint8_t http_minor;
+  uint8_t keep_alive;
+  uint8_t body_expected;
+  uint8_t is_early_data;
+};
+
+/* The event owns one allocation. All optional request/payload pointers refer
+ * into its trailing storage and must never be freed independently. */
+struct halo_bridge_event {
+  enum halo_bridge_event_kind kind;
+  uint64_t request_id;
+  uint64_t listener_id;
   uint64_t auxiliary;
   uint64_t monotonic_time_ns;
   uint64_t unix_time_ns;
   char* payload;
   size_t payload_len;
   struct halo_bridge_event* next;
+  struct halo_bridge_request_data* request;
 };
 
 struct halo_bridge_command {
@@ -146,7 +153,6 @@ struct halo_bridge {
 
 char* halo_bridge_copy_bytes(const char* source, size_t length);
 
-void halo_bridge_event_destroy(struct halo_bridge_event* event);
 int halo_bridge_push_event(struct halo_bridge* bridge,
                            struct halo_bridge_event* event);
 struct halo_bridge_event* halo_bridge_pop_event(struct halo_bridge* bridge);

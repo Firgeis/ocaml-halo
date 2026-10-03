@@ -1022,6 +1022,64 @@ let test_keep_alive_requests_share_connection_metadata () =
          Alcotest.(check bool)
            "new connection receives new metadata" true (contains "new\n" fresh)))
 
+let test_request_snapshot_survives_connection_reuse () =
+  let values =
+    List.init 256 (fun index ->
+        if index mod 7 = 0 then ""
+        else Printf.sprintf "%d:%s" index (String.make (index mod 31) 'x'))
+  in
+  let first_target = "/?q=" ^ String.make 2049 'a' in
+  let previous = ref None in
+  let router =
+    Halo.Router.(
+      route
+        Matcher.(
+          let+ () = request_method_is GET *> path_end in
+          fun request ->
+            let current =
+              (Request.raw_target request, Request.headers request "x-snapshot")
+            in
+            match !previous with
+            | None ->
+                if current <> (first_target, values) then
+                  failwith "first request snapshot is corrupt";
+                previous := Some current;
+                text Status.ok "snapshot-first\n"
+            | Some retained ->
+                Gc.full_major ();
+                if retained <> (first_target, values) then
+                  failwith "retained request snapshot changed";
+                if current <> ("/", [ "replacement" ]) then
+                  failwith "second request snapshot is corrupt";
+                text Status.ok "snapshot-retained\n"))
+  in
+  ignore
+    (with_live_server ~router (fun () ->
+         let socket = connect_plaintext () in
+         Fun.protect
+           ~finally:(fun () -> Unix.close socket)
+           (fun () ->
+             let headers =
+               values
+               |> List.map (fun value -> "X-Snapshot: " ^ value ^ "\r\n")
+               |> String.concat ""
+             in
+             write_socket_all socket
+               ("GET " ^ first_target
+               ^ " HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n"
+               ^ headers ^ "\r\n");
+             let first = read_socket_until socket "snapshot-first\n" in
+             Alcotest.(check bool)
+               "large snapshot, including empty repeated headers" true
+               (contains "snapshot-first\n" first);
+             write_socket_all socket
+               "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+                X-Snapshot: replacement\r\n\r\n";
+             let second = read_socket_until socket "snapshot-retained\n" in
+             Alcotest.(check bool)
+               "snapshot survives parser storage reuse and collection" true
+               (contains "snapshot-retained\n" second))))
+
 let test_runtime_metrics_defaults () =
   let metrics = with_live_server (fun () -> ()) in
   Alcotest.(check bool)
@@ -1475,6 +1533,8 @@ let () =
             test_tls_request_exposes_negotiated_transport_metadata;
           Alcotest.test_case "keep-alive requests share metadata" `Quick
             test_keep_alive_requests_share_connection_metadata;
+          Alcotest.test_case "request snapshot survives connection reuse" `Quick
+            test_request_snapshot_survives_connection_reuse;
         ] );
       ( "errors",
         [

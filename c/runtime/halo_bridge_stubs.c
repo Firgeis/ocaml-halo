@@ -118,6 +118,8 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
              protocol_version);
   struct halo_runtime* runtime;
   struct halo_bridge_event* event;
+  static const struct halo_bridge_request_data empty_request = {0};
+  const struct halo_bridge_request_data* request;
   size_t index;
 
   runtime = halo_runtime_get(runtime_value);
@@ -126,13 +128,14 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   event = halo_bridge_pop_event(runtime->bridge);
   if (event == NULL)
     CAMLreturn(Val_none);
+  request = event->request == NULL ? &empty_request : event->request;
 
   headers = Val_emptylist;
   raw_headers = Val_emptylist;
-  for (index = event->header_count; index > 0; index--) {
+  for (index = request->header_count; index > 0; index--) {
     struct halo_bridge_header* header;
 
-    header = &event->headers[index - 1];
+    header = &request->headers[index - 1];
     name = halo_bridge_alloc_string(header->name, header->name_len);
     header_value = halo_bridge_alloc_string(header->value, header->value_len);
     pair = caml_alloc_tuple(2);
@@ -153,15 +156,15 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   request_id = caml_copy_int64((int64_t) event->request_id);
   listener_id = caml_copy_int64((int64_t) event->listener_id);
   auxiliary = caml_copy_int64((int64_t) event->auxiliary);
-  method_text = halo_bridge_alloc_string(event->method_text, event->method_len);
-  target = halo_bridge_alloc_string(event->target, event->target_len);
+  method_text = halo_bridge_alloc_string(request->method_text, request->method_len);
+  target = halo_bridge_alloc_string(request->target, request->target_len);
   payload = halo_bridge_alloc_string(event->payload, event->payload_len);
   connection_option = Val_none;
-  if (event->transport != NULL) {
+  if (request->transport != NULL) {
     const struct halo_bridge_transport* transport;
     const unsigned char* cursor;
 
-    transport = event->transport;
+    transport = request->transport;
     cursor = transport->storage;
     remote_address = halo_bridge_alloc_sockaddr(
       cursor, transport->remote_address_len);
@@ -218,18 +221,18 @@ CAMLprim value ocaml_halo_bridge_poll_event(value runtime_value) {
   Store_field(record, 4, target);
   Store_field(record, 5, headers);
   Store_field(record, 6, raw_headers);
-  Store_field(record, 7, Val_int(event->http_major));
-  Store_field(record, 8, Val_int(event->http_minor));
-  Store_field(record, 9, Val_bool(event->keep_alive));
-  Store_field(record, 10, Val_bool(event->body_expected));
-  Store_field(record, 11, Val_bool(event->is_early_data));
+  Store_field(record, 7, Val_int(request->http_major));
+  Store_field(record, 8, Val_int(request->http_minor));
+  Store_field(record, 9, Val_bool(request->keep_alive));
+  Store_field(record, 10, Val_bool(request->body_expected));
+  Store_field(record, 11, Val_bool(request->is_early_data));
   Store_field(record, 12, connection_option);
   Store_field(record, 13, auxiliary);
   Store_field(record, 14, payload);
   Store_field(record, 15, timestamp_option);
   option = caml_alloc(1, 0);
   Store_field(option, 0, record);
-  halo_bridge_event_destroy(event);
+  free(event);
   CAMLreturn(option);
 }
 
