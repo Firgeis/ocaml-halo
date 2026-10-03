@@ -223,6 +223,7 @@ type request_patch = {
 
 module Request : sig
   type t
+  type parsed_host = { hostname : string; port : int option }
 
   val request_method_text : t -> string
   val request_method : t -> http_method option
@@ -260,6 +261,14 @@ module Request : sig
 
   val header : t -> string -> string option
   val headers : t -> string -> string list
+
+  val host : t -> parsed_host option
+  (** Parse [Host] into a trimmed, lowercased hostname without brackets and an
+      optional numeric port (0 through 65535). Bracketed IPv6 literals are
+      accepted. Missing, duplicate, or malformed values yield [None].
+      Unbracketed IPv6 and IPvFuture are unsupported and also yield [None]. Use
+      [header request "Host"] to read the original header value. *)
+
   val fold_headers : t -> init:'a -> f:('a -> string -> string -> 'a) -> 'a
 
   val copy_headers : t -> (string * string) list
@@ -301,6 +310,11 @@ module Matcher : sig
       [right]. *)
 
   val request_method_is : http_method -> unit t
+
+  val host : string -> unit t
+  (** Match a [Host] hostname without consuming path segments. Matching is
+      case-insensitive. A supplied port must match; an omitted port accepts any
+      request port. Malformed or missing hosts produce a normal route miss. *)
 
   val path_segment : string -> unit t
   (** Match one path segment. The initial slash is not a segment, while empty

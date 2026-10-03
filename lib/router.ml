@@ -516,24 +516,10 @@ let split_path path =
     String.sub path offset (String.length path - offset)
     |> String.split_on_char '/' |> Array.of_list
 
-let is_alpha = function 'A' .. 'Z' | 'a' .. 'z' -> true | _ -> false
-let is_digit = function '0' .. '9' -> true | _ -> false
-
-let is_hexdig character =
-  is_digit character
-  || match character with 'A' .. 'F' | 'a' .. 'f' -> true | _ -> false
-
-let is_unreserved = function
-  | '-' | '.' | '_' | '~' -> true
-  | character -> is_alpha character || is_digit character
-
-let is_sub_delim = function
-  | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '=' -> true
-  | _ -> false
-
 let is_pchar character =
-  is_unreserved character || is_sub_delim character || character = ':'
-  || character = '@'
+  Ascii_string.is_uri_unreserved character
+  || Ascii_string.is_uri_sub_delim character
+  || character = ':' || character = '@'
 
 let validate_encoded_component ~is_literal_allowed value =
   let length = String.length value in
@@ -543,8 +529,8 @@ let validate_encoded_component ~is_literal_allowed value =
       match value.[index] with
       | '%' ->
           index + 2 < length
-          && is_hexdig value.[index + 1]
-          && is_hexdig value.[index + 2]
+          && Ascii_string.is_hex_digit value.[index + 1]
+          && Ascii_string.is_hex_digit value.[index + 2]
           && scan_from (index + 3)
       | character -> is_literal_allowed character && scan_from (index + 1)
   in
@@ -637,6 +623,7 @@ let apply_request_patch (request_view : request_view) (patch : request_patch) =
 
 module Request = struct
   type t = request_view
+  type parsed_host = Host.t = { hostname : string; port : int option }
 
   let request_method_text request = Req.eval request Req.request_method_text
   let request_method request = Req.eval request Req.request_method
@@ -687,6 +674,11 @@ module Request = struct
 
   let header request name = header_from_list (Lazy.force request.headers) name
   let headers request name = headers_from_list (Lazy.force request.headers) name
+
+  let host request =
+    match headers request "host" with
+    | [ value ] -> Host.parse value
+    | _ -> None
 
   let fold_headers request ~init ~f =
     fold_header_list (Lazy.force request.headers) ~init ~f
@@ -740,6 +732,14 @@ module Matcher = struct
 
   let request_method_is expected input =
     if input.request_method = Some expected then Match ((), input) else No_match
+
+  let host expected =
+    let expected = Host.parse expected in
+    fun input ->
+      match (Request.host input.request_view, expected) with
+      | Some actual, Some expected when Host.matches ~actual ~expected ->
+          Match ((), input)
+      | _ -> No_match
 
   let next_segment input =
     if input.path.index >= Array.length input.path.segments then None

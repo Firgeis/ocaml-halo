@@ -1,6 +1,19 @@
 let is_digit = function '0' .. '9' -> true | _ -> false
+
+let is_hex_digit = function
+  | '0' .. '9' | 'A' .. 'F' | 'a' .. 'f' -> true
+  | _ -> false
+
 let is_lowercase_letter = function 'a' .. 'z' -> true | _ -> false
 let is_lower_hex_digit = function '0' .. '9' | 'a' .. 'f' -> true | _ -> false
+
+let is_uri_unreserved = function
+  | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '-' | '.' | '_' | '~' -> true
+  | _ -> false
+
+let is_uri_sub_delim = function
+  | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '=' -> true
+  | _ -> false
 
 let is_printable character =
   let code = Char.code character in

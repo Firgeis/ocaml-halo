@@ -90,12 +90,19 @@ Use `*>` and `<*` to sequence matchers while keeping the value on the side
 indicated by the angle bracket. Reserve `let+` and `and+` bindings for values
 used by the handler.
 
+Use `Matcher.host "api.example.com"` in a route or scope to match a host
+case-insensitively, alongside method and path matchers. Request ports are
+ignored unless the expected host includes one. Use brackets for IPv6 literals,
+for example `Matcher.host "[::1]:8080"`.
+
 `Router.Request` exposes request metadata:
 
 - `request_method`, `request_method_text`, `raw_target`, and `target`
 - `http_version`, `remote_address`, and `local_address`
 - `is_tls` and `tls`, including SNI, ALPN, protocol version, and cipher
 - case-insensitive `header`, `headers`, and `fold_headers`
+- `host` for a parsed hostname and optional port; `header request "Host"` for
+  the original value
 - `id`, a unique request ID for the runtime
 - `switch`, the request-scoped Eio switch
 - `body`, an incremental `Halo.Body.t`

@@ -17,6 +17,7 @@
  (public_name ocaml-halo)
  (modules
   ascii_string
+  host
   int64_encoding
   otlp_http_transport
   body
@@ -35,6 +36,7 @@
   sse)
  (private_modules
   ascii_string
+  host
   int64_encoding
   otlp_http_transport
   request_headers

@@ -1,8 +1,11 @@
 (** Dependency-free parsing and validation helpers for ASCII protocol text. *)
 
 val is_digit : char -> bool
+val is_hex_digit : char -> bool
 val is_lowercase_letter : char -> bool
 val is_lower_hex_digit : char -> bool
+val is_uri_unreserved : char -> bool
+val is_uri_sub_delim : char -> bool
 val is_printable : char -> bool
 val is_lower_hex : string -> offset:int -> length:int -> bool
 
