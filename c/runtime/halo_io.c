@@ -1,7 +1,9 @@
 #include "halo_bridge.h"
 #include "halo_runtime_internal.h"
 #include "halo_utils.h"
+#include <errno.h>
 #include <inttypes.h>
+#include <netinet/in.h>
 #include <openssl/sha.h>
 #include <signal.h>
 #include "s2n_connection.h"
@@ -2489,6 +2491,50 @@ static void halo_connection_cb(uv_stream_t* server, int status) {
     halo_close_client(client);
 }
 
+/* Keep configuration validation and binding on the same literal parser. */
+static int halo_parse_bind_address(value host,
+                                   intnat port,
+                                   struct sockaddr_storage* addr) {
+  const char* text = String_val(host);
+  size_t length = caml_string_length(host);
+
+  if (port < 0 || port > 65535 || length == 0
+      || memchr(text, '\0', length) != NULL
+      || memchr(text, '%', length) != NULL)
+    return UV_EINVAL;
+
+  memset(addr, 0, sizeof(*addr));
+  if (uv_ip4_addr(text, (int) port, (struct sockaddr_in*) addr) == 0)
+    return 0;
+  return uv_ip6_addr(text, (int) port, (struct sockaddr_in6*) addr);
+}
+
+CAMLprim value ocaml_halo_host_address_family(value host) {
+  struct sockaddr_storage addr;
+
+  if (halo_parse_bind_address(host, 0, &addr) != 0)
+    return Val_int(0);
+  return Val_int(addr.ss_family == AF_INET6 ? 6 : 4);
+}
+
+/* Some platforms ignore libuv's IPv6 bind flags. Require the chosen mode. */
+static int halo_check_ipv6_mode(uv_tcp_t* server, int ipv6_only) {
+#ifdef IPV6_V6ONLY
+  uv_os_fd_t fd;
+  int actual;
+  socklen_t length = sizeof(actual);
+  int code = uv_fileno((uv_handle_t*) server, &fd);
+
+  if (code != 0)
+    return code;
+  if (getsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &actual, &length) != 0)
+    return uv_translate_sys_error(errno);
+  return (actual != 0) == ipv6_only ? 0 : UV_ENOTSUP;
+#else
+  return UV_ENOTSUP;
+#endif
+}
+
 CAMLprim value ocaml_halo_create_server(value runtime,
                                         value host,
                                         value port,
@@ -2514,7 +2560,9 @@ CAMLprim value ocaml_halo_create_server(value runtime,
                                         value tls_session_ticket_decrypt_lifetime_secs,
                                         value tls_session_ticket_initial_count,
                                         value tls_server_keying_material_lifetime_secs,
-                                        value tls_max_early_data_size) {
+                                        value tls_max_early_data_size,
+                                        value ipv6_mode,
+                                        value reuse_port) {
   CAMLparam5(runtime, host, port, backlog, max_request_line_size);
   CAMLxparam5(max_header_size,
               max_body_size,
@@ -2536,13 +2584,14 @@ CAMLprim value ocaml_halo_create_server(value runtime,
               tls_session_ticket_decrypt_lifetime_secs,
               tls_session_ticket_initial_count,
               tls_server_keying_material_lifetime_secs);
-  CAMLxparam1(tls_max_early_data_size);
+  CAMLxparam3(tls_max_early_data_size, ipv6_mode, reuse_port);
   CAMLlocal1(listener_value);
   struct halo_listener_pair pair;
   struct halo_runtime* rt;
   struct halo_listener* listener;
   struct halo_listener_ref* ref;
-  struct sockaddr_in addr;
+  struct sockaddr_storage addr;
+  unsigned int bind_flags;
   int code;
   struct s2n_config* tls_config;
   struct s2n_cert_chain_and_key* tls_cert_chain;
@@ -2552,6 +2601,16 @@ CAMLprim value ocaml_halo_create_server(value runtime,
   char tls_error_message[256];
 
   rt = halo_runtime_get(runtime);
+  code = halo_parse_bind_address(host, Long_val(port), &addr);
+  if (code != 0)
+    CAMLreturn(halo_result_error_uv("parse bind address", code));
+  if (Int_val(ipv6_mode) < 0 || Int_val(ipv6_mode) > 2
+      || (addr.ss_family != AF_INET6 && Int_val(ipv6_mode) != 0))
+    CAMLreturn(halo_result_error_uv("ipv6_mode", UV_EINVAL));
+  bind_flags = Bool_val(reuse_port) ? UV_TCP_REUSEPORT : 0;
+  if (addr.ss_family == AF_INET6 && Int_val(ipv6_mode) != 2)
+    bind_flags |= UV_TCP_IPV6ONLY;
+
   if (halo_listener_pair_create(&pair,
                                 rt,
                                 max_request_line_size,
@@ -2615,16 +2674,19 @@ CAMLprim value ocaml_halo_create_server(value runtime,
 
   listener->server.data = listener;
 
-  code = uv_ip4_addr(String_val(host), Int_val(port), &addr);
-  if (code != 0) {
-    uv_close((uv_handle_t*) &listener->server, halo_on_handle_closed);
-    CAMLreturn(halo_result_error_uv("uv_ip4_addr", code));
-  }
-
-  code = uv_tcp_bind(&listener->server, (const struct sockaddr*) &addr, 0);
+  code = uv_tcp_bind(&listener->server, (const struct sockaddr*) &addr, bind_flags);
   if (code != 0) {
     uv_close((uv_handle_t*) &listener->server, halo_on_handle_closed);
     CAMLreturn(halo_result_error_uv("uv_tcp_bind", code));
+  }
+
+  if (addr.ss_family == AF_INET6) {
+    code = halo_check_ipv6_mode(&listener->server,
+                                (bind_flags & UV_TCP_IPV6ONLY) != 0);
+    if (code != 0) {
+      uv_close((uv_handle_t*) &listener->server, halo_on_handle_closed);
+      CAMLreturn(halo_result_error_uv("IPV6_V6ONLY", code));
+    }
   }
 
   code = uv_listen((uv_stream_t*) &listener->server, Int_val(backlog), halo_connection_cb);
@@ -2665,5 +2727,7 @@ CAMLprim value ocaml_halo_create_server_bytecode(value* argv, int argn) {
                                   argv[22],
                                   argv[23],
                                   argv[24],
-                                  argv[25]);
+                                  argv[25],
+                                  argv[26],
+                                  argv[27]);
 }

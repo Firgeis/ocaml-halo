@@ -126,9 +126,13 @@ type tls_config = {
   max_early_data_size : int option;
 }
 
+type ipv6_mode = IPv6_only | Dual_stack
+
 type t = {
   host : string;
   port : int;
+  ipv6_mode : ipv6_mode option;
+  reuse_port : bool;
   backlog : int;
   max_request_line_size : int;
   max_header_size : int;
@@ -172,6 +176,27 @@ let default_controller =
 
 let tls_client_auth ?ca_cert_path ?ca_cert_dir mode =
   { mode; ca_cert_path; ca_cert_dir }
+
+external host_address_family : string -> int = "ocaml_halo_host_address_family"
+
+let port_error (config : t) =
+  if config.port < 0 || config.port > 65535 then
+    Some "server port must be between 0 and 65535"
+  else None
+
+let host_error (config : t) =
+  if String.length config.host = 0 then Some "server host must not be empty"
+  else if String.contains config.host '\000' then
+    Some "server host must not contain NUL"
+  else
+    match host_address_family config.host with
+    | 0 ->
+        Some
+          "server host must be an unbracketed IPv4 or IPv6 literal without a \
+           scope ID"
+    | 4 when option_is_some config.ipv6_mode ->
+        Some "server ipv6_mode requires an IPv6 host"
+    | _ -> None
 
 let backlog_error (config : t) =
   if config.backlog <= 0 then Some "server backlog must be positive" else None
@@ -454,7 +479,8 @@ let tls ~cert_chain_path ~private_key_path ?security_policy
     max_early_data_size;
   }
 
-let create ?(host = default_host) ?(backlog = default_backlog)
+let create ?(host = default_host) ?ipv6_mode ?(reuse_port = false)
+    ?(backlog = default_backlog)
     ?(max_request_line_size = default_max_request_line_size)
     ?(max_header_size = default_max_header_size)
     ?(max_body_size = default_max_body_size)
@@ -465,6 +491,8 @@ let create ?(host = default_host) ?(backlog = default_backlog)
   {
     host;
     port;
+    ipv6_mode;
+    reuse_port;
     backlog;
     max_request_line_size;
     max_header_size;
@@ -479,6 +507,8 @@ let create ?(host = default_host) ?(backlog = default_backlog)
   }
 
 let validate (config : t) =
+  let*? () = port_error config in
+  let*? () = host_error config in
   let*? () = backlog_error config in
   let*? () = max_request_line_size_error config in
   let*? () = max_header_size_error config in

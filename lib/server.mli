@@ -29,6 +29,7 @@ type runtime_metrics = Server_backend.runtime_metrics = {
 }
 
 type controller_config = Server_config.controller_config
+type ipv6_mode = Server_config.ipv6_mode = IPv6_only | Dual_stack
 
 type tls_minimum_protocol_version = Server_config.tls_minimum_protocol_version =
   | TLS12

@@ -34,6 +34,31 @@ responses finish for up to 30 seconds before force-closing them. Configure the
 deadline with `~shutdown_timeout_ms`; zero requests an immediate stop. Pass
 several configurations to `Server.run` to serve several listeners.
 
+Listeners default to IPv4 loopback (`127.0.0.1`). `~host` accepts unbracketed
+IPv4 or IPv6 literals; hostnames and IPv6 scope IDs are unsupported. IPv6
+listeners default to IPv6-only. Select dual-stack explicitly to accept both
+families on all interfaces:
+
+```ocaml
+let config =
+  Halo.Server.Config.create ~host:"::" ~port:8080
+    ~ipv6_mode:Halo.Server.Dual_stack router
+```
+
+Use `~ipv6_mode:Halo.Server.IPv6_only` to require IPv6-only, or `~host:"::1"`
+for IPv6 loopback. An explicit IPv6 mode requires an IPv6 host. Socket endpoints
+on a dual-stack listener retain IPv4-mapped IPv6 addresses in request metadata.
+
+`~reuse_port:true` enables OS distribution of connections between listeners
+sharing an address and port. Each listener sharing that port must enable it;
+the option does not start worker processes. Libuv supports it on Linux 3.9+,
+FreeBSD 12+, DragonFlyBSD 3.6+, Solaris 11.4, and AIX 7.2.5+. Unsupported
+reuseport or IPv6 modes fail at startup with the endpoint and failed operation.
+Ports must be between 0 and 65535; zero lets the OS choose a port.
+
+Existing `Config.create` calls remain valid. Direct construction of the
+`Config.t` record now requires `ipv6_mode` and `reuse_port` fields.
+
 Request limits are configured independently on `Server.Config.create`:
 `max_request_line_size` caps the combined method and request-target bytes,
 `max_header_size` caps the combined bytes in all header names and values, and

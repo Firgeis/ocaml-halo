@@ -143,17 +143,29 @@ let with_live_config_groups ?max_in_flight_requests ?on_error ?telemetry
         let started, notify_started = Eio.Promise.create () in
         let server =
           Eio.Fiber.fork_promise ~sw (fun () ->
-              Halo.Server.run ~shutdown ~handle_sigint:false
-                ?max_in_flight_requests ?on_error ?telemetry ?metrics
-                ~on_ready:(fun running ->
-                  Eio.Promise.resolve notify_started running)
-                configs)
+              try
+                Halo.Server.run ~shutdown ~handle_sigint:false
+                  ?max_in_flight_requests ?on_error ?telemetry ?metrics
+                  ~on_ready:(fun running ->
+                    Eio.Promise.resolve notify_started (Ok running))
+                  configs
+              with exn ->
+                let backtrace = Printexc.get_raw_backtrace () in
+                ignore
+                  (Eio.Promise.try_resolve notify_started
+                     (Error (exn, backtrace)));
+                Printexc.raise_with_backtrace exn backtrace)
         in
         (started, server))
       config_groups
   in
   let runnings =
-    List.map (fun (started, _) -> Eio.Promise.await started) servers
+    List.map
+      (fun (started, _) ->
+        match Eio.Promise.await started with
+        | Ok running -> running
+        | Error (exn, backtrace) -> Printexc.raise_with_backtrace exn backtrace)
+      servers
   in
   let outcome =
     try
@@ -174,8 +186,9 @@ let with_live_configs ?max_in_flight_requests ?on_error ?telemetry ?metrics
   | [ metrics ] -> metrics
   | _ -> assert false
 
-let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router
-    ?max_in_flight_requests ?on_error ?telemetry ?metrics f =
+let with_live_server ?host ?ipv6_mode ?reuse_port ?(port = 8443) ?tls
+    ?early_data_policy ?early_data_replay_store ?router ?max_in_flight_requests
+    ?on_error ?telemetry ?metrics f =
   let router =
     Option.value router
       ~default:
@@ -186,8 +199,8 @@ let with_live_server ?tls ?early_data_policy ?early_data_replay_store ?router
               fun _request -> text Status.ok "hello world\n"))
   in
   let config =
-    Halo.Server.Config.create ~port:8443 ?tls ?early_data_policy
-      ?early_data_replay_store router
+    Halo.Server.Config.create ?host ?ipv6_mode ?reuse_port ~port ?tls
+      ?early_data_policy ?early_data_replay_store router
   in
   with_live_configs ?max_in_flight_requests ?on_error ?telemetry ?metrics
     [ config ] f
@@ -923,6 +936,271 @@ let transport_router =
                (Request.is_tls request) tls
                (Request.remote_address request = connection.remote_address
                && Request.local_address request = connection.local_address))))
+
+let skip_listener_test reason =
+  Printf.eprintf "Skipping listener test: %s\n%!" reason;
+  raise Alcotest_engine.V1.Core.Skip
+
+let with_ipv6 f =
+  (* Probe the host independently, so Halo failures do not hide regressions. *)
+  (try
+     let socket = Unix.socket Unix.PF_INET6 Unix.SOCK_STREAM 0 in
+     Fun.protect
+       ~finally:(fun () -> Unix.close socket)
+       (fun () ->
+         Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_of_string "::1", 0)))
+   with
+   | Unix.Unix_error
+       ((Unix.EAFNOSUPPORT | Unix.EPROTONOSUPPORT | Unix.EADDRNOTAVAIL), _, _)
+   ->
+     skip_listener_test "IPv6 loopback is unavailable");
+  f ()
+
+let with_supported_ipv6_mode f =
+  with_ipv6 (fun () ->
+      try f ()
+      with
+      | Halo.Server.Runtime_error message
+      when contains "IPV6_V6ONLY:" message && contains "not supported" message
+      ->
+        skip_listener_test message)
+
+let unused_listener_port () =
+  let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close socket)
+    (fun () ->
+      Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+      match Unix.getsockname socket with
+      | Unix.ADDR_INET (_, port) -> port
+      | Unix.ADDR_UNIX _ -> assert false)
+
+let connect_listener ~host ~port =
+  let family =
+    if String.contains host ':' then Unix.PF_INET6 else Unix.PF_INET
+  in
+  let socket = Unix.socket family Unix.SOCK_STREAM 0 in
+  try
+    Unix.connect socket (Unix.ADDR_INET (Unix.inet_addr_of_string host, port));
+    socket
+  with exn ->
+    Unix.close socket;
+    raise exn
+
+let listener_request ~host ~port =
+  let socket = connect_listener ~host ~port in
+  Fun.protect
+    ~finally:(fun () -> Unix.close socket)
+    (fun () ->
+      write_socket_all socket
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+      read_socket_until socket "accessors=true\n")
+
+let check_listener_addresses ~remote ~local response =
+  Alcotest.(check bool) "HTTP response" true (contains "HTTP/1.1 200" response);
+  Alcotest.(check bool)
+    "remote address" true
+    (contains ("remote=" ^ remote ^ ":") response);
+  Alcotest.(check bool)
+    "local address" true
+    (contains ("local=" ^ local ^ "\n") response);
+  Alcotest.(check bool)
+    "address accessors" true
+    (contains "accessors=true\n" response)
+
+let test_ipv6_loopback_listener () =
+  with_supported_ipv6_mode (fun () ->
+      let port = unused_listener_port () in
+      ignore
+        (with_live_server ~host:"::1" ~port ~router:transport_router (fun () ->
+             listener_request ~host:"::1" ~port
+             |> check_listener_addresses ~remote:"::1"
+                  ~local:(Printf.sprintf "::1:%d" port))))
+
+let test_ipv6_default_rejects_ipv4 () =
+  with_supported_ipv6_mode (fun () ->
+      let port = unused_listener_port () in
+      ignore
+        (with_live_server ~host:"::" ~port ~router:transport_router (fun () ->
+             listener_request ~host:"::1" ~port
+             |> check_listener_addresses ~remote:"::1"
+                  ~local:(Printf.sprintf "::1:%d" port);
+             match connect_listener ~host:"127.0.0.1" ~port with
+             | socket ->
+                 Unix.close socket;
+                 fail "IPv6-only listener accepted IPv4"
+             | exception Unix.Unix_error (Unix.ECONNREFUSED, _, _) -> ())))
+
+let test_ipv6_only_coexists_with_ipv4 () =
+  with_supported_ipv6_mode (fun () ->
+      let port = unused_listener_port () in
+      let configs =
+        [
+          Halo.Server.Config.create ~host:"::" ~port
+            ~ipv6_mode:Halo.Server.IPv6_only transport_router;
+          Halo.Server.Config.create ~host:"0.0.0.0" ~port transport_router;
+        ]
+      in
+      ignore
+        (with_live_configs configs (fun () ->
+             List.iter
+               (fun host ->
+                 listener_request ~host ~port
+                 |> check_listener_addresses ~remote:host
+                      ~local:(Printf.sprintf "%s:%d" host port))
+               [ "127.0.0.1"; "::1" ])))
+
+let test_dual_stack_listener () =
+  with_supported_ipv6_mode (fun () ->
+      let port = unused_listener_port () in
+      ignore
+        (with_live_server ~host:"::" ~port ~ipv6_mode:Halo.Server.Dual_stack
+           ~router:transport_router (fun () ->
+             listener_request ~host:"::1" ~port
+             |> check_listener_addresses ~remote:"::1"
+                  ~local:(Printf.sprintf "::1:%d" port);
+             let mapped =
+               Unix.string_of_inet_addr
+                 (Unix.inet_addr_of_string "::ffff:127.0.0.1")
+             in
+             listener_request ~host:"127.0.0.1" ~port
+             |> check_listener_addresses ~remote:mapped
+                  ~local:(Printf.sprintf "%s:%d" mapped port))))
+
+let test_ipv6_tls_listener () =
+  with_supported_ipv6_mode (fun () ->
+      let port = unused_listener_port () in
+      let tls =
+        Halo.Server.Config.tls ~cert_chain_path:(tls_cert_fixture_path ())
+          ~private_key_path:(tls_key_fixture_path ())
+          ~minimum_protocol_version:Halo.Server.TLS13
+          ~alpn_protocols:[ "http/1.1" ] ()
+      in
+      ignore
+        (with_live_server ~host:"::1" ~port ~tls ~router:transport_router
+           (fun () ->
+             let result =
+               (* s2nc verifies the positional host rather than its SNI name. *)
+               run_process
+                 ~input:
+                   "GET / HTTP/1.1\r\n\
+                    Host: localhost\r\n\
+                    Connection: close\r\n\
+                    \r\n"
+                 (Printf.sprintf
+                    "openssl s_client -connect '[::1]:%d' -servername \
+                     localhost -CAfile %s -verify_hostname localhost \
+                     -verify_return_error -tls1_3 -alpn http/1.1 -quiet"
+                    port
+                    (Filename.quote (tls_cert_fixture_path ())))
+             in
+             assert_process_success result;
+             check_listener_addresses ~remote:"::1"
+               ~local:(Printf.sprintf "::1:%d" port)
+               result.stdout;
+             Alcotest.(check bool)
+               "TLS metadata" true
+               (contains "tls=TLSv1.3;sni=localhost;alpn=http/1.1;cipher=true\n"
+                  result.stdout))))
+
+let test_listener_bind_failure_cleans_up () =
+  let blocker = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close blocker)
+    (fun () ->
+      Unix.bind blocker (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+      Unix.listen blocker 4;
+      let blocked_port =
+        match Unix.getsockname blocker with
+        | Unix.ADDR_INET (_, port) -> port
+        | Unix.ADDR_UNIX _ -> assert false
+      in
+      let first_port = unused_listener_port () in
+      let config port = Halo.Server.Config.create ~port transport_router in
+      let ready = ref false in
+      Eio_main.run (fun _env ->
+          match
+            Halo.Server.run ~handle_sigint:false
+              ~on_ready:(fun running ->
+                ready := true;
+                Halo.Server.shutdown running)
+              [ config first_port; config blocked_port ]
+          with
+          | () -> fail "expected bind conflict"
+          | exception Halo.Server.Runtime_error message ->
+              Alcotest.(check bool)
+                "endpoint in error" true
+                (contains (Printf.sprintf "127.0.0.1:%d" blocked_port) message);
+              Alcotest.(check bool)
+                "operation in error" true
+                (contains "uv_listen:" message
+                || contains "uv_tcp_bind:" message));
+      Alcotest.(check bool) "readiness withheld" false !ready;
+      (* A later failure must release the listener that succeeded first. *)
+      ignore
+        (with_live_server ~port:first_port ~router:transport_router (fun () ->
+             listener_request ~host:"127.0.0.1" ~port:first_port
+             |> check_listener_addresses ~remote:"127.0.0.1"
+                  ~local:(Printf.sprintf "127.0.0.1:%d" first_port))))
+
+let test_reuseport_listeners ~host ~ipv6_mode ~separate_runtimes () =
+  let port = unused_listener_port () in
+  let config name =
+    let router =
+      Halo.Router.route
+        (Halo.Router.Matcher.pure (fun _request ->
+             Halo.Router.text Status.ok (name ^ "\naccessors=true\n")))
+    in
+    Halo.Server.Config.create ~host ~port ?ipv6_mode ~reuse_port:true router
+  in
+  let first = config "first" and second = config "second" in
+  let groups =
+    if separate_runtimes then [ [ first ]; [ second ] ]
+    else [ [ first; second ] ]
+  in
+  try
+    let metrics =
+      with_live_config_groups groups (fun () ->
+          let first_seen = ref false and second_seen = ref false in
+          let rec request remaining =
+            if remaining > 0 && not (!first_seen && !second_seen) then (
+              let response = listener_request ~host ~port in
+              Alcotest.(check bool)
+                "HTTP response" true
+                (contains "HTTP/1.1 200" response);
+              let first = contains "first\naccessors=true\n" response in
+              let second = contains "second\naccessors=true\n" response in
+              Alcotest.(check bool)
+                "configured router served request" true (first || second);
+              first_seen := !first_seen || first;
+              second_seen := !second_seen || second;
+              request (remaining - 1))
+          in
+          request 256;
+          Alcotest.(check bool)
+            "first listener served requests" true !first_seen;
+          Alcotest.(check bool)
+            "second listener served requests" true !second_seen)
+    in
+    List.iter
+      (fun (metrics : Halo.Server.runtime_metrics) ->
+        Alcotest.(check bool)
+          "runtime accepted connections" true
+          (metrics.accepted_connections > 0L))
+      metrics
+  with
+  | Halo.Server.Runtime_error message
+  when contains "uv_tcp_bind:" message && contains "not supported" message
+  ->
+    Alcotest.(check bool)
+      "requested reuseport reported" true
+      (contains "reuse_port=true" message);
+    skip_listener_test message
+
+let test_ipv6_reuseport_listeners () =
+  with_supported_ipv6_mode
+    (test_reuseport_listeners ~host:"::1"
+       ~ipv6_mode:(Some Halo.Server.IPv6_only) ~separate_runtimes:false)
 
 let test_plaintext_request_exposes_transport_metadata () =
   ignore
@@ -1682,6 +1960,29 @@ let () =
         [
           Alcotest.test_case "buffered gzip over HTTP" `Quick
             test_buffered_compression_over_http;
+        ] );
+      ( "listeners",
+        [
+          Alcotest.test_case "IPv6 loopback and metadata" `Quick
+            test_ipv6_loopback_listener;
+          Alcotest.test_case "IPv6 defaults to IPv6-only" `Quick
+            test_ipv6_default_rejects_ipv4;
+          Alcotest.test_case "IPv6-only coexists with IPv4" `Quick
+            test_ipv6_only_coexists_with_ipv4;
+          Alcotest.test_case "dual-stack and mapped metadata" `Quick
+            test_dual_stack_listener;
+          Alcotest.test_case "IPv6 TLS and metadata" `Slow
+            test_ipv6_tls_listener;
+          Alcotest.test_case "bind failure cleans up earlier listeners" `Quick
+            test_listener_bind_failure_cleans_up;
+          Alcotest.test_case "reuseport listeners route independently" `Quick
+            (test_reuseport_listeners ~host:"127.0.0.1" ~ipv6_mode:None
+               ~separate_runtimes:false);
+          Alcotest.test_case "reuseport across runtimes" `Quick
+            (test_reuseport_listeners ~host:"127.0.0.1" ~ipv6_mode:None
+               ~separate_runtimes:true);
+          Alcotest.test_case "IPv6 reuseport listeners" `Quick
+            test_ipv6_reuseport_listeners;
         ] );
       ( "transport metadata",
         [

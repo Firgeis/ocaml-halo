@@ -87,6 +87,8 @@ external create_server_raw :
   tls_session_ticket_initial_count:int ->
   tls_server_keying_material_lifetime_secs:int ->
   tls_max_early_data_size:int ->
+  ipv6_mode:int ->
+  reuse_port:bool ->
   (server, string) result
   = "ocaml_halo_create_server_bytecode" "ocaml_halo_create_server"
 
@@ -177,7 +179,7 @@ let create_server_tls_args (tls : tls_config option) =
 let ( let*? ) error next =
   match error with Some message -> Error message | None -> next ()
 
-let listen runtime (config : config) =
+let listen_config runtime (config : config) =
   let*? () = Config.validate config in
   let*? () =
     configure_controller runtime
@@ -214,3 +216,27 @@ let listen runtime (config : config) =
     ~tls_server_keying_material_lifetime_secs:
       tls.server_keying_material_lifetime_secs
     ~tls_max_early_data_size:tls.max_early_data_size
+    ~ipv6_mode:
+      (match config.ipv6_mode with
+      | None -> 0
+      | Some Server_config.IPv6_only -> 1
+      | Some Server_config.Dual_stack -> 2)
+    ~reuse_port:config.reuse_port
+
+let listen runtime (config : config) =
+  match listen_config runtime config with
+  | Ok _ as result -> result
+  | Error message ->
+      let host =
+        if String.contains config.host ':' then "[" ^ config.host ^ "]"
+        else config.host
+      in
+      let ipv6_mode =
+        match config.ipv6_mode with
+        | None -> "default"
+        | Some Server_config.IPv6_only -> "IPv6_only"
+        | Some Server_config.Dual_stack -> "Dual_stack"
+      in
+      Error
+        (Printf.sprintf "listener %s:%d (ipv6_mode=%s, reuse_port=%b): %s" host
+           config.port ipv6_mode config.reuse_port message)

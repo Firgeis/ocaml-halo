@@ -75,9 +75,13 @@ type tls_config = {
   max_early_data_size : int option;
 }
 
+type ipv6_mode = IPv6_only | Dual_stack
+
 type t = {
   host : string;
   port : int;
+  ipv6_mode : ipv6_mode option;
+  reuse_port : bool;
   backlog : int;
   max_request_line_size : int;
   max_header_size : int;
@@ -133,6 +137,8 @@ val tls :
 
 val create :
   ?host:string ->
+  ?ipv6_mode:ipv6_mode ->
+  ?reuse_port:bool ->
   ?backlog:int ->
   ?max_request_line_size:int ->
   ?max_header_size:int ->
@@ -146,10 +152,25 @@ val create :
   port:int ->
   Router.t ->
   t
-(** Build a listener configuration. Request-line, header, and body limits are
-    independent and are enforced cumulatively within their respective request
-    sections. TLS 1.3 early-data requests receive 425 unless [early_data_policy]
-    explicitly accepts them. [early_data_replay_store] replaces the process-wide
-    replay cache for this listener. *)
+(** Build a listener configuration. [host] defaults to [127.0.0.1] and must be
+    an unbracketed IPv4 or IPv6 literal; hostnames and scope IDs are
+    unsupported. [port] must be between 0 and 65535; zero lets the OS choose a
+    port.
+
+    IPv6 listeners default to [IPv6_only]. [Dual_stack] allows IPv4-mapped
+    connections; use [host = "::"] to accept both IPv4 and IPv6 on all
+    interfaces. An explicit [ipv6_mode] requires an IPv6 host. An unsupported
+    requested mode fails at startup.
+
+    [reuse_port] defaults to [false]. When [true], multiple listeners can share
+    the same address and port, with the OS distributing connections between
+    them. All listeners sharing the port must enable it. Unsupported platforms
+    fail at startup; this option does not create worker processes.
+
+    Request-line, header, and body limits are independent and are enforced
+    cumulatively within their respective request sections. TLS 1.3 early-data
+    requests receive 425 unless [early_data_policy] explicitly accepts them.
+    [early_data_replay_store] replaces the process-wide replay cache for this
+    listener. *)
 
 val validate : t -> string option

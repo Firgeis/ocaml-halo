@@ -14,6 +14,76 @@ let check_invalid label expected config =
 let test_default_config_is_valid () =
   check_valid "default config is valid" (default_config ())
 
+let test_listener_defaults () =
+  let config = default_config () in
+  Alcotest.(check string) "IPv4 loopback" "127.0.0.1" config.host;
+  Alcotest.(check bool) "no explicit IPv6 mode" true (config.ipv6_mode = None);
+  Alcotest.(check bool) "reuseport disabled" false config.reuse_port
+
+let test_port_range () =
+  List.iter
+    (fun port ->
+      check_valid "valid port" (Halo.Server.Config.create ~port default_router))
+    [ 0; 65535 ];
+  List.iter
+    (fun port ->
+      check_invalid "port range" "server port must be between 0 and 65535"
+        (Halo.Server.Config.create ~port default_router))
+    [ -1; 65536; max_int ]
+
+let test_numeric_hosts () =
+  List.iter
+    (fun host ->
+      check_valid host
+        (Halo.Server.Config.create ~host ~port:8080 default_router))
+    [
+      "127.0.0.1";
+      "0.0.0.0";
+      "::1";
+      "::";
+      "2001:0DB8:0000:0000:0000:0000:0000:0001";
+      "::ffff:127.0.0.1";
+    ];
+  List.iter
+    (fun host ->
+      check_invalid host
+        "server host must be an unbracketed IPv4 or IPv6 literal without a \
+         scope ID"
+        (Halo.Server.Config.create ~host ~port:8080 default_router))
+    [
+      "localhost";
+      "127.1";
+      "256.0.0.1";
+      "1::2::3";
+      "[::1]";
+      "fe80::1%lo";
+      "::1%1";
+    ];
+  check_invalid "empty host" "server host must not be empty"
+    (Halo.Server.Config.create ~host:"" ~port:8080 default_router);
+  List.iter
+    (fun host ->
+      check_invalid "host with NUL" "server host must not contain NUL"
+        (Halo.Server.Config.create ~host ~port:8080 default_router))
+    [ "127.0.0.1\000ignored"; "::1\000ignored" ]
+
+let test_ipv6_modes () =
+  List.iter
+    (fun ipv6_mode ->
+      check_valid "IPv6 mode"
+        (Halo.Server.Config.create ~host:"::" ~port:8080 ~ipv6_mode
+           default_router);
+      check_invalid "IPv6 mode on IPv4" "server ipv6_mode requires an IPv6 host"
+        (Halo.Server.Config.create ~port:8080 ~ipv6_mode default_router))
+    [ Halo.Server.IPv6_only; Halo.Server.Dual_stack ]
+
+let test_reuseport_config () =
+  let config =
+    Halo.Server.Config.create ~port:8080 ~reuse_port:true default_router
+  in
+  Alcotest.(check bool) "reuseport enabled" true config.reuse_port;
+  check_valid "reuseport config" config
+
 let test_default_request_limits () =
   let config = default_config () in
   Alcotest.(check int) "request line" (8 * 1024) config.max_request_line_size;
@@ -232,6 +302,11 @@ let () =
         [
           Alcotest.test_case "default config is valid" `Quick
             test_default_config_is_valid;
+          Alcotest.test_case "listener defaults" `Quick test_listener_defaults;
+          Alcotest.test_case "port range" `Quick test_port_range;
+          Alcotest.test_case "numeric hosts" `Quick test_numeric_hosts;
+          Alcotest.test_case "IPv6 modes" `Quick test_ipv6_modes;
+          Alcotest.test_case "reuseport config" `Quick test_reuseport_config;
           Alcotest.test_case "default request limits" `Quick
             test_default_request_limits;
           Alcotest.test_case "backlog must be positive" `Quick
