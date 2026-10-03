@@ -99,15 +99,6 @@ module Http = struct
       invalid_arg "streamed response chunks must not be empty";
     Printf.sprintf "%x\r\n%s\r\n" (String.length chunk) chunk
 
-  let make_request (event : Reactor.request_event) request_method =
-    {
-      Router.request_method;
-      raw_target = event.target;
-      target = Router.parse_request_target request_method event.target;
-      headers = event.headers;
-      body = "";
-    }
-
   let internal_server_error =
     Router.text Router.Status.internal_server_error "internal server error\n"
 
@@ -130,7 +121,7 @@ module Http = struct
         event.http_major event.http_minor
     in
     let headers =
-      event.raw_headers
+      Request_headers.raw_headers event.headers
       |> List.map (fun (name, value) -> Printf.sprintf "%s: %s\r\n" name value)
       |> String.concat ""
     in
@@ -280,7 +271,8 @@ let with_early_data_policy listener (event : Reactor.request_event) next =
     event.is_early_data
     && not
          (listener.early_data_policy ~method_text:event.method_text
-            ~target:event.target ~headers:event.headers)
+            ~target:event.target
+            ~headers:(Request_headers.headers event.headers))
   then Http.too_early
   else next ()
 
@@ -292,18 +284,20 @@ let dispatch_request listener (event : Reactor.request_event) state body
   | Some Router.OPTIONS when String.equal event.target "*" -> Http.options_star
   | Some Router.TRACE -> Http.trace_response event (Body.read_all body)
   | Some request_method ->
-      let request = Http.make_request event request_method in
       let on_route =
         if state.observability_enabled then
           Some (fun template -> state.telemetry_route <- Some template)
         else None
       in
       Eio.Switch.run ~name:"halo-request" @@ fun request_switch ->
-      Router.Runtime.dispatch ?on_route listener.router request
-        ~raw_headers:event.raw_headers ~body ~http_major:event.http_major
-        ~http_minor:event.http_minor ~connection_info
-        ~is_early_data:event.is_early_data ~request_id:event.request_id
-        ~request_switch ~send_informational ~on_disconnect:(on_disconnect state)
+      Router.Runtime.dispatch_deferred ?on_route listener.router ~request_method
+        ~raw_target:event.target
+        ~headers:(lazy (Request_headers.headers event.headers))
+        ~raw_headers:(lazy (Request_headers.raw_headers event.headers))
+        ~body ~http_major:event.http_major ~http_minor:event.http_minor
+        ~connection_info ~is_early_data:event.is_early_data
+        ~request_id:event.request_id ~request_switch ~send_informational
+        ~on_disconnect:(on_disconnect state)
         ~on_response_terminated:(on_response_terminated state)
 
 let handle_request listener (event : Reactor.request_event) state body
@@ -522,9 +516,10 @@ let start_request t (event : Reactor.request_event) =
                   Telemetry.request_id = event.request_id;
                   method_ = event.method_text;
                   target = event.target;
-                  headers = event.headers;
+                  headers = Request_headers.headers event.headers;
                   remote_parent =
-                    Telemetry.Trace_context.of_headers event.headers;
+                    Telemetry.Trace_context.of_headers
+                      (Request_headers.headers event.headers);
                   http_version = (event.http_major, event.http_minor);
                   connection_info;
                   is_early_data = event.is_early_data;
@@ -609,8 +604,10 @@ let observe_pre_dispatch_response t
                 Telemetry.request_id = event.request_id;
                 method_ = event.method_text;
                 target = event.target;
-                headers = event.headers;
-                remote_parent = Telemetry.Trace_context.of_headers event.headers;
+                headers = Request_headers.headers event.headers;
+                remote_parent =
+                  Telemetry.Trace_context.of_headers
+                    (Request_headers.headers event.headers);
                 http_version = (event.http_major, event.http_minor);
                 connection_info;
                 is_early_data = event.is_early_data;

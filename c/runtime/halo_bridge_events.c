@@ -235,14 +235,17 @@ static void halo_bridge_notify(struct halo_bridge* bridge) {
 int halo_bridge_push_event(struct halo_bridge* bridge,
                            struct halo_bridge_event* event) {
   int accepted;
+  int notify;
 
   accepted = 0;
+  notify = 0;
   pthread_mutex_lock(&bridge->event_mutex);
   if (bridge->event_count < bridge->event_capacity) {
     event->next = NULL;
-    if (bridge->event_tail == NULL)
+    if (bridge->event_tail == NULL) {
       bridge->event_head = event;
-    else
+      notify = 1;
+    } else
       bridge->event_tail->next = event;
     bridge->event_tail = event;
     bridge->event_count += 1;
@@ -250,23 +253,27 @@ int halo_bridge_push_event(struct halo_bridge* bridge,
   }
   pthread_mutex_unlock(&bridge->event_mutex);
 
-  if (accepted)
+  if (notify)
     halo_bridge_notify(bridge);
   return accepted ? 0 : -1;
 }
 
 static void halo_bridge_push_required_event(struct halo_bridge* bridge,
                                             struct halo_bridge_event* event) {
+  int notify;
+
   pthread_mutex_lock(&bridge->event_mutex);
   event->next = NULL;
-  if (bridge->event_tail == NULL)
+  notify = bridge->event_tail == NULL;
+  if (notify)
     bridge->event_head = event;
   else
     bridge->event_tail->next = event;
   bridge->event_tail = event;
   bridge->event_count += 1;
   pthread_mutex_unlock(&bridge->event_mutex);
-  halo_bridge_notify(bridge);
+  if (notify)
+    halo_bridge_notify(bridge);
 }
 
 struct halo_bridge_event* halo_bridge_pop_event(struct halo_bridge* bridge) {
@@ -577,19 +584,65 @@ int halo_bridge_dispatch_request(struct halo_client* client) {
   return 0;
 }
 
-int halo_bridge_emit_body_chunk(struct halo_client* client,
-                                const char* data,
-                                size_t length) {
-  struct halo_runtime* runtime;
+int halo_bridge_buffer_body_chunk(struct halo_client* client,
+                                  const char* data,
+                                  size_t length) {
   struct halo_bridge_event* event;
+  size_t required;
+  size_t capacity;
 
   if (client == NULL || client->bridge_request_id == 0)
     return -1;
-  runtime = client->handle.loop->data;
-  event = halo_bridge_payload_event(HALO_BRIDGE_BODY_CHUNK,
-                                    client->bridge_request_id, data, length);
-  if (event == NULL)
+  if (length == 0)
+    return 0;
+  event = client->bridge_body_event;
+  if (length > SIZE_MAX - (event == NULL ? 0 : event->payload_len))
     return -1;
+  required = length + (event == NULL ? 0 : event->payload_len);
+  capacity = client->bridge_body_capacity;
+  if (event == NULL || required > capacity) {
+    struct halo_bridge_event* next;
+    int first = event == NULL;
+
+    if (capacity == 0)
+      capacity = 1024;
+    while (capacity < required) {
+      if (capacity > (SIZE_MAX - sizeof(*event)) / 2) {
+        capacity = required;
+        break;
+      }
+      capacity *= 2;
+    }
+    if (capacity > SIZE_MAX - sizeof(*event))
+      return -1;
+    next = realloc(event, sizeof(*event) + capacity);
+    if (next == NULL)
+      return -1;
+    if (first) {
+      memset(next, 0, sizeof(*next));
+      next->kind = HALO_BRIDGE_BODY_CHUNK;
+      next->request_id = client->bridge_request_id;
+    }
+    event = next;
+    event->payload = (char*) (event + 1);
+    client->bridge_body_event = event;
+    client->bridge_body_capacity = capacity;
+  }
+  memcpy(event->payload + event->payload_len, data, length);
+  event->payload_len = required;
+  return 0;
+}
+
+int halo_bridge_flush_body_chunk(struct halo_client* client) {
+  struct halo_runtime* runtime;
+  struct halo_bridge_event* event;
+
+  event = client->bridge_body_event;
+  if (event == NULL)
+    return 0;
+  client->bridge_body_event = NULL;
+  client->bridge_body_capacity = 0;
+  runtime = client->handle.loop->data;
   if (halo_bridge_push_event(runtime->bridge, event) != 0) {
     free(event);
     return -1;

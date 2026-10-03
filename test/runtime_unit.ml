@@ -1036,21 +1036,28 @@ let test_request_snapshot_survives_connection_reuse () =
         Matcher.(
           let+ () = request_method_is GET *> path_end in
           fun request ->
-            let current =
-              (Request.raw_target request, Request.headers request "x-snapshot")
-            in
             match !previous with
             | None ->
-                if current <> (first_target, values) then
-                  failwith "first request snapshot is corrupt";
-                previous := Some current;
+                if Request.raw_target request <> first_target then
+                  failwith "first request target is corrupt";
+                (* Keep the view without decoding any headers. *)
+                previous := Some request;
                 text Status.ok "snapshot-first\n"
             | Some retained ->
                 Gc.full_major ();
-                if retained <> (first_target, values) then
-                  failwith "retained request snapshot changed";
-                if current <> ("/", [ "replacement" ]) then
-                  failwith "second request snapshot is corrupt";
+                Gc.compact ();
+                if
+                  ( Request.raw_target retained,
+                    Request.headers retained "x-snapshot" )
+                  <> (first_target, values)
+                then failwith "deferred request snapshot changed";
+                let headers = Request.copy_headers retained in
+                if Request.copy_headers retained != headers then
+                  failwith "decoded headers were not cached";
+                if Request.header retained "connection" <> None then
+                  failwith "hop-by-hop header survived filtering";
+                if Request.headers request "x-snapshot" <> [ "replacement" ]
+                then failwith "second request snapshot is corrupt";
                 text Status.ok "snapshot-retained\n"))
   in
   ignore
@@ -1066,19 +1073,170 @@ let test_request_snapshot_survives_connection_reuse () =
              in
              write_socket_all socket
                ("GET " ^ first_target
-               ^ " HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n"
-               ^ headers ^ "\r\n");
+              ^ " HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n"
+              ^ headers ^ "\r\n");
              let first = read_socket_until socket "snapshot-first\n" in
              Alcotest.(check bool)
                "large snapshot, including empty repeated headers" true
                (contains "snapshot-first\n" first);
              write_socket_all socket
-               "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
-                X-Snapshot: replacement\r\n\r\n";
+               "GET / HTTP/1.1\r\n\
+                Host: localhost\r\n\
+                Connection: close\r\n\
+                X-Snapshot: replacement\r\n\
+                \r\n";
              let second = read_socket_until socket "snapshot-retained\n" in
              Alcotest.(check bool)
                "snapshot survives parser storage reuse and collection" true
                (contains "snapshot-retained\n" second))))
+
+let test_routing_defers_header_materialization () =
+  let decoded = ref 0 in
+  let retained = ref None in
+  let headers =
+    lazy
+      (incr decoded;
+       [ ("X-Test", "value") ])
+  in
+  let raw_headers = lazy (failwith "routing forced wire headers") in
+  let router =
+    Halo.Router.(
+      route
+        (Matcher.pure (fun request ->
+             retained := Some request;
+             text Status.ok "ok")))
+  in
+  Eio_main.run @@ fun _env ->
+  Eio.Switch.run @@ fun request_switch ->
+  ignore
+    (Halo.Router.Runtime.dispatch_deferred router ~request_method:GET
+       ~raw_target:"/" ~headers ~raw_headers
+       ~body:(Halo.Body.Private.of_string "")
+       ~http_major:1 ~http_minor:1
+       ~connection_info:
+         {
+           remote_address = Unix.ADDR_UNIX "remote";
+           local_address = Unix.ADDR_UNIX "local";
+           tls = None;
+         }
+       ~is_early_data:false ~request_id:1L ~request_switch
+       ~send_informational:ignore ~on_disconnect:ignore
+       ~on_response_terminated:ignore);
+  Alcotest.(check int) "routing leaves headers deferred" 0 !decoded;
+  match !retained with
+  | None -> fail "handler did not retain request"
+  | Some request ->
+      Alcotest.(check (option string))
+        "deferred lookup" (Some "value")
+        (Halo.Router.Request.header request "x-test");
+      ignore (Halo.Router.Request.copy_headers request);
+      Alcotest.(check int) "headers decoded once" 1 !decoded
+
+let test_chunked_body_callbacks_are_batched () =
+  let chunks = ref 0 in
+  let expected =
+    String.init 1024 (fun index -> Char.chr (97 + (index mod 26)))
+  in
+  let router =
+    Halo.Router.(
+      route
+        Matcher.(
+          let+ () = request_method_is POST *> require_body *> path_end in
+          fun request ->
+            let received = Buffer.create 1024 in
+            let rec read () =
+              match Halo.Body.read (Request.body request) with
+              | None -> ()
+              | Some chunk ->
+                  incr chunks;
+                  Buffer.add_string received chunk;
+                  read ()
+            in
+            read ();
+            if Buffer.contents received <> expected then
+              failwith "batched body bytes changed";
+            text Status.ok "batch-complete\n"))
+  in
+  ignore
+    (with_live_server ~router (fun () ->
+         let wire_body =
+           String.to_seq expected
+           |> Seq.map (fun byte -> Printf.sprintf "1\r\n%c\r\n" byte)
+           |> List.of_seq |> String.concat ""
+         in
+         let response =
+           plaintext_request ~until:"batch-complete\n"
+             ("POST / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+            ^ "Transfer-Encoding: chunked\r\n\r\n" ^ wire_body ^ "0\r\n\r\n")
+         in
+         Alcotest.(check bool)
+           "complete response" true
+           (contains "batch-complete\n" response)));
+  Alcotest.(check bool)
+    "parser callbacks share delivery events" true
+    (!chunks > 0 && !chunks < 1024)
+
+let test_tls_body_delivers_partial_batches () =
+  let first_read = Atomic.make false in
+  let router =
+    Halo.Router.(
+      route
+        Matcher.(
+          let+ () = request_method_is POST *> require_body *> path_end in
+          fun request ->
+            let body = Request.body request in
+            let first = Option.value (Halo.Body.read body) ~default:"" in
+            Atomic.set first_read true;
+            let rest = Halo.Body.read_all body in
+            if first <> "abc" || rest <> "def" then
+              failwith "partial TLS delivery changed body bytes";
+            text Status.ok "partial-complete\n"))
+  in
+  ignore
+    (with_live_server ~tls:(tls_resumption_config ()) ~router (fun () ->
+         let command =
+           String.concat " "
+             [
+               Filename.quote (s2nc_bin_path ());
+               "-c default_tls13 -f";
+               Filename.quote (tls_cert_fixture_path ());
+               "--echo --non-blocking --name localhost 127.0.0.1 8443";
+             ]
+         in
+         let input, output, errors =
+           Unix.open_process_full command (Unix.environment ())
+         in
+         Fun.protect
+           ~finally:(fun () ->
+             close_out_noerr output;
+             ignore (Unix.close_process_full (input, output, errors)))
+           (fun () ->
+             write_all output
+               "POST / HTTP/1.1\r\n\
+                Host: localhost\r\n\
+                Connection: close\r\n\
+                Transfer-Encoding: chunked\r\n\
+                \r\n\
+                3\r\n\
+                abc\r\n";
+             let deadline = Unix.gettimeofday () +. 2.0 in
+             let rec wait () =
+               if Atomic.get first_read then ()
+               else if Unix.gettimeofday () >= deadline then
+                 fail "TLS body delivery waited for a full batch"
+               else (
+                 Thread.delay 0.001;
+                 wait ())
+             in
+             wait ();
+             write_all output "3\r\ndef\r\n0\r\n\r\n";
+             let response = In_channel.input_all input in
+             if not (contains "partial-complete\n" response) then
+               fail "partial TLS response: %s\nstderr: %s" response
+                 (In_channel.input_all errors);
+             Alcotest.(check bool)
+               "partial upload completes" true
+               (contains "partial-complete\n" response))))
 
 let test_runtime_metrics_defaults () =
   let metrics = with_live_server (fun () -> ()) in
@@ -1535,6 +1693,12 @@ let () =
             test_keep_alive_requests_share_connection_metadata;
           Alcotest.test_case "request snapshot survives connection reuse" `Quick
             test_request_snapshot_survives_connection_reuse;
+          Alcotest.test_case "routing defers header materialization" `Quick
+            test_routing_defers_header_materialization;
+          Alcotest.test_case "chunked body callbacks are batched" `Quick
+            test_chunked_body_callbacks_are_batched;
+          Alcotest.test_case "TLS body delivers partial batches" `Quick
+            test_tls_body_delivers_partial_batches;
         ] );
       ( "errors",
         [

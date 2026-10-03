@@ -19,9 +19,11 @@ void halo_bridge_mark_drained(struct halo_runtime* runtime);
 
 /* Reactor-to-Eio request events. */
 int halo_bridge_dispatch_request(struct halo_client* client);
-int halo_bridge_emit_body_chunk(struct halo_client* client,
-                                const char* data,
-                                size_t length);
+/* Coalesce callbacks from one parser input; flush before yielding the reactor. */
+int halo_bridge_buffer_body_chunk(struct halo_client* client,
+                                  const char* data,
+                                  size_t length);
+int halo_bridge_flush_body_chunk(struct halo_client* client);
 int halo_bridge_emit_body_end(struct halo_client* client);
 void halo_bridge_complete_request(struct halo_client* client);
 void halo_bridge_disconnect_request(struct halo_client* client);

@@ -261,7 +261,11 @@ module Request : sig
   val header : t -> string -> string option
   val headers : t -> string -> string list
   val fold_headers : t -> init:'a -> f:('a -> string -> string -> 'a) -> 'a
+
   val copy_headers : t -> (string * string) list
+  (** Server header lists are decoded on first access and cached. Returned
+      strings remain valid after the connection closes or serves another
+      request. *)
 
   val materialize : t -> request
   (** Copy request metadata and consume the unread request body. Body bytes
@@ -350,6 +354,26 @@ module Runtime : sig
     on_disconnect:((unit -> unit) -> unit) ->
     on_response_terminated:((response_outcome -> unit) -> unit) ->
     response
+
+  val dispatch_deferred :
+    ?on_route:(string -> unit) ->
+    t ->
+    request_method:http_method ->
+    raw_target:string ->
+    headers:(string * string) list Lazy.t ->
+    raw_headers:(string * string) list Lazy.t ->
+    body:Body.t ->
+    http_major:int ->
+    http_minor:int ->
+    connection_info:connection_info ->
+    is_early_data:bool ->
+    request_id:int64 ->
+    request_switch:Eio.Switch.t ->
+    send_informational:(informational_response -> unit) ->
+    on_disconnect:((unit -> unit) -> unit) ->
+    on_response_terminated:((response_outcome -> unit) -> unit) ->
+    response
+  (** Internal server entry point that preserves deferred header decoding. *)
 end
 
 val make : ?headers:Headers.t -> status:Status.t -> string -> response

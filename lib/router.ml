@@ -372,8 +372,8 @@ type request_view = {
   request_method : http_method option;
   raw_target : string;
   target : request_target;
-  headers : (string * string) list;
-  raw_headers : (string * string) list;
+  headers : (string * string) list Lazy.t;
+  raw_headers : (string * string) list Lazy.t;
   context : request_context;
 }
 
@@ -493,7 +493,7 @@ module Req = struct
     | Raw_target -> request_view.raw_target
     | Target -> request_view.target
     | Body -> Body.read_all request_view.context.body
-    | Copy_headers -> request_view.headers
+    | Copy_headers -> Lazy.force request_view.headers
     | Materialize -> (
         let request_method_text = eval request_view Request_method_text in
         match http_method_of_string request_method_text with
@@ -617,7 +617,7 @@ let apply_request_patch (request_view : request_view) (patch : request_patch) =
   in
   let headers =
     match patch.headers with
-    | Some headers -> headers
+    | Some headers -> Lazy.from_val headers
     | None -> request_view.headers
   in
   let body =
@@ -685,9 +685,12 @@ module Request = struct
   let on_response_terminated request callback =
     request.context.on_response_terminated callback
 
-  let header request name = header_from_list request.headers name
-  let headers request name = headers_from_list request.headers name
-  let fold_headers request ~init ~f = fold_header_list request.headers ~init ~f
+  let header request name = header_from_list (Lazy.force request.headers) name
+  let headers request name = headers_from_list (Lazy.force request.headers) name
+
+  let fold_headers request ~init ~f =
+    fold_header_list (Lazy.force request.headers) ~init ~f
+
   let copy_headers request = Req.eval request Req.Copy_headers
   let materialize request = materialize_request request
 end
@@ -800,7 +803,7 @@ module Matcher = struct
           let name = String.lowercase_ascii name in
           String.equal name "content-length"
           || String.equal name "transfer-encoding")
-        input.request_view.raw_headers
+        (Lazy.force input.request_view.raw_headers)
     in
     if has_defined_length then Match ((), input)
     else
@@ -1024,8 +1027,8 @@ let dispatch router (request : request) =
           request_method = Some request.request_method;
           raw_target = request.raw_target;
           target = request.target;
-          headers = request.headers;
-          raw_headers = request.headers;
+          headers = Lazy.from_val request.headers;
+          raw_headers = Lazy.from_val request.headers;
           context;
         };
       request_method = Some request.request_method;
@@ -1035,17 +1038,17 @@ let dispatch router (request : request) =
     }
 
 module Runtime = struct
-  let dispatch ?on_route router (request : request) ~raw_headers ~body
-      ~http_major ~http_minor ~connection_info ~is_early_data ~request_id
-      ~request_switch ~send_informational ~on_disconnect ~on_response_terminated
-      =
+  let dispatch_with_headers ?on_route router ~request_method ~raw_target ~target
+      ~headers ~raw_headers ~body ~http_major ~http_minor ~connection_info
+      ~is_early_data ~request_id ~request_switch ~send_informational
+      ~on_disconnect ~on_response_terminated =
     let request_view =
       {
-        request_method_text = string_of_http_method request.request_method;
-        request_method = Some request.request_method;
-        raw_target = request.raw_target;
-        target = request.target;
-        headers = request.headers;
+        request_method_text = string_of_http_method request_method;
+        request_method = Some request_method;
+        raw_target;
+        target;
+        headers;
         raw_headers;
         context =
           {
@@ -1065,11 +1068,22 @@ module Runtime = struct
     dispatch_from_input ?on_route router
       {
         request_view;
-        request_method = Some request.request_method;
-        path = { segments = split_target request.target; index = 0 };
-        queryparams = parse_queryparams request.target;
-        valid_target = validate_request_target request.target;
+        request_method = Some request_method;
+        path = { segments = split_target target; index = 0 };
+        queryparams = parse_queryparams target;
+        valid_target = validate_request_target target;
       }
+
+  let dispatch ?on_route router (request : request) ~raw_headers =
+    dispatch_with_headers ?on_route router
+      ~request_method:request.request_method ~raw_target:request.raw_target
+      ~target:request.target
+      ~headers:(Lazy.from_val request.headers)
+      ~raw_headers:(Lazy.from_val raw_headers)
+
+  let dispatch_deferred ?on_route router ~request_method ~raw_target =
+    dispatch_with_headers ?on_route router ~request_method ~raw_target
+      ~target:(parse_request_target request_method raw_target)
 end
 
 let ensure_final_status status =

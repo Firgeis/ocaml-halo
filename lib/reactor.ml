@@ -9,32 +9,12 @@ let trace fmt =
       if trace_enabled then prerr_endline ("halo bridge: " ^ message))
     fmt
 
-type raw_event = {
-  kind : int;
-  request_id : int64;
-  listener_id : int64;
-  method_text : string;
-  target : string;
-  headers : (string * string) list;
-  raw_headers : (string * string) list;
-  http_major : int;
-  http_minor : int;
-  keep_alive : bool;
-  body_expected : bool;
-  is_early_data : bool;
-  connection_info : Router.connection_info option;
-  auxiliary : int64;
-  payload : string;
-  telemetry_timestamps : (int64 * int64) option;
-}
-
 type request_event = {
   request_id : int64;
   listener_id : int64;
   method_text : string;
   target : string;
-  headers : (string * string) list;
-  raw_headers : (string * string) list;
+  headers : Request_headers.t;
   http_major : int;
   http_minor : int;
   keep_alive : bool;
@@ -58,7 +38,7 @@ type pre_dispatch_response_event = {
   request_id : int64;
   method_text : string;
   target : string;
-  headers : (string * string) list;
+  headers : Request_headers.t;
   http_major : int;
   http_minor : int;
   is_early_data : bool;
@@ -116,7 +96,7 @@ external event_fd : Server_backend.t -> Unix.file_descr
 external drain_wakeup : Server_backend.t -> unit
   = "ocaml_halo_bridge_drain_wakeup"
 
-external poll_event_raw : Server_backend.t -> raw_event option
+external poll_event : Server_backend.t -> event option
   = "ocaml_halo_bridge_poll_event"
 
 external send_response_raw : Server_backend.t -> int64 -> string -> int
@@ -162,110 +142,6 @@ external listener_id : Server_backend.server -> int64
 
 let enable runtime ~max_in_flight_requests ~command_capacity ~telemetry =
   enable_raw runtime max_in_flight_requests command_capacity telemetry
-
-let pre_dispatch_response_of_raw (raw : raw_event) ~start_monotonic_ns
-    ~start_time_unix_ns =
-  match
-    ( String.length raw.payload,
-      Int64_encoding.of_big_endian raw.payload ~offset:0,
-      Int64_encoding.of_big_endian raw.payload ~offset:8,
-      Int64_encoding.of_big_endian raw.payload ~offset:16 )
-  with
-  | 25, Some status_code, Some request_body_size, Some response_body_size
-    when status_code >= 100L && status_code <= 599L && request_body_size >= 0L
-         && response_body_size >= 0L
-         && (raw.payload.[24] = '\000' || raw.payload.[24] = '\001') ->
-      Some
-        {
-          request_id = raw.request_id;
-          method_text = raw.method_text;
-          target = raw.target;
-          headers = raw.headers;
-          http_major = raw.http_major;
-          http_minor = raw.http_minor;
-          is_early_data = raw.is_early_data;
-          connection_info = raw.connection_info;
-          start_monotonic_ns;
-          start_time_unix_ns;
-          end_monotonic_ns = raw.auxiliary;
-          status_code = Int64.to_int status_code;
-          request_body_size;
-          response_body_size;
-          completed = raw.payload.[24] = '\001';
-        }
-  | _ -> None
-
-let event_of_raw (raw : raw_event) =
-  let monotonic_time_ns, unix_time_ns =
-    Option.value raw.telemetry_timestamps ~default:(0L, 0L)
-  in
-  match raw.kind with
-  | 0 ->
-      Request
-        {
-          request_id = raw.request_id;
-          listener_id = raw.listener_id;
-          method_text = raw.method_text;
-          target = raw.target;
-          headers = raw.headers;
-          raw_headers = raw.raw_headers;
-          http_major = raw.http_major;
-          http_minor = raw.http_minor;
-          keep_alive = raw.keep_alive;
-          body_expected = raw.body_expected;
-          is_early_data = raw.is_early_data;
-          connection_id = raw.auxiliary;
-          connection_info = raw.connection_info;
-          start_monotonic_ns = monotonic_time_ns;
-          start_time_unix_ns =
-            (if unix_time_ns = 0L then None else Some unix_time_ns);
-        }
-  | 1 -> Body_chunk { request_id = raw.request_id; chunk = raw.payload }
-  | 2 -> Body_end raw.request_id
-  | 3 ->
-      Response_complete
-        {
-          request_id = raw.request_id;
-          end_monotonic_ns = monotonic_time_ns;
-          request_body_size = raw.auxiliary;
-        }
-  | 4 ->
-      Disconnected
-        {
-          request_id = raw.request_id;
-          end_monotonic_ns = monotonic_time_ns;
-          request_body_size = raw.auxiliary;
-        }
-  | 5 -> Stopped
-  | 6 -> Write_complete raw.request_id
-  | 7 -> Metrics { query_id = raw.request_id; payload = raw.payload }
-  | 8 ->
-      Replay_claim
-        {
-          claim_id = raw.request_id;
-          listener_id = raw.listener_id;
-          identity = raw.payload;
-          ttl_secs = raw.auxiliary;
-        }
-  | 9 -> Drained
-  | 10 -> Connection_closed raw.request_id
-  | 11 -> (
-      match
-        pre_dispatch_response_of_raw raw ~start_monotonic_ns:monotonic_time_ns
-          ~start_time_unix_ns:
-            (if unix_time_ns = 0L then None else Some unix_time_ns)
-      with
-      | Some event -> Pre_dispatch_response event
-      | None ->
-          Unknown
-            {
-              kind = raw.kind;
-              request_id = raw.request_id;
-              payload = raw.payload;
-            })
-  | kind -> Unknown { kind; request_id = raw.request_id; payload = raw.payload }
-
-let poll_event runtime = Option.map event_of_raw (poll_event_raw runtime)
 
 let command_status = function
   | 0 -> Enqueued

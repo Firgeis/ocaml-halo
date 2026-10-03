@@ -524,7 +524,9 @@ static int halo_tls_build_server_config(value tls_cert_chain_path,
            tls_cert_chain,
            files.cert_chain_pem,
            files.private_key_pem) != S2N_SUCCESS
-      || s2n_config_add_cert_chain_and_key_to_store(tls_config, tls_cert_chain) != S2N_SUCCESS) {
+      || s2n_config_add_cert_chain_and_key_to_store(tls_config, tls_cert_chain) != S2N_SUCCESS
+      /* The recv callback is nonblocking: partial batches return on EAGAIN. */
+      || s2n_config_set_recv_multi_record(tls_config, true) != S2N_SUCCESS) {
     snprintf(error_message, error_message_cap, "%s", s2n_strerror(s2n_errno, "EN"));
     goto error;
   }
@@ -989,6 +991,7 @@ static void halo_free_handle(uv_handle_t* handle) {
         }
         free(client->tls_input_data);
         free(client->tls_capture_data);
+        free(client->bridge_body_event);
         chunk = client->tls_write_head;
         while (chunk != NULL) {
           next = chunk->next;
@@ -1195,6 +1198,8 @@ static void halo_alloc_cb(uv_handle_t* handle, size_t suggested_size, uv_buf_t* 
 
   (void)handle;
 
+  if (suggested_size > HALO_BODY_DELIVERY_BATCH_SIZE)
+    suggested_size = HALO_BODY_DELIVERY_BATCH_SIZE;
   base = malloc(suggested_size);
   if (base == NULL) {
     buf->base = NULL;
@@ -1635,7 +1640,7 @@ static int halo_feed_plaintext(uv_stream_t* stream,
 }
 
 static int halo_tls_drain_early_plaintext(uv_stream_t* stream, struct halo_client* client) {
-  uint8_t plaintext[4096];
+  uint8_t plaintext[HALO_BODY_DELIVERY_BATCH_SIZE];
 
   while (halo_tls_enabled(client) && !client->tls_early_data_complete) {
     ssize_t data_received;
@@ -1758,7 +1763,7 @@ static int halo_tls_drive_handshake(uv_stream_t* stream, struct halo_client* cli
 }
 
 static int halo_tls_drain_plaintext(uv_stream_t* stream, struct halo_client* client) {
-  char plaintext[4096];
+  char plaintext[HALO_BODY_DELIVERY_BATCH_SIZE];
   llhttp_errno_t err;
 
   while (halo_tls_enabled(client) && client->tls_handshake_complete) {
@@ -2220,6 +2225,12 @@ static int halo_capture_paused_remainder(struct halo_client* client,
 static int halo_handle_parser_result(uv_stream_t* stream,
                                      struct halo_client* client,
                                      llhttp_errno_t err) {
+  /* Publish one chunk per input buffer, before body-end or error handling.
+   * Never wait for a full batch: a streaming peer may need this data now. */
+  if (halo_bridge_flush_body_chunk(client) != 0) {
+    halo_close_client(client);
+    return 1;
+  }
   if (err == HPE_OK
       && client->awaiting_request_body
       && client->body_chunk_delivered) {

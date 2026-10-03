@@ -67,6 +67,9 @@ struct halo_runtime_controller {
 };
 
 struct halo_bridge;
+struct halo_bridge_event;
+
+#define HALO_BODY_DELIVERY_BATCH_SIZE (64U * 1024U)
 
 struct halo_runtime {
   uv_loop_t loop;
@@ -185,6 +188,9 @@ struct halo_client {
   int dispatch_after_headers;
   int awaiting_request_body;
   int body_chunk_delivered;
+  /* Reactor-owned until the parser result flushes it to the event queue. */
+  struct halo_bridge_event* bridge_body_event;
+  size_t bridge_body_capacity;
   int connection_accounted;
   int connection_closed_accounted;
   int request_in_flight;

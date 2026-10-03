@@ -825,7 +825,7 @@ static int halo_on_body(llhttp_t* parser, const char* at, size_t length) {
 
   client->body_bytes_read += length;
   if (client->awaiting_request_body) {
-    if (halo_bridge_emit_body_chunk(client, at, length) != 0)
+    if (halo_bridge_buffer_body_chunk(client, at, length) != 0)
       return halo_parser_fail(parser, "could not deliver request body");
     client->body_chunk_delivered = 1;
   }

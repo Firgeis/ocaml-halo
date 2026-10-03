@@ -20,6 +20,7 @@
   int64_encoding
   otlp_http_transport
   body
+  request_headers
   headers
   compression
   router
@@ -36,6 +37,7 @@
   ascii_string
   int64_encoding
   otlp_http_transport
+  request_headers
   server_backend
   reactor
   request_runtime)

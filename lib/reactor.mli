@@ -6,8 +6,7 @@ type request_event = {
   listener_id : int64;
   method_text : string;
   target : string;
-  headers : (string * string) list;
-  raw_headers : (string * string) list;
+  headers : Request_headers.t;
   http_major : int;
   http_minor : int;
   keep_alive : bool;
@@ -36,7 +35,7 @@ type pre_dispatch_response_event = {
   request_id : int64;
   method_text : string;
   target : string;
-  headers : (string * string) list;
+  headers : Request_headers.t;
   http_major : int;
   http_minor : int;
   is_early_data : bool;
