@@ -107,42 +107,18 @@ CAMLprim value ocaml_halo_bridge_drain_wakeup(value runtime_value) {
 }
 
 /* Private header encoding: bytes followed by two native size_t lengths and
- * one hop-by-hop flag. Trailing descriptors allow decoding in reverse order
- * without allocating an index. No pointer into C storage reaches OCaml. */
-#define HALO_PACKED_HEADER_METADATA_SIZE (2 * sizeof(size_t) + 1)
-_Static_assert(HALO_PACKED_HEADER_METADATA_SIZE
-                 <= sizeof(struct halo_bridge_header),
-               "packed headers must fit the validated event allocation size");
+ * one hop-by-hop flag. Decode in reverse order without allocating an index.
+ * No pointer into C storage reaches OCaml. */
 
 static value halo_bridge_alloc_headers(
     const struct halo_bridge_request_data* request) {
   CAMLparam0();
   CAMLlocal2(packed, snapshot);
-  size_t length = 0;
-  size_t index;
-  unsigned char* cursor;
 
-  for (index = 0; index < request->header_count; index++) {
-    const struct halo_bridge_header* header = &request->headers[index];
-    length += header->name_len + header->value_len
-      + HALO_PACKED_HEADER_METADATA_SIZE;
-  }
-  packed = caml_alloc_string(length);
-  cursor = Bytes_val(packed);
-  for (index = 0; index < request->header_count; index++) {
-    const struct halo_bridge_header* header = &request->headers[index];
-    if (header->name_len > 0)
-      memcpy(cursor, header->name, header->name_len);
-    cursor += header->name_len;
-    if (header->value_len > 0)
-      memcpy(cursor, header->value, header->value_len);
-    cursor += header->value_len;
-    memcpy(cursor, &header->name_len, sizeof(size_t));
-    cursor += sizeof(size_t);
-    memcpy(cursor, &header->value_len, sizeof(size_t));
-    cursor += sizeof(size_t);
-    *cursor++ = (unsigned char) header->is_hop_by_hop;
-  }
+  packed = caml_alloc_string(request->packed_headers_len);
+  if (request->packed_headers_len > 0)
+    memcpy(Bytes_val(packed), request->packed_headers,
+           request->packed_headers_len);
   /* Keep in sync with Request_headers.t. */
   snapshot = caml_alloc(2, 0);
   Store_field(snapshot, 0, packed);
@@ -163,9 +139,9 @@ CAMLprim value ocaml_halo_bridge_decode_headers(value packed) {
     size_t value_len;
     unsigned char is_hop_by_hop;
 
-    if (offset < HALO_PACKED_HEADER_METADATA_SIZE)
+    if (offset < HALO_BRIDGE_PACKED_HEADER_METADATA_SIZE)
       caml_invalid_argument("invalid packed bridge headers");
-    offset -= HALO_PACKED_HEADER_METADATA_SIZE;
+    offset -= HALO_BRIDGE_PACKED_HEADER_METADATA_SIZE;
     memcpy(&name_len, String_val(packed) + offset, sizeof(size_t));
     memcpy(&value_len, String_val(packed) + offset + sizeof(size_t),
            sizeof(size_t));

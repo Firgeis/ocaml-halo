@@ -7,6 +7,7 @@
 #include <pthread.h>
 
 #define HALO_BRIDGE_REPLAY_CLAIM_BUCKET_COUNT 1024U
+#define HALO_BRIDGE_PACKED_HEADER_METADATA_SIZE (2 * sizeof(size_t) + 1)
 
 enum halo_bridge_event_kind {
   HALO_BRIDGE_REQUEST = 0,
@@ -44,14 +45,6 @@ enum halo_bridge_command_status {
   HALO_BRIDGE_COMMAND_CLOSED = 2
 };
 
-struct halo_bridge_header {
-  char* name;
-  size_t name_len;
-  char* value;
-  size_t value_len;
-  int is_hop_by_hop;
-};
-
 /* Request-only transport metadata. The trailing storage contains, in order,
  * the remote sockaddr, local sockaddr, SNI, ALPN protocol, and cipher name.
  * It occupies an exact-size region of its request event, avoiding worst-case
@@ -66,15 +59,15 @@ struct halo_bridge_transport {
   unsigned char storage[];
 };
 
-/* Present only on request and pre-dispatch response events. Descriptors,
- * transport metadata, and string bytes share the event's allocation. */
+/* Present only on request and pre-dispatch response events. Transport metadata,
+ * strings, and packed headers share the event's allocation. */
 struct halo_bridge_request_data {
   char* method_text;
   size_t method_len;
   char* target;
   size_t target_len;
-  struct halo_bridge_header* headers;
-  size_t header_count;
+  char* packed_headers;
+  size_t packed_headers_len;
   struct halo_bridge_transport* transport;
   uint8_t http_major;
   uint8_t http_minor;

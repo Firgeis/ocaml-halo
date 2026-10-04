@@ -10,8 +10,8 @@ _Static_assert(sizeof(struct halo_bridge_event)
                  % _Alignof(struct halo_bridge_request_data) == 0,
                "request metadata must be aligned after the event header");
 _Static_assert(sizeof(struct halo_bridge_request_data)
-                 % _Alignof(struct halo_bridge_header) == 0,
-               "header descriptors must be aligned after request metadata");
+                 % _Alignof(struct halo_bridge_transport) == 0,
+               "transport metadata must be aligned after request metadata");
 
 struct halo_bridge_transport_source {
   struct sockaddr_storage remote_address;
@@ -145,6 +145,7 @@ static struct halo_bridge_event* halo_bridge_request_event(
   struct halo_bridge_request_data* data;
   struct halo_bridge_event* event;
   size_t transport_size;
+  size_t headers_size;
   size_t allocation_size;
   size_t index;
   char* cursor;
@@ -156,22 +157,24 @@ static struct halo_bridge_event* halo_bridge_request_event(
                                         &transport_size) != 0)
     return NULL;
 
-  allocation_size = sizeof(*event) + sizeof(*data);
-  if (request->header_count > SIZE_MAX / sizeof(*data->headers)
-      || halo_bridge_add_size(&allocation_size,
-                               request->header_count * sizeof(*data->headers)) != 0
-      || halo_bridge_add_size(&allocation_size, transport_size) != 0
-      || halo_bridge_add_size(&allocation_size, method_len) != 0
-      || halo_bridge_add_size(&allocation_size, request->url_len) != 0
-      || halo_bridge_add_size(&allocation_size, payload_len) != 0)
-    return NULL;
+  headers_size = 0;
   for (index = 0; index < request->header_count; index++) {
-    if (halo_bridge_add_size(&allocation_size,
+    if (halo_bridge_add_size(&headers_size,
                              request->headers[index].name_len) != 0
-        || halo_bridge_add_size(&allocation_size,
-                                 request->headers[index].value_len) != 0)
+        || halo_bridge_add_size(&headers_size,
+                                 request->headers[index].value_len) != 0
+        || halo_bridge_add_size(&headers_size,
+                                 HALO_BRIDGE_PACKED_HEADER_METADATA_SIZE) != 0)
       return NULL;
   }
+
+  allocation_size = sizeof(*event) + sizeof(*data);
+  if (halo_bridge_add_size(&allocation_size, transport_size) != 0
+      || halo_bridge_add_size(&allocation_size, method_len) != 0
+      || halo_bridge_add_size(&allocation_size, request->url_len) != 0
+      || halo_bridge_add_size(&allocation_size, headers_size) != 0
+      || halo_bridge_add_size(&allocation_size, payload_len) != 0)
+    return NULL;
 
   event = malloc(allocation_size);
   if (event == NULL)
@@ -183,10 +186,6 @@ static struct halo_bridge_event* halo_bridge_request_event(
   memset(data, 0, sizeof(*data));
   event->request = data;
   cursor = (char*) (data + 1);
-  if (request->header_count > 0)
-    data->headers = (struct halo_bridge_header*) cursor;
-  data->header_count = request->header_count;
-  cursor += request->header_count * sizeof(*data->headers);
   if (include_transport) {
     data->transport = (struct halo_bridge_transport*) cursor;
     halo_bridge_store_transport(data->transport, &transport_source);
@@ -196,19 +195,19 @@ static struct halo_bridge_event* halo_bridge_request_event(
   data->method_len = method_len;
   data->target = halo_bridge_store_bytes(&cursor, request->url, request->url_len);
   data->target_len = request->url_len;
+  data->packed_headers = headers_size == 0 ? NULL : cursor;
+  data->packed_headers_len = headers_size;
   for (index = 0; index < request->header_count; index++) {
     const struct halo_header* source;
-    struct halo_bridge_header* destination;
 
     source = &request->headers[index];
-    destination = &data->headers[index];
-    destination->name =
-      halo_bridge_store_bytes(&cursor, source->name, source->name_len);
-    destination->name_len = source->name_len;
-    destination->value =
-      halo_bridge_store_bytes(&cursor, source->value, source->value_len);
-    destination->value_len = source->value_len;
-    destination->is_hop_by_hop = source->is_hop_by_hop;
+    (void) halo_bridge_store_bytes(&cursor, source->name, source->name_len);
+    (void) halo_bridge_store_bytes(&cursor, source->value, source->value_len);
+    memcpy(cursor, &source->name_len, sizeof(source->name_len));
+    cursor += sizeof(source->name_len);
+    memcpy(cursor, &source->value_len, sizeof(source->value_len));
+    cursor += sizeof(source->value_len);
+    *cursor++ = source->is_hop_by_hop;
   }
   if (payload_len > 0)
     event->payload = cursor;
