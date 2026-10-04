@@ -654,6 +654,49 @@ let test_head_suppresses_response_body () =
         "head body omitted" false
         (contains "\r\n\r\nhello world\n" response))
 
+let test_head_uses_get_route_and_suppresses_body () =
+  with_server (fun () ->
+      let response =
+        request_response ~body_expected:false
+          "HEAD /html HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+      in
+      assert_response ~connection:"close" ~content_length:21
+        ~status:"HTTP/1.1 200 OK" ~body:"" response;
+      let method_mismatch =
+        request_response
+          "POST /html HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+      in
+      assert_response ~connection:"close" ~content_length:19
+        ~status:"HTTP/1.1 405 Method Not Allowed" ~body:"method not allowed\n"
+        method_mismatch;
+      Alcotest.(check bool)
+        "GET route also allows HEAD" true
+        (contains "Allow: GET, HEAD\r\n" method_mismatch))
+
+let test_head_stream_route_omits_body () =
+  with_server (fun () ->
+      let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      Fun.protect
+        ~finally:(fun () -> Unix.close fd)
+        (fun () ->
+          Unix.connect fd (Unix.ADDR_INET (host, port));
+          let request =
+            "HEAD /stream/hold HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Connection: close\r\n\
+             \r\n"
+          in
+          write_all fd request 0 (String.length request);
+          let response = read_until_eof ~timeout:2.0 fd (Buffer.create 256) in
+          assert_response ~connection:"close" ~status:"HTTP/1.1 200 OK" ~body:""
+            response;
+          Alcotest.(check bool)
+            "no chunked framing" false
+            (contains "Transfer-Encoding: chunked" response);
+          Alcotest.(check bool)
+            "unknown stream length omitted" false
+            (contains "Content-Length:" response)))
+
 let test_html_response () =
   with_server (fun () ->
       let response =
@@ -1908,6 +1951,10 @@ let () =
             test_accepts_body_request;
           timed_test_case "HEAD suppresses response body" `Quick
             test_head_suppresses_response_body;
+          timed_test_case "HEAD uses GET route and suppresses body" `Quick
+            test_head_uses_get_route_and_suppresses_body;
+          timed_test_case "HEAD stream route omits body" `Quick
+            test_head_stream_route_omits_body;
           timed_test_case "HTML response helper" `Quick test_html_response;
           timed_test_case "JSON response helper" `Quick test_json_response;
           timed_test_case "rejects invalid content-length" `Quick

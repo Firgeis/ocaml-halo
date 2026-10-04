@@ -959,14 +959,33 @@ let method_not_allowed_response allowed_methods =
   }
 
 let allowed_methods_for_path router input =
-  let matches_method method_ =
+  let route_matches method_ =
     match
       (router.run { input with request_method = Some method_ }).route_match
     with
     | Route_matched _ | Route_rejected _ -> true
     | Route_missing -> false
   in
-  all_http_methods |> List.filter matches_method
+  all_http_methods
+  |> List.filter (function
+    | HEAD -> route_matches HEAD || route_matches GET
+    | method_ -> route_matches method_)
+
+let retry_head_as_get router evaluation =
+  match evaluation with
+  | {
+   route_match = Route_missing;
+   effective_input = { request_method = Some HEAD; _ } as input;
+  }
+    when input.valid_target -> (
+      let get_evaluation =
+        router.run { input with request_method = Some GET }
+        |> attach_middleware_eval router.middleware
+      in
+      match get_evaluation.route_match with
+      | Route_missing -> evaluation
+      | Route_matched _ | Route_rejected _ -> get_evaluation)
+  | _ -> evaluation
 
 let apply_middleware middleware handler =
   List.fold_right (fun wrap next -> wrap next) middleware handler
@@ -974,7 +993,7 @@ let apply_middleware middleware handler =
 let dispatch_from_input ?(on_route = fun _template -> ()) router input =
   if not input.valid_target then bad_request_response ()
   else
-    let evaluation = run_router router input in
+    let evaluation = run_router router input |> retry_head_as_get router in
     let effective_input = evaluation.effective_input in
     if not effective_input.valid_target then bad_request_response ()
     else

@@ -117,9 +117,85 @@ let test_method_mismatch () =
   check_response "method mismatch"
     (fixed_response ~status:Status.method_not_allowed
        ~headers:
-         [ ("Allow", "GET"); ("Content-Type", "text/plain; charset=utf-8") ]
+         [
+           ("Allow", "GET, HEAD"); ("Content-Type", "text/plain; charset=utf-8");
+         ]
        "method not allowed\n")
     (Halo.Router.dispatch routes (request POST "/health"))
+
+let test_head_uses_get_route_with_original_method () =
+  let open Halo.Router in
+  let pre_calls = ref 0 in
+  let observe_pre request =
+    incr pre_calls;
+    Alcotest.(check string)
+      "pre middleware sees HEAD" "HEAD"
+      (Request.request_method_text request);
+    Continue
+  in
+  let add_seen_method next request =
+    next request
+    |> with_header "X-Seen-Method" (Request.request_method_text request)
+  in
+  let router =
+    route
+      Matcher.(
+        let+ () = request_method_is GET *> path_segment "head" *> path_end in
+        fun request ->
+          let method_ =
+            match Request.request_method request with
+            | Some method_ -> string_of_http_method method_
+            | None -> "unknown"
+          in
+          text Status.ok (Request.request_method_text request ^ "/" ^ method_))
+    |> use add_seen_method |> use_pre observe_pre
+  in
+  check_response "HEAD falls back to GET with original method"
+    (fixed_response ~status:Status.ok
+       ~headers:
+         [
+           ("X-Seen-Method", "HEAD");
+           ("Content-Type", "text/plain; charset=utf-8");
+         ]
+       "HEAD/HEAD")
+    (dispatch router (request HEAD "/head"));
+  Alcotest.(check int) "pre middleware runs once" 1 !pre_calls
+
+let test_explicit_head_route_takes_precedence () =
+  let open Halo.Router in
+  let get_route =
+    route
+      Matcher.(
+        let+ () = request_method_is GET *> path_segment "head" *> path_end in
+        fun _request -> text Status.ok "GET route")
+  in
+  let head_route =
+    route
+      Matcher.(
+        let+ () = request_method_is HEAD *> path_segment "head" *> path_end in
+        fun _request -> text Status.ok "HEAD route")
+  in
+  let router = get_route <|> head_route in
+  check_response "explicit HEAD wins over GET fallback"
+    (text Status.ok "HEAD route")
+    (dispatch router (request HEAD "/head"));
+  check_response "GET still uses GET route"
+    (text Status.ok "GET route")
+    (dispatch router (request GET "/head"))
+
+let test_head_only_allow_header () =
+  let router =
+    Halo.Router.route
+      Halo.Router.Matcher.(
+        let+ () = request_method_is HEAD *> path_segment "head" *> path_end in
+        fun _request -> text Status.ok "HEAD route")
+  in
+  check_response "HEAD-only route Allow header"
+    (fixed_response ~status:Status.method_not_allowed
+       ~headers:
+         [ ("Allow", "HEAD"); ("Content-Type", "text/plain; charset=utf-8") ]
+       "method not allowed\n")
+    (Halo.Router.dispatch router (request POST "/head"))
 
 let test_int_capture () =
   check_response "int capture" (text Status.ok "42")
@@ -530,7 +606,7 @@ let test_middleware_wraps_not_found_and_method_not_allowed () =
        ~headers:
          [
            ("X-Trace", "router");
-           ("Allow", "GET");
+           ("Allow", "GET, HEAD");
            ("Content-Type", "text/plain; charset=utf-8");
          ]
        "method not allowed\n")
@@ -715,6 +791,12 @@ let () =
           Alcotest.test_case "empty path segments are significant" `Quick
             test_empty_path_segments_are_significant;
           Alcotest.test_case "method mismatch" `Quick test_method_mismatch;
+          Alcotest.test_case "HEAD uses GET route with original method" `Quick
+            test_head_uses_get_route_with_original_method;
+          Alcotest.test_case "explicit HEAD route takes precedence" `Quick
+            test_explicit_head_route_takes_precedence;
+          Alcotest.test_case "HEAD-only Allow header" `Quick
+            test_head_only_allow_header;
           Alcotest.test_case "int capture" `Quick test_int_capture;
           Alcotest.test_case "applicative sequencing operators" `Quick
             test_applicative_sequencing_operators;

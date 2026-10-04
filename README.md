@@ -90,6 +90,11 @@ Use `*>` and `<*` to sequence matchers while keeping the value on the side
 indicated by the angle bracket. Reserve `let+` and `and+` bindings for values
 used by the handler.
 
+An explicit `HEAD` route takes precedence. Otherwise, a `HEAD` request can
+match a `GET` route. Handlers and middleware still see `HEAD`, and the HTTP
+transport omits the response body. `Allow` includes `HEAD` wherever `GET` is
+available.
+
 Use `Matcher.host "api.example.com"` in a route or scope to match a host
 case-insensitively, alongside method and path matchers. Request ports are
 ignored unless the expected host includes one. Use brackets for IPv6 literals,

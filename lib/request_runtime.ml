@@ -79,19 +79,30 @@ module Http = struct
       ~headers:(Router.Informational_response.headers response)
       ~body:""
 
-  let serialize_stream_head ~request_method ~http_major ~http_minor ~keep_alive
+  let stream_header_buffer ~http_major ~http_minor ~keep_alive
       (response : Router.response) =
     if http_major <> 1 || http_minor <> 1 then
       invalid_arg "streamed responses require HTTP/1.1";
     let status = Router.Response.status response in
-    if status_forbids_body status || String.equal request_method "HEAD" then
+    if status_forbids_body status then
       invalid_arg "streamed responses require a response body";
+    serialize_head ~capacity:256 ~status
+      ~headers:(Router.Response.headers response)
+      ~http_major ~http_minor ~keep_alive
+
+  let serialize_stream_head ~http_major ~http_minor ~keep_alive response =
     let buffer =
-      serialize_head ~capacity:256 ~status
-        ~headers:(Router.Response.headers response)
-        ~http_major ~http_minor ~keep_alive
+      stream_header_buffer ~http_major ~http_minor ~keep_alive response
     in
     Buffer.add_string buffer "Transfer-Encoding: chunked\r\n\r\n";
+    Buffer.contents buffer
+
+  let serialize_stream_head_only ~http_major ~http_minor ~keep_alive
+      (response : Router.response) =
+    let buffer =
+      stream_header_buffer ~http_major ~http_minor ~keep_alive response
+    in
+    Buffer.add_string buffer "\r\n";
     Buffer.contents buffer
 
   let serialize_chunk chunk =
@@ -379,37 +390,45 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
     if state.observability_enabled then
       state.telemetry_status_code <-
         Some (Router.Status.to_int (Router.Response.status response));
-    let head =
-      Http.serialize_stream_head ~request_method:event.method_text
-        ~http_major:event.http_major ~http_minor:event.http_minor
-        ~keep_alive:(keep_alive ()) response
-    in
-    Reactor.start_response_stream runtime event.request_id head;
-    sent := true;
-    await_write state;
-    match
-      try
-        producer ~yield:(fun chunk ->
-            Reactor.write_response_chunk runtime event.request_id
-              (Http.serialize_chunk chunk);
-            await_write state;
-            if state.observability_enabled then
-              state.response_body_size <-
-                Int64.add state.response_body_size
-                  (Int64.of_int (String.length chunk)));
-        None
+    if String.equal event.method_text "HEAD" then (
+      let wire =
+        Http.serialize_stream_head_only ~http_major:event.http_major
+          ~http_minor:event.http_minor ~keep_alive:(keep_alive ()) response
+      in
+      Reactor.send_response runtime event.request_id wire;
+      sent := true;
+      await_response_completion ())
+    else
+      let head =
+        Http.serialize_stream_head ~http_major:event.http_major
+          ~http_minor:event.http_minor ~keep_alive:(keep_alive ()) response
+      in
+      Reactor.start_response_stream runtime event.request_id head;
+      sent := true;
+      await_write state;
+      match
+        try
+          producer ~yield:(fun chunk ->
+              Reactor.write_response_chunk runtime event.request_id
+                (Http.serialize_chunk chunk);
+              await_write state;
+              if state.observability_enabled then
+                state.response_body_size <-
+                  Int64.add state.response_body_size
+                    (Int64.of_int (String.length chunk)));
+          None
+        with
+        | exn when is_disconnect_exception exn -> raise exn
+        | exn -> Some (exn, Printexc.get_raw_backtrace ())
       with
-      | exn when is_disconnect_exception exn -> raise exn
-      | exn -> Some (exn, Printexc.get_raw_backtrace ())
-    with
-    | None ->
-        Reactor.finish_response_stream runtime event.request_id;
-        await_response_completion ()
-    | Some (exn, backtrace) ->
-        state.response_abort <- Some (exn, backtrace);
-        on_error event.request_id exn backtrace;
-        Reactor.abort_response_stream runtime event.request_id;
-        await_response_abort ()
+      | None ->
+          Reactor.finish_response_stream runtime event.request_id;
+          await_response_completion ()
+      | Some (exn, backtrace) ->
+          state.response_abort <- Some (exn, backtrace);
+          on_error event.request_id exn backtrace;
+          Reactor.abort_response_stream runtime event.request_id;
+          await_response_abort ()
   in
   let send_response (response : Router.response) =
     match Router.Response.body response with
