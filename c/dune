@@ -43,6 +43,12 @@
  (action
   (run bash ../scripts/build_libuv_artifact.sh shared %{target})))
 
+(env
+ (dev
+  (c_flags (:standard -O0)))
+ (release
+  (c_flags (:standard -O2))))
+
 (foreign_library
  (archive_name halo_stubs)
  (language c)
@@ -73,7 +79,8 @@
   ../vendor/llhttp/include
   ../vendor/llhttp/src)
  (flags
-  (-D_GNU_SOURCE
+  (:standard
+   -D_GNU_SOURCE
    -D_POSIX_C_SOURCE=200809L
    -D_FILE_OFFSET_BITS=64
    -D_LARGEFILE_SOURCE
