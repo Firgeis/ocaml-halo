@@ -4,10 +4,10 @@ exception Runtime_error of string
 let trace_enabled = Sys.getenv_opt "HALO_BRIDGE_TRACE" = Some "1"
 
 let trace fmt =
-  Printf.ksprintf
-    (fun message ->
-      if trace_enabled then prerr_endline ("halo bridge: " ^ message))
-    fmt
+  if trace_enabled then
+    Printf.ksprintf (fun message -> prerr_endline ("halo bridge: " ^ message))
+      fmt
+  else Printf.ikfprintf (fun () -> ()) () fmt
 
 type request_event = {
   request_id : int64;

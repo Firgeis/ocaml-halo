@@ -121,7 +121,7 @@ let run_bridge runtime listeners shutdown shutdown_timeout_ms on_error on_ready
     if not !reactor_joined then (
       Domain.join reactor;
       reactor_joined := true;
-      Reactor.trace "reactor domain stopped")
+      if Reactor.trace_enabled then Reactor.trace "reactor domain stopped")
   in
   Eio.Switch.run ~name:"halo-reactor-bridge" @@ fun bridge_switch ->
   let dispatcher =

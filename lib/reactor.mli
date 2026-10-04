@@ -103,4 +103,5 @@ val resolve_replay_claim : Server_backend.t -> int64 -> accept:bool -> unit
 val metrics_of_payload : string -> Server_backend.runtime_metrics
 val run : Server_backend.t -> (unit, string) result
 val listener_id : Server_backend.server -> int64
+val trace_enabled : bool
 val trace : ('a, unit, string, unit) format4 -> 'a

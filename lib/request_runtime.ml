@@ -270,7 +270,8 @@ let resolve_completion state result =
   ignore (Eio.Promise.try_resolve state.complete result)
 
 let handle_terminal_event requests request_id handle =
-  Reactor.trace "terminal event request=%Ld" request_id;
+  if Reactor.trace_enabled then
+    Reactor.trace "terminal event request=%Ld" request_id;
   Option.iter handle (Hashtbl.find_opt requests request_id)
 
 let await_write state =
@@ -334,7 +335,8 @@ let handle_request listener (event : Reactor.request_event) state body
 
 let run_handler runtime requests listener (event : Reactor.request_event) state
     ~connection_info ~is_draining on_error =
-  Reactor.trace "handler start request=%Ld" event.request_id;
+  if Reactor.trace_enabled then
+    Reactor.trace "handler start request=%Ld" event.request_id;
   let completed = ref false in
   let sent = ref false in
   let body = make_body runtime state ~body_expected:event.body_expected in
@@ -370,10 +372,11 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
                && not (String.equal event.method_text "HEAD") ->
             Int64.of_int (String.length body)
         | _ -> 0L);
-    Reactor.trace "fixed response request=%Ld status=%d bytes=%d"
-      event.request_id
-      (Router.Status.to_int (Router.Response.status response))
-      (String.length wire);
+    if Reactor.trace_enabled then
+      Reactor.trace "fixed response request=%Ld status=%d bytes=%d"
+        event.request_id
+        (Router.Status.to_int (Router.Response.status response))
+        (String.length wire);
     Reactor.send_response runtime event.request_id wire;
     sent := true;
     await_response_completion ()
@@ -441,8 +444,9 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
     ~finally:(fun () ->
       state.request_cancel <- None;
       Hashtbl.remove requests event.request_id;
-      Reactor.trace "handler finish request=%Ld completed=%b" event.request_id
-        !completed;
+      if Reactor.trace_enabled then
+        Reactor.trace "handler finish request=%Ld completed=%b"
+          event.request_id !completed;
       if not !completed then
         Eio.Cancel.protect (fun () ->
             try Reactor.close_request runtime event.request_id
@@ -451,8 +455,9 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
        ~send_informational ~send_response ~send_fixed ~completed ~sent ~on_error)
 
 let start_request t (event : Reactor.request_event) =
-  Reactor.trace "request event request=%Ld listener=%Ld" event.request_id
-    event.listener_id;
+  if Reactor.trace_enabled then
+    Reactor.trace "request event request=%Ld listener=%Ld" event.request_id
+      event.listener_id;
   (* Bridge events are FIFO: the first request seeds the cache, later requests
      reuse it, and the physical-close event eventually evicts it. *)
   let connection_info =
@@ -573,8 +578,9 @@ let replay_claim store (event : Reactor.replay_claim_event) =
   with
   | Eio.Cancel.Cancelled _ as exn -> raise exn
   | exn ->
-      Reactor.trace "replay store failed claim=%Ld: %s" event.claim_id
-        (Printexc.to_string exn);
+      if Reactor.trace_enabled then
+        Reactor.trace "replay store failed claim=%Ld: %s" event.claim_id
+          (Printexc.to_string exn);
       Store.Unavailable
 
 let start_replay_claim t (event : Reactor.replay_claim_event) =
@@ -591,8 +597,9 @@ let observe_pre_dispatch_response t
     (event : Reactor.pre_dispatch_response_event) =
   match event.connection_info with
   | None ->
-      Reactor.trace "pre-dispatch response metadata missing request=%Ld"
-        event.request_id
+      if Reactor.trace_enabled then
+        Reactor.trace "pre-dispatch response metadata missing request=%Ld"
+          event.request_id
   | Some connection_info ->
       Eio.Fiber.fork ~sw:t.bridge_switch (fun () ->
           let scheme =
@@ -691,7 +698,8 @@ let dispatch_event t = function
             state.request_cancel;
           terminate_response state t.on_error response_outcome)
   | Reactor.Metrics { query_id; payload } ->
-      Reactor.trace "metrics event query=%Ld payload=%s" query_id payload;
+      if Reactor.trace_enabled then
+        Reactor.trace "metrics event query=%Ld payload=%s" query_id payload;
       Option.iter
         (fun resolve ->
           Hashtbl.remove t.metrics_waiters query_id;
@@ -766,7 +774,7 @@ let run t =
     stopped := drain_events t !stopped;
     Eio.Fiber.yield ()
   done;
-  Reactor.trace "event loop stopped"
+  if Reactor.trace_enabled then Reactor.trace "event loop stopped"
 
 let await_idle t =
   while Hashtbl.length t.requests > 0 do
@@ -786,7 +794,8 @@ let metrics t =
   Fun.protect
     ~finally:(fun () -> Hashtbl.remove t.metrics_waiters query_id)
     (fun () ->
-      Reactor.trace "request metrics query=%Ld" query_id;
+      if Reactor.trace_enabled then
+        Reactor.trace "request metrics query=%Ld" query_id;
       Reactor.request_metrics t.runtime query_id;
       match Eio.Promise.await promise with
       | Ok metrics -> metrics
