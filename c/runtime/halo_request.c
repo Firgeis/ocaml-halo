@@ -77,6 +77,8 @@ int halo_request_store_header(struct halo_request* request,
     value == NULL ? (char*) "" : (char*) value;
   request->headers[request->header_count].value_len = value_len;
   request->headers[request->header_count].is_hop_by_hop = 0;
+  request->headers[request->header_count].name_borrowed = 0;
+  request->headers[request->header_count].value_borrowed = 0;
   if (stored_header != NULL)
     *stored_header = &request->headers[request->header_count];
   request->header_count++;

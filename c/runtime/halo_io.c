@@ -1289,9 +1289,13 @@ static int halo_write_internal_server_error_response(uv_stream_t* stream,
 
 static int halo_try_dispatch_request(uv_stream_t* stream,
                                      struct halo_client* client) {
+  int result;
+
   if (halo_tls_enabled(client)
       && client->request_is_early_data
       && !client->tls_handshake_complete) {
+    if (halo_request_materialize_header_spans(&client->request) != 0)
+      return -1;
     if (!uv_is_active((uv_handle_t*) stream)
         && uv_read_start(stream, halo_alloc_cb, halo_read_cb) != 0) {
       return -1;
@@ -1300,7 +1304,12 @@ static int halo_try_dispatch_request(uv_stream_t* stream,
     return 0;
   }
   halo_runtime_note_request_started(client);
-  return halo_bridge_dispatch_request(client);
+  result = halo_bridge_dispatch_request(client);
+  /* A rejected request may be observed after this input buffer is gone. */
+  if ((result != 0 || client->direct_response_status != 0)
+      && halo_request_materialize_header_spans(&client->request) != 0)
+    return -1;
+  return result;
 }
 
 static int halo_handle_write_kind_complete(uv_stream_t* stream,
@@ -1630,6 +1639,10 @@ static int halo_feed_plaintext(uv_stream_t* stream,
   }
 
   err = llhttp_execute(&client->parser, plaintext, plaintext_len);
+  if (!client->dispatch_started
+      && (err != HPE_PAUSED || client->pending_continue)
+      && halo_request_materialize_header_spans(&client->request) != 0)
+    return -1;
   if (err == HPE_PAUSED
       && (client->pending_continue
           || client->dispatch_after_headers

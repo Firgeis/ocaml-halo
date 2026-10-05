@@ -480,6 +480,103 @@ static int halo_request_storage_append(struct halo_request* request,
   return 0;
 }
 
+/* Borrow contiguous llhttp spans while the current input buffer is alive. */
+static int halo_request_header_span_append(struct halo_request* request,
+                                           char** buf,
+                                           size_t* len,
+                                           size_t* cap,
+                                           size_t limit,
+                                           const char* data,
+                                           size_t data_len) {
+  char* copy;
+  size_t next_len;
+
+  if (data_len == 0)
+    return 0;
+  if (*len > limit || data_len > limit - *len)
+    return -1;
+  if (*buf == NULL) {
+    *buf = (char*) data;
+    *len = data_len;
+    *cap = 0;
+    return 0;
+  }
+  if (*cap == 0 && data == *buf + *len) {
+    *len += data_len;
+    return 0;
+  }
+  if (*cap != 0)
+    return halo_request_storage_append(request, buf, len, cap, limit,
+                                       data, data_len);
+
+  next_len = *len + data_len;
+  copy = halo_request_storage_alloc(&request->storage, next_len + 1,
+                                    _Alignof(char));
+  if (copy == NULL)
+    return -1;
+  memcpy(copy, *buf, *len);
+  memcpy(copy + *len, data, data_len);
+  copy[next_len] = '\0';
+  *buf = copy;
+  *len = next_len;
+  *cap = next_len + 1;
+  return 0;
+}
+
+static int halo_materialize_header_span(struct halo_request* request,
+                                        char** data,
+                                        size_t length) {
+  char* copy;
+
+  copy = halo_request_storage_strndup(&request->storage, *data, length);
+  if (copy == NULL)
+    return -1;
+  *data = copy;
+  return 0;
+}
+
+/* Save spans whenever the request can outlive the current input buffer. */
+int halo_request_materialize_header_spans(struct halo_request* request) {
+  size_t index;
+
+  for (index = 0; index < request->header_count; index++) {
+    struct halo_header* header;
+    char* old_value;
+
+    header = &request->headers[index];
+    if (header->name_borrowed) {
+      if (halo_materialize_header_span(request, &header->name,
+                                       header->name_len) != 0)
+        return -1;
+      header->name_borrowed = 0;
+    }
+    if (header->value_borrowed) {
+      old_value = header->value;
+      if (halo_materialize_header_span(request, &header->value,
+                                       header->value_len) != 0)
+        return -1;
+      if (request->known_headers.host_value == old_value)
+        request->known_headers.host_value = header->value;
+      header->value_borrowed = 0;
+    }
+  }
+  if (request->current_header_name != NULL
+      && request->current_header_name_cap == 0) {
+    if (halo_materialize_header_span(request, &request->current_header_name,
+                                     request->current_header_name_len) != 0)
+      return -1;
+    request->current_header_name_cap = request->current_header_name_len + 1;
+  }
+  if (request->current_header_value != NULL
+      && request->current_header_value_cap == 0) {
+    if (halo_materialize_header_span(request, &request->current_header_value,
+                                     request->current_header_value_len) != 0)
+      return -1;
+    request->current_header_value_cap = request->current_header_value_len + 1;
+  }
+  return 0;
+}
+
 static int halo_request_charge_bytes(size_t* total,
                                      size_t limit,
                                      size_t amount) {
@@ -571,6 +668,13 @@ int halo_request_has_data(const struct halo_request* request) {
     || request->current_header_value_len != 0;
 }
 
+static int halo_current_header_name_matches(const struct halo_request* request,
+                                            const char* name,
+                                            size_t name_len) {
+  return request->current_header_name_len == name_len
+    && strncasecmp(request->current_header_name, name, name_len) == 0;
+}
+
 static int halo_request_finalize_header(struct halo_request* request) {
   struct halo_header* header;
   char* endptr;
@@ -587,7 +691,17 @@ static int halo_request_finalize_header(struct halo_request* request) {
   value = request->current_header_value == NULL ? "" : request->current_header_value;
   value_len = request->current_header_value_len;
 
-  if (strcasecmp(name, "content-length") == 0) {
+  if (halo_current_header_name_matches(request, "content-length", 14)) {
+    /* strtoull needs a terminator; ordinary header values remain borrowed. */
+    if (request->current_header_value_cap == 0
+        && request->current_header_value != NULL) {
+      if (halo_materialize_header_span(request,
+                                       &request->current_header_value,
+                                       value_len) != 0)
+        return -1;
+      request->current_header_value_cap = value_len + 1;
+      value = request->current_header_value;
+    }
     content_length = strtoull(value, &endptr, 10);
     if (*value == '\0' || *endptr != '\0') {
       return -1;
@@ -603,14 +717,17 @@ static int halo_request_finalize_header(struct halo_request* request) {
                                 value_len,
                                 &header) != 0)
     return -1;
+  header->name_borrowed = request->current_header_name_cap == 0;
+  header->value_borrowed = value_len != 0
+    && request->current_header_value_cap == 0;
 
-  if (strcasecmp(name, "host") == 0) {
+  if (halo_current_header_name_matches(request, "host", 4)) {
     request->known_headers.host_count++;
     request->known_headers.host_value = header->value;
     request->known_headers.host_value_len = header->value_len;
   }
 
-  if (strcasecmp(name, "expect") == 0) {
+  if (halo_current_header_name_matches(request, "expect", 6)) {
     request->known_headers.expect_count++;
     expectation = halo_parse_expectation_header(header->value, header->value_len);
     if (expectation == HALO_EXPECTATION_UNSUPPORTED)
@@ -690,13 +807,13 @@ static int halo_on_header_field(llhttp_t* parser, const char* at, size_t length)
     return halo_parser_request_header_fields_too_large(
       parser, "request headers are too large");
 
-  if (halo_request_storage_append(&client->request,
-                                  &client->request.current_header_name,
-                                  &client->request.current_header_name_len,
-                                  &client->request.current_header_name_cap,
-                                  max_header_size,
-                                  at,
-                                  length) != 0)
+  if (halo_request_header_span_append(&client->request,
+                                      &client->request.current_header_name,
+                                      &client->request.current_header_name_len,
+                                      &client->request.current_header_name_cap,
+                                      max_header_size,
+                                      at,
+                                      length) != 0)
     return halo_parser_request_header_fields_too_large(parser,
                                                        "header field is too large");
   return 0;
@@ -719,13 +836,13 @@ static int halo_on_header_value(llhttp_t* parser, const char* at, size_t length)
     return halo_parser_request_header_fields_too_large(
       parser, "request headers are too large");
 
-  if (halo_request_storage_append(&client->request,
-                                  &client->request.current_header_value,
-                                  &client->request.current_header_value_len,
-                                  &client->request.current_header_value_cap,
-                                  max_header_size,
-                                  at,
-                                  length) != 0)
+  if (halo_request_header_span_append(&client->request,
+                                      &client->request.current_header_value,
+                                      &client->request.current_header_value_len,
+                                      &client->request.current_header_value_cap,
+                                      max_header_size,
+                                      at,
+                                      length) != 0)
     return halo_parser_request_header_fields_too_large(parser,
                                                        "header value is too large");
   return 0;

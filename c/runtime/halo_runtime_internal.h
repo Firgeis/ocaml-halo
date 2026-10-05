@@ -99,6 +99,8 @@ struct halo_header {
   char* value;
   size_t value_len;
   unsigned char is_hop_by_hop;
+  unsigned char name_borrowed;
+  unsigned char value_borrowed;
 };
 
 struct halo_connection_option {
@@ -150,6 +152,7 @@ struct halo_request {
   size_t url_len;
   size_t url_cap;
   struct halo_request_storage storage;
+  /* A non-NULL header pointer with cap == 0 borrows llhttp's input buffer. */
   char* current_header_name;
   size_t current_header_name_len;
   size_t current_header_name_cap;
@@ -313,6 +316,7 @@ int halo_iterate_comma_separated_header_tokens(const char* value,
                                                void* context,
                                                int* saw_token);
 int halo_request_has_data(const struct halo_request* request);
+int halo_request_materialize_header_spans(struct halo_request* request);
 void halo_request_storage_init(struct halo_request_storage* storage,
                                size_t initial_block_size);
 void* halo_request_storage_alloc(struct halo_request_storage* storage,

@@ -1208,6 +1208,29 @@ let test_header_storage_keep_alive_reuses_capacity_and_resets_values () =
           assert_response ~content_length:12 ~status:"HTTP/1.1 200 OK"
             ~body:"hello world\n" response3))
 
+let test_header_names_and_values_across_reads () =
+  with_server (fun () ->
+      let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      Fun.protect
+        ~finally:(fun () -> Unix.close fd)
+        (fun () ->
+          Unix.connect fd (Unix.ADDR_INET (host, port));
+          let pieces =
+            [ "GET /inspect/header/x-empty HTTP/1.1\r\nHo";
+              "st: local";
+              "host\r\nX-Emp";
+              "ty: abc";
+              "def\r\nConnection: close\r\n\r\n" ]
+          in
+          List.iter
+            (fun piece ->
+              write_all fd piece 0 (String.length piece);
+              Unix.sleepf 0.02)
+            pieces;
+          let response = read_response fd in
+          assert_response ~content_length:12 ~status:"HTTP/1.1 200 OK"
+            ~body:"value:abcdef" response))
+
 let test_http11_keep_alive_after_bodyless_response () =
   with_server (fun () ->
       let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
@@ -2018,6 +2041,8 @@ let () =
           timed_test_case
             "header storage reuses keep-alive capacity and resets values" `Quick
             test_header_storage_keep_alive_reuses_capacity_and_resets_values;
+          timed_test_case "header names and values span reads" `Quick
+            test_header_names_and_values_across_reads;
           timed_test_case
             "HTTP/1.1 keep-alive reuses connection after fixed-length body"
             `Quick
