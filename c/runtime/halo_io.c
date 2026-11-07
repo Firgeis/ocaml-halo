@@ -786,81 +786,58 @@ static int halo_load_file(const char* path, char** contents, size_t* length) {
   return 0;
 }
 
-static void halo_tls_input_compact(struct halo_client* client) {
-  if (client == NULL || client->tls_input_data == NULL)
-    return;
-
-  if (client->tls_input_offset == 0)
-    return;
-
-  if (client->tls_input_offset >= client->tls_input_len) {
-    free(client->tls_input_data);
-    client->tls_input_data = NULL;
-    client->tls_input_len = 0;
-    client->tls_input_offset = 0;
-    return;
-  }
-
-  memmove(client->tls_input_data,
-          client->tls_input_data + client->tls_input_offset,
-          client->tls_input_len - client->tls_input_offset);
-  client->tls_input_len -= client->tls_input_offset;
-  client->tls_input_offset = 0;
-}
-
-static int halo_tls_input_append(struct halo_client* client,
-                                 const char* data,
-                                 size_t len) {
-  char* next;
-
-  if (len == 0)
-    return 0;
-
-  halo_tls_input_compact(client);
-  next = realloc(client->tls_input_data, client->tls_input_len + len);
-  if (next == NULL)
-    return -1;
-
-  client->tls_input_data = next;
-  memcpy(client->tls_input_data + client->tls_input_len, data, len);
-  client->tls_input_len += len;
-  return 0;
-}
+/* Bound idle storage per connection, while allowing larger live TLS flights. */
+#define HALO_TLS_RETAIN_CAPACITY (64 * 1024)
 
 static int halo_tls_prepare_operation(struct halo_client* client) {
   if (client == NULL)
     return -1;
-  client->tls_capture_len = 0;
+  assert(client->tls_capture == NULL || client->tls_capture->buf.len == 0);
   return 0;
 }
 
 static int halo_tls_capture_append(struct halo_client* client,
                                    const char* data,
                                    size_t len) {
-  char* next;
-  size_t cap;
+  struct halo_tls_write_chunk* chunk;
+  size_t required;
 
   if (len == 0)
     return 0;
-
-  if (client->tls_capture_len + len <= client->tls_capture_cap) {
-    memcpy(client->tls_capture_data + client->tls_capture_len, data, len);
-    client->tls_capture_len += len;
-    return 0;
+  chunk = client->tls_capture;
+  if (chunk == NULL) {
+    chunk = client->tls_write_spare;
+    if (chunk != NULL)
+      client->tls_write_spare = NULL;
+    else {
+      chunk = calloc(1, sizeof(*chunk));
+      if (chunk == NULL)
+        return -1;
+    }
+    client->tls_capture = chunk;
   }
-
-  cap = client->tls_capture_cap == 0 ? 4096 : client->tls_capture_cap;
-  while (cap < client->tls_capture_len + len)
-    cap *= 2;
-
-  next = realloc(client->tls_capture_data, cap);
-  if (next == NULL)
+  if (len > SIZE_MAX - chunk->buf.len)
     return -1;
+  required = chunk->buf.len + len;
+  if (required > chunk->capacity) {
+    size_t capacity = chunk->capacity == 0 ? 4096 : chunk->capacity;
+    char* next;
 
-  client->tls_capture_data = next;
-  client->tls_capture_cap = cap;
-  memcpy(client->tls_capture_data + client->tls_capture_len, data, len);
-  client->tls_capture_len += len;
+    while (capacity < required) {
+      if (capacity > SIZE_MAX / 2) {
+        capacity = required;
+        break;
+      }
+      capacity *= 2;
+    }
+    next = realloc(chunk->buf.base, capacity);
+    if (next == NULL)
+      return -1;
+    chunk->buf.base = next;
+    chunk->capacity = capacity;
+  }
+  memcpy(chunk->buf.base + chunk->buf.len, data, len);
+  chunk->buf.len += len;
   return 0;
 }
 
@@ -877,21 +854,13 @@ static int halo_tls_finish_operation(struct halo_client* client, enum halo_write
   if (client == NULL)
     return -1;
 
-  if (client->tls_capture_len == 0)
+  chunk = client->tls_capture;
+  if (chunk == NULL || chunk->buf.len == 0)
     return 0;
 
-  chunk = malloc(sizeof(*chunk));
-  if (chunk == NULL)
-    return -1;
-
-  chunk->buf.base = malloc(client->tls_capture_len);
-  if (chunk->buf.base == NULL) {
-    free(chunk);
-    return -1;
-  }
-
-  memcpy(chunk->buf.base, client->tls_capture_data, client->tls_capture_len);
-  chunk->buf.len = client->tls_capture_len;
+  /* Transfer ownership to the write queue; storage remains stable until the
+   * libuv completion callback returns it to the bounded spare slot. */
+  client->tls_capture = NULL;
   chunk->kind = kind;
   chunk->next = NULL;
   if (client->tls_write_tail == NULL) {
@@ -901,7 +870,6 @@ static int halo_tls_finish_operation(struct halo_client* client, enum halo_write
     client->tls_write_tail->next = chunk;
     client->tls_write_tail = chunk;
   }
-  client->tls_capture_len = 0;
   return 0;
 }
 
@@ -924,7 +892,6 @@ static int halo_tls_send_cb(void* ctx, const uint8_t* buf, uint32_t len) {
 
 static int halo_tls_recv_cb(void* ctx, uint8_t* buf, uint32_t len) {
   struct halo_client* client;
-  size_t available;
   size_t amount;
 
   client = ctx;
@@ -933,17 +900,11 @@ static int halo_tls_recv_cb(void* ctx, uint8_t* buf, uint32_t len) {
     return -1;
   }
 
-  available = client->tls_input_len - client->tls_input_offset;
-  if (available == 0) {
+  amount = halo_linear_buffer_read(&client->tls_input, buf, (size_t) len);
+  if (amount == 0) {
     errno = EAGAIN;
     return -1;
   }
-
-  amount = available < (size_t) len ? available : (size_t) len;
-  memcpy(buf, client->tls_input_data + client->tls_input_offset, amount);
-  client->tls_input_offset += amount;
-  if (client->tls_input_offset >= client->tls_input_len)
-    halo_tls_input_compact(client);
   return (int) amount;
 }
 
@@ -991,8 +952,9 @@ static void halo_free_handle(uv_handle_t* handle) {
           s2n_connection_free(client->tls_conn);
           client->tls_conn = NULL;
         }
-        free(client->tls_input_data);
-        free(client->tls_capture_data);
+        halo_linear_buffer_destroy(&client->tls_input);
+        halo_tls_write_chunk_destroy(client->tls_capture);
+        halo_tls_write_chunk_destroy(client->tls_write_spare);
         free(client->bridge_body_event);
         chunk = client->tls_write_head;
         while (chunk != NULL) {
@@ -1491,7 +1453,15 @@ static void halo_tls_after_write(uv_write_t* req, int status) {
       client->tls_write_tail = NULL;
   }
 
-  halo_tls_write_chunk_destroy(chunk);
+  if (client != NULL && status == 0
+      && chunk->capacity <= HALO_TLS_RETAIN_CAPACITY
+      && client->tls_write_spare == NULL) {
+    chunk->buf.len = 0;
+    chunk->next = NULL;
+    client->tls_write_spare = chunk;
+  } else {
+    halo_tls_write_chunk_destroy(chunk);
+  }
 
   if (client == NULL)
     return;
@@ -2353,7 +2323,7 @@ static void halo_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf
       return;
     }
 
-    if (halo_tls_input_append(client, buf->base, (size_t) nread) != 0) {
+    if (halo_linear_buffer_append(&client->tls_input, buf->base, (size_t) nread) != 0) {
       free(buf->base);
       halo_close_client(client);
       return;
@@ -2428,6 +2398,7 @@ static void halo_connection_cb(uv_stream_t* server, int status) {
     return;
 
   memset(client, 0, sizeof(*client));
+  halo_linear_buffer_init(&client->tls_input, HALO_TLS_RETAIN_CAPACITY);
   client->kind = HALO_HANDLE_CLIENT;
   client->listener_ref = listener->ref;
   halo_request_storage_init(&client->request.storage, 1024);

@@ -581,6 +581,58 @@ let test_tls_large_request_body () =
         ~content_length:(String.length response_body)
         ~status:"HTTP/1.1 200 OK" ~body:response_body response)
 
+let test_tls_buffer_reuse protocol =
+  with_server ~env:(tls_server_env ()) (fun () ->
+      let command =
+        Printf.sprintf
+          "openssl s_client -connect 127.0.0.1:%d -servername localhost \
+           -quiet -%s -CAfile %s"
+          port protocol
+          (Filename.quote (tls_cert_fixture_path ()))
+      in
+      let input, output, errors =
+        Unix.open_process_full command (Unix.environment ())
+      in
+      Fun.protect
+        ~finally:(fun () ->
+          close_out_noerr output;
+          ignore (Unix.close_process_full (input, output, errors)))
+        (fun () ->
+          let fd = Unix.descr_of_in_channel input in
+          List.iteri
+            (fun index size ->
+              let body =
+                String.init size (fun i -> Char.chr (33 + ((i + index) mod 90)))
+              in
+              Printf.fprintf output
+                "POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: \
+                 %d\r\n\r\n"
+                size;
+              (* Flush uneven pieces to exercise partial TLS input records. *)
+              let rec send offset =
+                if offset < size then (
+                  let length = min (size - offset) 4093 in
+                  output_substring output body offset length;
+                  flush output;
+                  send (offset + length))
+              in
+              send 0;
+              let response = read_response fd in
+              let expected = "submitted:" ^ body in
+              assert_response ~content_length:(String.length expected)
+                ~status:"HTTP/1.1 200 OK" ~body:expected response)
+            [ 1; 8191; 128 * 1024; 3; 65537; 17; 1024 ];
+          output_string output
+            "GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+          flush output;
+          let response = read_until_eof ~timeout:2.0 fd (Buffer.create 256) in
+          match split_headers_body response with
+          | None -> fail "missing streamed TLS headers"
+          | Some (_, body) ->
+              Alcotest.(check string)
+                "stream blocks survive reuse"
+                "6\r\nhello \r\n6\r\nworld\n\r\n0\r\n\r\n" body))
+
 let test_tls_rejects_plaintext_http () =
   with_server
     ~env:(tls_server_env () @ short_timeout_env)
@@ -1964,6 +2016,10 @@ let () =
           timed_test_case "TLS HTTPS response" `Quick test_tls_https_response;
           timed_test_case "TLS streams a large request body" `Quick
             test_tls_large_request_body;
+          timed_test_case "TLS 1.2 reuses buffers across uploads and streaming"
+            `Quick (fun () -> test_tls_buffer_reuse "tls1_2");
+          timed_test_case "TLS 1.3 reuses buffers across uploads and streaming"
+            `Quick (fun () -> test_tls_buffer_reuse "tls1_3");
           timed_test_case "TLS rejects plaintext HTTP" `Quick
             test_tls_rejects_plaintext_http;
           timed_test_case "TLS rejects malformed ticket key file on startup"

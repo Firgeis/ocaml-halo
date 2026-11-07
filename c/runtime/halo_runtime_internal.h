@@ -16,6 +16,7 @@
 #include <strings.h>
 #include <string.h>
 #include <time.h>
+#include "../lib/halo_linear_buffer.h"
 
 #include "../../vendor/llhttp/include/llhttp.h"
 #include "../../vendor/libuv/include/uv.h"
@@ -212,12 +213,9 @@ struct halo_client {
   int bridge_response_in_flight;
   char* paused_data;
   size_t paused_data_len;
-  char* tls_input_data;
-  size_t tls_input_len;
-  size_t tls_input_offset;
-  char* tls_capture_data;
-  size_t tls_capture_len;
-  size_t tls_capture_cap;
+  struct halo_linear_buffer tls_input;
+  struct halo_tls_write_chunk* tls_capture;
+  struct halo_tls_write_chunk* tls_write_spare;
   struct halo_tls_write_chunk* tls_write_head;
   struct halo_tls_write_chunk* tls_write_tail;
   int tls_write_in_flight;
@@ -252,6 +250,7 @@ struct halo_write_req {
 struct halo_tls_write_chunk {
   uv_write_t req;
   uv_buf_t buf;
+  size_t capacity;
   enum halo_write_kind kind;
   struct halo_tls_write_chunk* next;
 };

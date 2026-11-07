@@ -62,6 +62,7 @@
   halo_parser
   halo_request
   halo_request_storage
+  halo_linear_buffer
   halo_runtime
   halo_telemetry
   halo_tls_replay_cache

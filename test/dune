@@ -1,3 +1,25 @@
+(rule
+ (targets linear_buffer_unit.exe)
+ (deps linear_buffer_unit.c ../c/lib/halo_linear_buffer.c ../c/lib/halo_linear_buffer.h)
+ (action
+  (run %{cc} -std=c11 -Wall -Wextra -Werror -o %{targets}
+   %{dep:linear_buffer_unit.c} %{dep:../c/lib/halo_linear_buffer.c})))
+
+(rule
+ (alias runtest)
+ (action (run ./linear_buffer_unit.exe)))
+
+(rule
+ (targets linear_buffer_fault_unit.exe)
+ (deps linear_buffer_fault_unit.c ../c/lib/halo_linear_buffer.c ../c/lib/halo_linear_buffer.h)
+ (action
+  (run %{cc} -std=c11 -Wall -Wextra -Werror -o %{targets}
+   %{dep:linear_buffer_fault_unit.c})))
+
+(rule
+ (alias runtest)
+ (action (run ./linear_buffer_fault_unit.exe)))
+
 (test
  (name integration_http)
  (modules integration_http)
