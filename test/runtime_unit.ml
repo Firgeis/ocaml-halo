@@ -429,6 +429,84 @@ let test_stream_response_reports_completed () =
   | Observed_completed -> ()
   | _ -> fail "expected completed stream outcome"
 
+let test_buffered_sse_flush_is_prompt () =
+  let release, notify_release = Eio.Promise.create () in
+  let router =
+    Halo.Router.(
+      route
+        Matcher.(
+          let+ () = path_end in
+          fun _ ->
+            Halo.Sse.respond_buffered (fun ~send ~flush ->
+                send (Halo.Sse.event [ "first" ]);
+                flush ();
+                Eio.Promise.await release;
+                send (Halo.Sse.event [ "second" ]))))
+  in
+  ignore
+    (with_live_server ~router (fun () ->
+         let socket = connect_plaintext () in
+         Fun.protect
+           ~finally:(fun () ->
+             Unix.close socket;
+             ignore (Eio.Promise.try_resolve notify_release ()))
+           (fun () ->
+             Unix.setsockopt_float socket Unix.SO_RCVTIMEO 2.0;
+             write_socket_all socket
+               "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+             let first = read_socket_until socket "data: first\n\n" in
+             Alcotest.(check bool)
+               "first event arrives before producer resumes" true
+               (contains "data: first\n\n" first);
+             Eio.Promise.resolve notify_release ();
+             let rest = read_socket_until socket "0\r\n\r\n" in
+             Alcotest.(check bool)
+               "return flushes final event" true
+               (contains "data: second\n\n" rest))))
+
+let test_buffered_stream_slow_reader_disconnect () =
+  let progress = Atomic.make 0 in
+  let total = 4096 in
+  let router =
+    Halo.Router.(
+      route
+        Matcher.(
+          let+ () = path_end in
+          fun _ ->
+            Halo.Stream.respond_buffered ~status:Status.ok
+              (fun ~yield ~flush:_ ->
+                let chunk = String.make 65536 'x' in
+                for _ = 1 to total do
+                  yield chunk;
+                  ignore (Atomic.fetch_and_add progress 1)
+                done)))
+  in
+  let outcome =
+    run_response_outcome_test router (fun () ->
+        let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+        Fun.protect
+          ~finally:(fun () -> Unix.close socket)
+          (fun () ->
+            Unix.setsockopt_int socket Unix.SO_RCVBUF 1024;
+            Unix.connect socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 8443));
+            write_socket_all socket
+              "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+            let deadline = Unix.gettimeofday () +. 2.0 in
+            while Atomic.get progress = 0 && Unix.gettimeofday () < deadline do
+              Unix.sleepf 0.001
+            done;
+            Alcotest.(check bool)
+              "producer started" true
+              (Atomic.get progress > 0);
+            Unix.sleepf 0.1;
+            Alcotest.(check bool)
+              "slow reader stops producer" true
+              (Atomic.get progress < total)))
+  in
+  match outcome with
+  | Observed_client_disconnected -> ()
+  | _ -> fail "expected buffered producer to cancel on disconnect"
+
 let test_failed_stream_reports_aborted () =
   let router =
     Halo.Router.(
@@ -2012,6 +2090,10 @@ let () =
             test_fixed_response_reports_completed;
           Alcotest.test_case "stream response completes" `Quick
             test_stream_response_reports_completed;
+          Alcotest.test_case "buffered SSE explicit flush is prompt" `Quick
+            test_buffered_sse_flush_is_prompt;
+          Alcotest.test_case "buffered slow reader and disconnect" `Quick
+            test_buffered_stream_slow_reader_disconnect;
           Alcotest.test_case "failed stream aborts" `Quick
             test_failed_stream_reports_aborted;
           Alcotest.test_case "peer disconnects" `Quick

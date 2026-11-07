@@ -1975,6 +1975,11 @@ int halo_client_bridge_start_response_stream(struct halo_client* client,
   if (client == NULL || client->bridge_request_id == 0
       || client->response_started || client->interim_response_started)
     return -1;
+  /* Chunk data and its final terminator are separate writes. Nagle can hold
+   * the latter until a delayed ACK, adding latency even to a flushed batch.
+   * Keep low-latency writes enabled for this connection after streaming. */
+  if (uv_tcp_nodelay(&client->handle, 1) != 0)
+    return -1;
   if (!halo_request_body_complete_for_reuse(client))
     client->should_keep_alive = 0;
   return halo_write_buffer((uv_stream_t*) &client->handle,

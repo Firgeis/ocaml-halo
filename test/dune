@@ -96,6 +96,11 @@
  (libraries ocaml-halo alcotest))
 
 (test
+ (name stream_unit)
+ (modules stream_unit)
+ (libraries ocaml-halo eio_main alcotest))
+
+(test
  (name headers_unit)
  (modules headers_unit)
  (libraries ocaml-halo alcotest))

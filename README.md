@@ -275,6 +275,31 @@ Each `yield` waits until its chunk is written, applying response backpressure.
 Streaming requires HTTP/1.1; Halo returns 500 if a handler attempts it on an
 HTTP/1.0 request.
 
+For producers that emit many small chunks, opt into bounded batching:
+
+```ocaml
+Halo.Stream.respond_buffered ~status:Halo.Router.Status.ok
+  ~max_buffered_bytes:65536 (fun ~yield ~flush ->
+    List.iter yield chunks;
+    flush ())
+```
+
+Buffered yields combine into payload batches of at most 64 KiB by default.
+Each full batch waits for write completion, preserving backpressure for slow
+readers. Larger yields are split. Successful producer return flushes remaining
+bytes; an exception discards pending bytes and aborts the stream. Buffer and
+transport copies use memory proportional to the limit, in addition to the
+application's strings. There is no background writer or flush timer.
+
+`Halo.Sse.respond_buffered` supplies `~send` and `~flush` callbacks. Flush after
+an event or group of events that needs prompt delivery, before waiting for more
+events. Existing `Stream.respond` and `Sse.respond` calls keep their immediate
+write behavior.
+
+Starting a streamed body enables TCP_NODELAY on its connection to avoid
+delayed-ACK pauses between data and the final chunk terminator. It remains
+enabled if the connection is reused.
+
 Handlers can emit 1xx responses explicitly:
 
 ```ocaml

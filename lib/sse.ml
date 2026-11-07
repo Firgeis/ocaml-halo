@@ -52,3 +52,10 @@ let respond ?(headers = Router.Headers.empty) producer =
   Stream.respond ~status:Router.Status.ok
     ~headers:(Router.Headers.append default_headers headers) (fun ~yield ->
       producer ~send:(fun message -> yield (encode_message message)))
+
+let respond_buffered ?(headers = Router.Headers.empty) ?max_buffered_bytes
+    producer =
+  Stream.respond_buffered ~status:Router.Status.ok ?max_buffered_bytes
+    ~headers:(Router.Headers.append default_headers headers)
+    (fun ~yield ~flush ->
+      producer ~send:(fun message -> yield (encode_message message)) ~flush)
