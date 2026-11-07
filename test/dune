@@ -194,3 +194,30 @@
 (rule
  (alias runtest)
  (action (run ./bridge_registry_unit.exe)))
+
+(rule
+ (targets bench_server_fixture.exe)
+ (deps bench_server_fixture.c)
+ (action (run %{cc} -O2 -std=c11 -Wall -Wextra -Werror -o %{targets} %{dep:bench_server_fixture.c} -lssl -lcrypto)))
+
+(test
+ (name bench_report_test)
+ (modules bench_report_test bench_test_support)
+ (libraries unix str alcotest yojson)
+ (deps %{exe:../scripts/bench_report.exe})
+ (action (setenv BENCH_REPORT %{exe:../scripts/bench_report.exe} (run %{test}))))
+
+(test
+ (name bench_tools_test)
+ (modules bench_tools_test bench_test_support)
+ (libraries unix str alcotest yojson)
+ (deps %{exe:../scripts/http_bench.exe} %{exe:../scripts/https_bench.exe}
+       %{exe:../scripts/process_sample.exe} %{exe:bench_server_fixture.exe}
+       fixtures/tls-cert.pem fixtures/tls-key.pem)
+ (action
+  (setenv HTTP_BENCH %{exe:../scripts/http_bench.exe}
+   (setenv HTTPS_BENCH %{exe:../scripts/https_bench.exe}
+    (setenv PROCESS_SAMPLE %{exe:../scripts/process_sample.exe}
+     (setenv BENCH_FIXTURE %{exe:bench_server_fixture.exe}
+      (setenv TLS_CERT %{dep:fixtures/tls-cert.pem}
+       (setenv TLS_KEY %{dep:fixtures/tls-key.pem} (run %{test})))))))))

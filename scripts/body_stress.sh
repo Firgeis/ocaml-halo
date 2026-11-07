@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DUNE_BIN="${DUNE_BIN:-$ROOT_DIR/_opam/bin/dune}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
 DUNE_TARGET="${DUNE_TARGET:-./test/demo_server.exe}"
 SERVER_BIN="${SERVER_BIN:-$ROOT_DIR/_build/default/test/demo_server.exe}"
 RESULT_DIR="${RESULT_DIR:-$ROOT_DIR/bench-results}"
@@ -87,6 +86,7 @@ cleanup() {
 
 trap cleanup EXIT
 
+make -C "$ROOT_DIR" bench-tools >/dev/null
 "$DUNE_BIN" build "$DUNE_TARGET" >/dev/null
 
 if [[ ! -x "$SERVER_BIN" ]]; then
@@ -97,49 +97,22 @@ fi
 ACCEPTED_BODY_FILE="$(mktemp)"
 OVERSIZED_BODY_FILE="$(mktemp)"
 
-"$PYTHON_BIN" - "$ACCEPTED_BODY_FILE" "$ACCEPTED_BODY_SIZE" "$OVERSIZED_BODY_FILE" "$OVERSIZED_BODY_SIZE" <<'PY'
-from pathlib import Path
-import sys
-
-accepted_path = Path(sys.argv[1])
-accepted_size = int(sys.argv[2])
-oversized_path = Path(sys.argv[3])
-oversized_size = int(sys.argv[4])
-
-accepted_path.write_bytes(b"a" * accepted_size)
-oversized_path.write_bytes(b"b" * oversized_size)
-PY
+"$ROOT_DIR/_build/default/scripts/bench_report.exe" body-files \
+  "$ACCEPTED_BODY_FILE" "$ACCEPTED_BODY_SIZE" "$OVERSIZED_BODY_FILE" "$OVERSIZED_BODY_SIZE"
 
 HALO_MAX_BODY_SIZE="$MAX_BODY_SIZE" "$SERVER_BIN" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
-"$PYTHON_BIN" "$ROOT_DIR/scripts/process_sample.py" \
+"$ROOT_DIR/_build/default/scripts/process_sample.exe" \
   --pid "$SERVER_PID" \
   --interval-seconds "$PROCESS_SAMPLE_INTERVAL_SECONDS" \
   --output "$PROCESS_SAMPLE_JSON" &
 PROCESS_SAMPLE_PID=$!
 
-"$PYTHON_BIN" - "$HOST" "$PORT" <<'PY'
-import socket
-import sys
-import time
-
-host = sys.argv[1]
-port = int(sys.argv[2])
-deadline = time.time() + 5.0
-
-while True:
-    try:
-        with socket.create_connection((host, port), timeout=0.2):
-            break
-    except OSError:
-        if time.time() >= deadline:
-            raise SystemExit("server did not start listening in time")
-        time.sleep(0.05)
-PY
+"$ROOT_DIR/_build/default/scripts/http_bench.exe" --wait-ready --host "$HOST" --port "$PORT"
 
 if run_bench ACCEPTED_RESULT \
-  "$PYTHON_BIN" "$ROOT_DIR/scripts/http_bench.py" \
+  "$ROOT_DIR/_build/default/scripts/http_bench.exe" \
   --scenario accepted_large_body \
   --host "$HOST" \
   --port "$PORT" \
@@ -158,7 +131,7 @@ else
 fi
 
 if run_bench ACCEPTED_CHUNKED_RESULT \
-  "$PYTHON_BIN" "$ROOT_DIR/scripts/http_bench.py" \
+  "$ROOT_DIR/_build/default/scripts/http_bench.exe" \
   --scenario accepted_large_body_chunked \
   --host "$HOST" \
   --port "$PORT" \
@@ -179,7 +152,7 @@ else
 fi
 
 if run_bench OVERSIZED_RESULT \
-  "$PYTHON_BIN" "$ROOT_DIR/scripts/http_bench.py" \
+  "$ROOT_DIR/_build/default/scripts/http_bench.exe" \
   --scenario oversized_large_body \
   --host "$HOST" \
   --port "$PORT" \
@@ -197,7 +170,7 @@ else
 fi
 
 if run_bench OVERSIZED_CHUNKED_RESULT \
-  "$PYTHON_BIN" "$ROOT_DIR/scripts/http_bench.py" \
+  "$ROOT_DIR/_build/default/scripts/http_bench.exe" \
   --scenario oversized_large_body_chunked \
   --host "$HOST" \
   --port "$PORT" \
@@ -225,44 +198,8 @@ if [[ -n "${PROCESS_SAMPLE_PID:-}" ]]; then
   unset PROCESS_SAMPLE_PID
 fi
 
-"$PYTHON_BIN" - "$RESULT_JSON" "$PROCESS_SAMPLE_JSON" "$MAX_BODY_SIZE" "$ACCEPTED_BODY_SIZE" "$OVERSIZED_BODY_SIZE" "$CHUNK_SIZE" "$ACCEPTED_EXIT_CODE" "$ACCEPTED_CHUNKED_EXIT_CODE" "$OVERSIZED_EXIT_CODE" "$OVERSIZED_CHUNKED_EXIT_CODE" "$ACCEPTED_RESULT" "$ACCEPTED_CHUNKED_RESULT" "$OVERSIZED_RESULT" "$OVERSIZED_CHUNKED_RESULT" "$KEEP_ALIVE_ENABLED" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-result_json = Path(sys.argv[1])
-process_sample_json = Path(sys.argv[2])
-
-def parse_result(name: str, exit_code: int, raw: str) -> dict:
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        payload = {
-            "scenario": name,
-            "errors": [raw],
-        }
-    payload["exit_code"] = exit_code
-    if exit_code != 0:
-        payload["failed"] = True
-    return payload
-
-payload = {
-    "config": {
-        "max_body_size": int(sys.argv[3]),
-        "accepted_body_size": int(sys.argv[4]),
-        "oversized_body_size": int(sys.argv[5]),
-        "chunk_size": int(sys.argv[6]),
-        "keep_alive": sys.argv[15] == "1",
-    },
-    "process_sample": json.loads(process_sample_json.read_text()),
-    "scenarios": [
-        parse_result("accepted_large_body", int(sys.argv[7]), sys.argv[11]),
-        parse_result("accepted_large_body_chunked", int(sys.argv[8]), sys.argv[12]),
-        parse_result("oversized_large_body", int(sys.argv[9]), sys.argv[13]),
-        parse_result("oversized_large_body_chunked", int(sys.argv[10]), sys.argv[14]),
-    ],
-}
-result_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-print(json.dumps(payload, indent=2, sort_keys=True))
-raise SystemExit(0 if all(not scenario.get("failed", False) for scenario in payload["scenarios"]) else 1)
-PY
+"$ROOT_DIR/_build/default/scripts/bench_report.exe" body-report \
+  "$RESULT_JSON" "$PROCESS_SAMPLE_JSON" "$MAX_BODY_SIZE" "$ACCEPTED_BODY_SIZE" \
+  "$OVERSIZED_BODY_SIZE" "$CHUNK_SIZE" "$ACCEPTED_EXIT_CODE" "$ACCEPTED_CHUNKED_EXIT_CODE" \
+  "$OVERSIZED_EXIT_CODE" "$OVERSIZED_CHUNKED_EXIT_CODE" "$ACCEPTED_RESULT" \
+  "$ACCEPTED_CHUNKED_RESULT" "$OVERSIZED_RESULT" "$OVERSIZED_CHUNKED_RESULT" "$KEEP_ALIVE_ENABLED"

@@ -21,4 +21,4 @@
   uri
   (eio_main :with-test)
   (alcotest :with-test)
-  (yojson :with-test)))
+  yojson))

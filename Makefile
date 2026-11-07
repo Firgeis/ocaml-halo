@@ -48,6 +48,8 @@ VENDORED_RUNTIME_ENV = \
 	run \
 	release-run \
 	body-stress \
+	bench-tools \
+	bench-tools-test \
 	router-bench \
 	test \
 	runtest \
@@ -133,7 +135,13 @@ release-run: release-build
 	LD_LIBRARY_PATH=$(vendored_runtime_library_path) \
 	./_build/release/test/demo_server.exe
 
-body-stress: vendor-build
+bench-tools:
+	$(DUNE) build ./scripts/http_bench.exe ./scripts/https_bench.exe ./scripts/process_sample.exe ./scripts/bench_report.exe
+
+bench-tools-test:
+	$(DUNE) build @test/runtest-bench_report_test @test/runtest-bench_tools_test --force
+
+body-stress: vendor-build bench-tools
 	$(VENDORED_RUNTIME_ENV) bash ./scripts/body_stress.sh
 
 router-bench: vendor-build
@@ -145,7 +153,7 @@ asan-run: asan-build
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=1:halt_on_error=1 \
 	./_build/default/test/demo_server.exe
 
-asan-https-smoke: asan-build
+asan-https-smoke: asan-build bench-tools
 	bash ./scripts/asan_https_smoke.sh
 
 test: vendor-build $(VENDORED_TEST_TARGETS)

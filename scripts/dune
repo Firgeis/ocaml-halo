@@ -1,3 +1,24 @@
 (executable
  (name router_bench)
+ (modules router_bench)
  (libraries ocaml-halo unix))
+
+(executable
+ (name process_sample)
+ (modules process_sample)
+ (libraries unix))
+
+(executable
+ (name bench_report)
+ (modules bench_report)
+ (libraries yojson))
+
+(rule
+ (targets http_bench.exe)
+ (deps http_bench.c bench_common.c bench_common.h)
+ (action (run %{cc} -O2 -std=c11 -Wall -Wextra -Wpedantic -o %{targets} %{dep:http_bench.c} %{dep:bench_common.c} -pthread -lssl -lcrypto -lm)))
+
+(rule
+ (targets https_bench.exe)
+ (deps https_bench.c bench_common.c bench_common.h)
+ (action (run %{cc} -O2 -std=c11 -Wall -Wextra -Wpedantic -o %{targets} %{dep:https_bench.c} %{dep:bench_common.c} -pthread -lssl -lcrypto -lm)))

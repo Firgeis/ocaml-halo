@@ -12,6 +12,8 @@ CONCURRENCY="${CONCURRENCY:-4}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-10}"
 ASAN_OPTIONS_VALUE="${ASAN_OPTIONS:-detect_leaks=0:abort_on_error=1:halt_on_error=1}"
 
+make -C "$ROOT_DIR" bench-tools >/dev/null
+
 SERVER_PID=""
 
 cleanup() {
@@ -43,34 +45,14 @@ HALO_TLS_PRIVATE_KEY="$KEY_FILE" \
 "$SERVER_BIN" &
 SERVER_PID=$!
 
-python3 - "$CERT_FILE" "$HOST" "$PORT" <<'PY'
-import socket
-import ssl
-import sys
-import time
+"$ROOT_DIR/_build/default/scripts/https_bench.exe" \
+  --wait-ready \
+  --host "$HOST" \
+  --port "$PORT" \
+  --server-name localhost \
+  --ca-file "$CERT_FILE"
 
-cert_file = sys.argv[1]
-host = sys.argv[2]
-port = int(sys.argv[3])
-
-ctx = ssl.create_default_context(cafile=cert_file)
-ctx.check_hostname = False
-ctx.minimum_version = ssl.TLSVersion.TLSv1_3
-deadline = time.time() + 5.0
-
-while True:
-    try:
-        with socket.create_connection((host, port), timeout=0.2) as raw:
-            with ctx.wrap_socket(raw, server_hostname="localhost"):
-                pass
-        break
-    except OSError:
-        if time.time() >= deadline:
-            raise SystemExit("server did not start listening in time")
-        time.sleep(0.05)
-PY
-
-python3 "$ROOT_DIR/scripts/https_bench.py" \
+"$ROOT_DIR/_build/default/scripts/https_bench.exe" \
   --scenario tls_smoke \
   --host "$HOST" \
   --port "$PORT" \

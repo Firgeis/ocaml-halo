@@ -1843,6 +1843,7 @@ static int halo_write_buffer(uv_stream_t* stream,
   }
 
   struct halo_write_req* write_req;
+  uv_buf_t bufs[1];
 
   write_req = malloc(sizeof(*write_req));
   if (write_req == NULL)
@@ -1857,10 +1858,11 @@ static int halo_write_buffer(uv_stream_t* stream,
   memcpy(write_req->buf.base, response, response_len);
   write_req->buf.len = response_len;
   write_req->kind = kind;
+  bufs[0] = write_req->buf;
 
   if (uv_write(&write_req->req,
                stream,
-               &write_req->buf,
+               bufs,
                1,
                halo_after_write) != 0) {
     halo_write_req_destroy(write_req);
@@ -1893,6 +1895,7 @@ static int halo_write_owned_buffer(uv_stream_t* stream,
                                    size_t response_len,
                                    enum halo_write_kind kind) {
   struct halo_write_req* write_req;
+  uv_buf_t bufs[1];
 
   write_req = malloc(sizeof(*write_req));
   if (write_req == NULL) {
@@ -1903,10 +1906,11 @@ static int halo_write_owned_buffer(uv_stream_t* stream,
   write_req->buf.base = response;
   write_req->buf.len = response_len;
   write_req->kind = kind;
+  bufs[0] = write_req->buf;
 
   if (uv_write(&write_req->req,
                stream,
-               &write_req->buf,
+               bufs,
                1,
                halo_after_write) != 0) {
     halo_write_req_destroy(write_req);
