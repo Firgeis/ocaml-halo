@@ -41,18 +41,18 @@ int halo_bridge_dispatch_replay_claim(struct halo_client* client,
 void halo_bridge_cancel_replay_claim(struct halo_client* client);
 
 /* Reactor-owned client operations invoked by bridge commands. */
-/* Consumes [response], including on failure. */
+/* Each payload-taking response operation consumes [response] on every return path. */
 int halo_client_bridge_send_response(struct halo_client* client,
                                      char* response,
                                      size_t response_len);
 int halo_client_bridge_send_informational(struct halo_client* client,
-                                          const char* response,
+                                          char* response,
                                           size_t response_len);
 int halo_client_bridge_start_response_stream(struct halo_client* client,
-                                             const char* response,
+                                             char* response,
                                              size_t response_len);
 int halo_client_bridge_write_response_chunk(struct halo_client* client,
-                                            const char* response,
+                                            char* response,
                                             size_t response_len);
 int halo_client_bridge_finish_response_stream(struct halo_client* client);
 int halo_client_bridge_abort_response_stream(struct halo_client* client);

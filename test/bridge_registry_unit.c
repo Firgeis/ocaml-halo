@@ -23,6 +23,14 @@ static void* test_calloc(size_t count, size_t size) {
     allocations_until_failure--;
   return calloc(count, size);
 }
+static void* tracked_payload;
+static int payload_frees;
+static void test_free(void* ptr) {
+  if (ptr != NULL && ptr == tracked_payload)
+    payload_frees++;
+  free(ptr);
+}
+#define free test_free
 #define malloc test_malloc
 #define calloc test_calloc
 #include "../c/lib/halo_client_registry.c"
@@ -30,14 +38,25 @@ static void* test_calloc(size_t count, size_t size) {
 #include "../c/runtime/halo_bridge_commands.c"
 #undef malloc
 #undef calloc
+#undef free
 
 static int close_count;
 int halo_client_bridge_reject_busy(struct halo_client* client) { (void) client; return -42; }
 void halo_client_bridge_close(struct halo_client* client) { (void) client; close_count++; }
-int halo_client_bridge_send_response(struct halo_client* c, char* p, size_t n) { (void)c; (void)n; free(p); return 0; }
-int halo_client_bridge_send_informational(struct halo_client* c, const char* p, size_t n) { (void)c; (void)p; (void)n; return 0; }
-int halo_client_bridge_start_response_stream(struct halo_client* c, const char* p, size_t n) { (void)c; (void)p; (void)n; return 0; }
-int halo_client_bridge_write_response_chunk(struct halo_client* c, const char* p, size_t n) { (void)c; (void)p; (void)n; return 0; }
+static int response_calls;
+static int response_result;
+static enum halo_bridge_command_kind expected_kind;
+static int consume_response(struct halo_client* c, char* p, size_t n,
+                            enum halo_bridge_command_kind kind) {
+  assert(c != NULL && p == tracked_payload && n == 4 && kind == expected_kind);
+  response_calls++;
+  test_free(p);
+  return response_result;
+}
+int halo_client_bridge_send_response(struct halo_client* c, char* p, size_t n) { return consume_response(c, p, n, HALO_BRIDGE_SEND_RESPONSE); }
+int halo_client_bridge_send_informational(struct halo_client* c, char* p, size_t n) { return consume_response(c, p, n, HALO_BRIDGE_SEND_INFORMATIONAL); }
+int halo_client_bridge_start_response_stream(struct halo_client* c, char* p, size_t n) { return consume_response(c, p, n, HALO_BRIDGE_START_RESPONSE_STREAM); }
+int halo_client_bridge_write_response_chunk(struct halo_client* c, char* p, size_t n) { return consume_response(c, p, n, HALO_BRIDGE_WRITE_RESPONSE_CHUNK); }
 int halo_client_bridge_finish_response_stream(struct halo_client* c) { (void)c; return 0; }
 int halo_client_bridge_abort_response_stream(struct halo_client* c) { (void)c; return 0; }
 int halo_client_bridge_request_body(struct halo_client* c) { (void)c; return 0; }
@@ -74,6 +93,30 @@ static void close_command(struct halo_bridge* bridge, uint64_t id) {
   bridge->command_count = 1;
   bridge->command_async.data = bridge;
   halo_bridge_command_async_cb(&bridge->command_async);
+}
+
+static void response_command(struct halo_bridge* bridge,
+                             enum halo_bridge_command_kind kind,
+                             uint64_t id, int result, int present) {
+  struct halo_bridge_command* command = calloc(1, sizeof(*command));
+  int old_closes = close_count;
+  assert(command != NULL && bridge->command_head == NULL);
+  command->payload = malloc(4);
+  assert(command->payload != NULL);
+  tracked_payload = command->payload;
+  payload_frees = response_calls = 0;
+  expected_kind = kind;
+  response_result = result;
+  command->payload_len = 4;
+  command->kind = kind;
+  command->request_id = id;
+  bridge->command_head = bridge->command_tail = command;
+  bridge->command_count = 1;
+  bridge->command_async.data = bridge;
+  halo_bridge_command_async_cb(&bridge->command_async);
+  assert(payload_frees == 1 && response_calls == present);
+  assert(close_count == old_closes + (present && result != 0));
+  tracked_payload = NULL;
 }
 
 int main(void) {
@@ -117,6 +160,20 @@ int main(void) {
   third = a.bridge_request_id;
   assert(third != first && halo_bridge_find_client(&bridge, first) == NULL);
   assert(halo_bridge_find_client(&bridge, third) == &a);
+  {
+    enum halo_bridge_command_kind kinds[] = {
+      HALO_BRIDGE_SEND_RESPONSE, HALO_BRIDGE_SEND_INFORMATIONAL,
+      HALO_BRIDGE_START_RESPONSE_STREAM, HALO_BRIDGE_WRITE_RESPONSE_CHUNK
+    };
+    size_t i;
+    for (i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+      response_command(&bridge, kinds[i], third, 0, 1);
+      response_command(&bridge, kinds[i], third, -1, 1);
+      response_command(&bridge, kinds[i], first, 0, 0);
+      response_command(&bridge, kinds[i], 0, 0, 0);
+    }
+    close_count = 0;
+  }
   close_command(&bridge, first);
   assert(close_count == 0);
   close_command(&bridge, third);

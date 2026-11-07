@@ -1897,6 +1897,12 @@ static int halo_write_owned_buffer(uv_stream_t* stream,
   struct halo_write_req* write_req;
   uv_buf_t bufs[1];
 
+  if (halo_tls_enabled(client)) {
+    int result = halo_write_buffer(stream, client, response, response_len, kind);
+    free(response);
+    return result;
+  }
+
   write_req = malloc(sizeof(*write_req));
   if (write_req == NULL) {
     free(response);
@@ -1939,20 +1945,11 @@ int halo_client_bridge_send_response(struct halo_client* client,
   if (!halo_request_body_complete_for_reuse(client))
     client->should_keep_alive = 0;
   client->bridge_response_in_flight = 1;
-  if (halo_tls_enabled(client)) {
-    result = halo_write_response((uv_stream_t*) &client->handle,
-                                 client,
-                                 response,
-                                 response_len);
-    free(response);
-  }
-  else {
-    result = halo_write_owned_buffer((uv_stream_t*) &client->handle,
-                                     client,
-                                     response,
-                                     response_len,
-                                     HALO_WRITE_FINAL);
-  }
+  result = halo_write_owned_buffer((uv_stream_t*) &client->handle,
+                                   client,
+                                   response,
+                                   response_len,
+                                   HALO_WRITE_FINAL);
   if (result != 0) {
     client->bridge_response_in_flight = 0;
     return -1;
@@ -1961,49 +1958,57 @@ int halo_client_bridge_send_response(struct halo_client* client,
 }
 
 int halo_client_bridge_send_informational(struct halo_client* client,
-                                          const char* response,
+                                          char* response,
                                           size_t response_len) {
   if (client == NULL || client->bridge_request_id == 0
-      || client->response_started || client->interim_response_started)
+      || client->response_started || client->interim_response_started) {
+    free(response);
     return -1;
-  return halo_write_buffer((uv_stream_t*) &client->handle,
-                           client,
-                           response,
-                           response_len,
-                           HALO_WRITE_DISPATCH_INTERIM);
+  }
+  return halo_write_owned_buffer((uv_stream_t*) &client->handle,
+                                 client,
+                                 response,
+                                 response_len,
+                                 HALO_WRITE_DISPATCH_INTERIM);
 }
 
 int halo_client_bridge_start_response_stream(struct halo_client* client,
-                                             const char* response,
+                                             char* response,
                                              size_t response_len) {
   if (client == NULL || client->bridge_request_id == 0
-      || client->response_started || client->interim_response_started)
+      || client->response_started || client->interim_response_started) {
+    free(response);
     return -1;
+  }
   /* Chunk data and its final terminator are separate writes. Nagle can hold
    * the latter until a delayed ACK, adding latency even to a flushed batch.
    * Keep low-latency writes enabled for this connection after streaming. */
-  if (uv_tcp_nodelay(&client->handle, 1) != 0)
+  if (uv_tcp_nodelay(&client->handle, 1) != 0) {
+    free(response);
     return -1;
+  }
   if (!halo_request_body_complete_for_reuse(client))
     client->should_keep_alive = 0;
-  return halo_write_buffer((uv_stream_t*) &client->handle,
-                           client,
-                           response,
-                           response_len,
-                           HALO_WRITE_RESPONSE_STREAM_START);
+  return halo_write_owned_buffer((uv_stream_t*) &client->handle,
+                                 client,
+                                 response,
+                                 response_len,
+                                 HALO_WRITE_RESPONSE_STREAM_START);
 }
 
 int halo_client_bridge_write_response_chunk(struct halo_client* client,
-                                            const char* response,
+                                            char* response,
                                             size_t response_len) {
   if (client == NULL || client->bridge_request_id == 0
-      || !client->response_started || client->interim_response_started)
+      || !client->response_started || client->interim_response_started) {
+    free(response);
     return -1;
-  return halo_write_buffer((uv_stream_t*) &client->handle,
-                           client,
-                           response,
-                           response_len,
-                           HALO_WRITE_RESPONSE_CHUNK);
+  }
+  return halo_write_owned_buffer((uv_stream_t*) &client->handle,
+                                 client,
+                                 response,
+                                 response_len,
+                                 HALO_WRITE_RESPONSE_CHUNK);
 }
 
 int halo_client_bridge_finish_response_stream(struct halo_client* client) {

@@ -65,25 +65,28 @@ void halo_bridge_command_async_cb(uv_async_t* async) {
         halo_runtime_begin_drain(bridge->runtime);
         break;
       case HALO_BRIDGE_SEND_INFORMATIONAL:
-        if (client != NULL
-            && halo_client_bridge_send_informational(client,
-                                                     command->payload,
-                                                     command->payload_len) != 0)
-          halo_client_bridge_close(client);
+        if (client != NULL) {
+          char* payload = command->payload;
+          command->payload = NULL;
+          if (halo_client_bridge_send_informational(client, payload, command->payload_len) != 0)
+            halo_client_bridge_close(client);
+        }
         break;
       case HALO_BRIDGE_START_RESPONSE_STREAM:
-        if (client != NULL
-            && halo_client_bridge_start_response_stream(client,
-                                                        command->payload,
-                                                        command->payload_len) != 0)
-          halo_client_bridge_close(client);
+        if (client != NULL) {
+          char* payload = command->payload;
+          command->payload = NULL;
+          if (halo_client_bridge_start_response_stream(client, payload, command->payload_len) != 0)
+            halo_client_bridge_close(client);
+        }
         break;
       case HALO_BRIDGE_WRITE_RESPONSE_CHUNK:
-        if (client != NULL
-            && halo_client_bridge_write_response_chunk(client,
-                                                       command->payload,
-                                                       command->payload_len) != 0)
-          halo_client_bridge_close(client);
+        if (client != NULL) {
+          char* payload = command->payload;
+          command->payload = NULL;
+          if (halo_client_bridge_write_response_chunk(client, payload, command->payload_len) != 0)
+            halo_client_bridge_close(client);
+        }
         break;
       case HALO_BRIDGE_FINISH_RESPONSE_STREAM:
         if (client != NULL
