@@ -63,8 +63,7 @@ let words line =
   String.split_on_char ' ' (String.map (function '\t' | '\r' -> ' ' | c -> c) line)
   |> List.filter (fun s -> s <> "")
 
-let baseline args =
-  let result, time_log, pidstat_log, process_path = args.(0), args.(1), args.(2), args.(3) in
+let baseline_metrics time_log pidstat_log process_path =
   let metrics = ref [] in
   let set key value = metrics := (key, `String value) :: List.remove_assoc key !metrics in
   List.iter (fun line -> match String.index_opt line '=' with
@@ -103,8 +102,69 @@ let baseline args =
     List.iter (fun (key, fmt) -> set ("process_" ^ key) (fmt (number key)))
       ["cpu_percent_mean", Printf.sprintf "%.2f"; "cpu_percent_max", Printf.sprintf "%.2f";
        "rss_kb_mean", Printf.sprintf "%.2f"; "rss_kb_max", Printf.sprintf "%.0f"]);
+  `Assoc !metrics
+
+let baseline args =
   let scenarios = List.init 6 (fun i -> Yojson.Safe.from_string args.(i + 4)) in
-  write_report result (`Assoc ["server_metrics", `Assoc !metrics; "scenarios", `List scenarios])
+  write_report args.(0) (`Assoc ["server_metrics", baseline_metrics args.(1) args.(2) args.(3); "scenarios", `List scenarios])
+
+let baseline_runs args =
+  let read_file path =
+    let ch = open_in_bin path in
+    Fun.protect ~finally:(fun () -> close_in_noerr ch) (fun () ->
+      really_input_string ch (in_channel_length ch)) in
+  let parse_run line =
+    match String.split_on_char '\t' line with
+    | [name; trial; order; code; output; stderr] ->
+        let code = int_of_string code in
+        let raw = read_file output in
+        let parsed = try Some (Yojson.Safe.from_string raw) with Yojson.Json_error _ -> None in
+        let valid = match parsed with Some (`Assoc _) -> true | _ -> false in
+        let failed = code <> 0 || not valid in
+        let result = Option.value parsed ~default:`Null in
+        let fields = ["trial", `Int (int_of_string trial); "order", `Int (int_of_string order);
+          "exit_code", `Int code; "failed", `Bool failed; "result", result;
+          "stderr", `String (read_file stderr)] in
+        let fields = if valid then fields else ("raw_output", `String raw) :: fields in
+        (name, failed, result, `Assoc fields)
+    | _ -> failwith "invalid baseline run manifest" in
+  let runs = List.map parse_run (read_lines args.(4)) in
+  let names = List.fold_left (fun names (name, _, _, _) ->
+      if List.mem name names then names else names @ [name]) [] runs in
+  let number = function `Int n -> Some (float_of_int n) | `Float x -> Some x | _ -> None in
+  let summary values =
+    match List.sort Float.compare values with
+    | [] -> `Null
+    | values ->
+        let n = List.length values in
+        let median = if n mod 2 = 1 then List.nth values (n / 2)
+          else (List.nth values (n / 2 - 1) +. List.nth values (n / 2)) /. 2. in
+        `Assoc ["min", `Float (List.hd values); "median", `Float median;
+          "max", `Float (List.nth values (n - 1))] in
+  let scenarios = List.map (fun name ->
+      let selected = List.filter (fun (n, _, _, _) -> n = name) runs in
+      let values field = List.filter_map (fun (_, failed, result, _) ->
+          if failed then None else number (field result)) selected in
+      let member = Yojson.Safe.Util.member in
+      let p99 field result = match member field result with
+        | `Assoc _ as value -> member "p99" value
+        | _ -> `Null in
+      `Assoc ["scenario", `String name;
+        "successful_runs", `Int (List.length (List.filter (fun (_, failed, _, _) -> not failed) selected));
+        "throughput_rps", summary (values (member "throughput_rps"));
+        "latency_p99_ms", summary (values (p99 "latency_ms"));
+        "connect_p99_ms", summary (values (p99 "connect_latency_ms"));
+        "request_p99_ms", summary (values (p99 "request_latency_ms"));
+        "runs", `List (List.map (fun (_, _, _, run) -> run) selected)]) names in
+  let failed = List.exists (fun (_, failed, _, _) -> failed) runs in
+  write_report args.(0) (`Assoc ["server_metrics", baseline_metrics args.(1) args.(2) args.(3);
+    "config", `Assoc ["repetitions", `Int (int_of_string args.(5));
+      "seed", `Int (int_of_string args.(6)); "cooldown_seconds", `Float (float_of_string args.(7));
+      "requests", `Int (int_of_string args.(8)); "concurrency", `Int (int_of_string args.(9));
+      "warmup_requests", `Int (int_of_string args.(10)); "host", `String args.(11);
+      "port", `Int (int_of_string args.(12)); "dune_profile", `String args.(13)];
+    "failed", `Bool failed; "scenarios", `List scenarios]);
+  if failed then exit 1
 
 let body_report args =
   let names = [|"accepted_large_body"; "accepted_large_body_chunked"; "oversized_large_body"; "oversized_large_body_chunked"|] in
@@ -139,11 +199,12 @@ let write_body path size byte =
       loop size)
 
 let () =
-  let usage () = prerr_endline "usage: bench_report (baseline|body-report|body-files) arguments..."; exit 2 in
+  let usage () = prerr_endline "usage: bench_report (baseline|baseline-runs|body-report|body-files) arguments..."; exit 2 in
   if Array.length Sys.argv < 2 then usage ();
   let args = Array.sub Sys.argv 2 (Array.length Sys.argv - 2) in
   match Sys.argv.(1) with
   | "baseline" when Array.length args = 10 -> baseline args
+  | "baseline-runs" when Array.length args = 14 -> baseline_runs args
   | "body-report" when Array.length args = 15 -> body_report args
   | "body-files" when Array.length args = 4 -> write_body args.(0) args.(1) 'a'; write_body args.(2) args.(3) 'b'
   | _ -> usage ()

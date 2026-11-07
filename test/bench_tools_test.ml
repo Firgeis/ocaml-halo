@@ -41,6 +41,13 @@ let test_http () = with_temp (fun d ->
     Alcotest.(check bool) "positive throughput" true (Yojson.Safe.Util.to_number (member "throughput_rps" result) > 0.);
     let latency = member "latency_ms" result in
     Alcotest.(check bool) "latency order" true (Yojson.Safe.Util.to_number (member "median" latency) <= Yojson.Safe.Util.to_number (member "p99" latency));
+    check_json "reused connection setup excluded" `Null (member "connect_latency_ms" result);
+    Alcotest.(check bool) "request timing present" true (Yojson.Safe.Util.to_number (member "p99" (member "request_latency_ms" result)) > 0.);
+    let fresh = bench http port [] in
+    Alcotest.(check bool) "fresh connection timing present" true (Yojson.Safe.Util.to_number (member "p99" (member "connect_latency_ms" fresh)) > 0.);
+    let mean key = Yojson.Safe.Util.to_number (member "mean" (member key fresh)) in
+    Alcotest.(check bool) "phases cover total latency" true
+      (abs_float (mean "latency_ms" -. mean "connect_latency_ms" -. mean "request_latency_ms") < 0.000001);
     let failure = bench ~code:1 http port ["--expect-status";"201"] in
     check_json "unexpected statuses" (json {|{"200":6}|}) (member "unexpected_status_counts" failure)))
 let make_untrusted d =

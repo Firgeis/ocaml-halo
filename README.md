@@ -442,3 +442,28 @@ make run
 
 Compression tests require the `gzip` command for independent decompression and
 checksum verification.
+
+To benchmark the demo server over loopback, run:
+
+```sh
+PATH="$PWD/_opam/bin:$PATH" bash scripts/benchmark-baseline.sh
+```
+
+The script builds the server with the release profile and runs six HTTP
+scenarios three times in shuffled order. `REQUESTS`, `CONCURRENCY`,
+`WARMUP_REQUESTS`, `REPETITIONS`, `BENCH_SEED`, `COOLDOWN_SECONDS`, and
+`RESULT_DIR` configure the pass. The default cooldown is 1.2 seconds between
+trials; record the seed to reproduce the order. `baseline.json` includes each
+trial in execution order within its scenario, errors and exit codes, and the
+minimum, median, and maximum throughput and p99 latencies across successful
+trials. A failed trial makes the command fail after writing the report.
+
+The per-request `connect_latency_ms` covers client address lookup and
+connection setup (including TLS handshake for the HTTPS client), and is null
+for keep-alive requests, whose connections are established before measurement.
+`request_latency_ms` covers sending the request through receipt of the full
+response; `latency_ms` covers both phases for fresh connections. Timings include
+client scheduling and exclude unsuccessful requests. Loopback results include
+client and kernel costs: a cooldown limits interference between short trials,
+but does not prevent port exhaustion during a long fresh-connection trial.
+Use a suitably provisioned remote load generator for sustained capacity tests.

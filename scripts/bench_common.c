@@ -65,6 +65,8 @@ typedef struct {
   int count;
   int reused;
   double *latencies;
+  double *connect_latencies;
+  double *request_latencies;
   int *statuses;
   char error[512];
 } worker;
@@ -526,6 +528,7 @@ static void *run_worker(void *arg) {
         SSL_CTX_free(ctx);
       break;
     }
+    double connected = now();
     if (send_all(&conn, c->request.data, c->request.len, w->error,
                  sizeof w->error)) {
       close_connection(&conn);
@@ -540,7 +543,10 @@ static void *run_worker(void *arg) {
         SSL_CTX_free(ctx);
       break;
     }
-    w->latencies[w->count] = (now() - start) * 1000;
+    double finished = now();
+    w->latencies[w->count] = (finished - start) * 1000;
+    w->connect_latencies[w->count] = (connected - start) * 1000;
+    w->request_latencies[w->count] = (finished - connected) * 1000;
     w->statuses[w->count++] = status;
     if (c->tls) {
       w->reused += SSL_session_reused(conn.ssl);
@@ -576,6 +582,18 @@ static double percentile(double *v, int n, double p) {
   return v[lo] * (1 - (rank - lo)) + v[hi] * (rank - lo);
 }
 
+static void print_latency(double *values, int count) {
+  double sum = 0;
+  for (int i = 0; i < count; i++)
+    sum += values[i];
+  qsort(values, (size_t)count, sizeof *values, compare_double);
+  printf("{\"mean\":%.17g,\"median\":%.17g,\"p95\":%.17g,"
+         "\"p99\":%.17g,\"max\":%.17g}",
+         count ? sum / count : 0.0, percentile(values, count, .5),
+         percentile(values, count, .95), percentile(values, count, .99),
+         count ? values[count - 1] : 0.0);
+}
+
 static int compare_int(const void *a, const void *b) {
   int x = *(const int *)a, y = *(const int *)b;
   return (x > y) - (x < y);
@@ -601,8 +619,10 @@ static int benchmark(config *c, int requests, int concurrency, int warmup) {
     w->cfg = c;
     w->iterations = requests / concurrency + (i < requests % concurrency);
     w->latencies = calloc((size_t)w->iterations, sizeof(double));
+    w->connect_latencies = calloc((size_t)w->iterations, sizeof(double));
+    w->request_latencies = calloc((size_t)w->iterations, sizeof(double));
     w->statuses = calloc((size_t)w->iterations, sizeof(int));
-    if (!w->latencies || !w->statuses)
+    if (!w->latencies || !w->connect_latencies || !w->request_latencies || !w->statuses)
       die("out of memory");
     int rc = pthread_create(&threads[i], NULL, run_worker, w);
     if (rc) {
@@ -616,23 +636,24 @@ static int benchmark(config *c, int requests, int concurrency, int warmup) {
   double duration = now() - start;
   int completed = 0, reused = 0, errors = 0, counts[1000] = {0};
   double *lat = calloc((size_t)requests, sizeof *lat);
-  if (!lat)
+  double *connect_lat = calloc((size_t)requests, sizeof *connect_lat);
+  double *request_lat = calloc((size_t)requests, sizeof *request_lat);
+  if (!lat || !connect_lat || !request_lat)
     die("out of memory");
-  double sum = 0;
   for (int i = 0; i < count; i++) {
     worker *w = &workers[i];
     if (w->error[0])
       errors++;
     reused += w->reused;
     for (int j = 0; j < w->count; j++) {
-      lat[completed++] = w->latencies[j];
-      sum += w->latencies[j];
+      lat[completed] = w->latencies[j];
+      connect_lat[completed] = w->connect_latencies[j];
+      request_lat[completed++] = w->request_latencies[j];
       counts[w->statuses[j]]++;
     }
   }
   if (warmup && !errors)
     goto cleanup;
-  qsort(lat, (size_t)completed, sizeof *lat, compare_double);
   if (warmup) {
     printf("{\"scenario\":");
     json_string(c->scenario);
@@ -642,11 +663,16 @@ static int benchmark(config *c, int requests, int concurrency, int warmup) {
          "\"duration_seconds\":%.17g,\"throughput_rps\":%.17g,",
          requests, completed, concurrency, duration,
          duration > 0 ? completed / duration : 0.0);
-  printf("\"latency_ms\":{\"mean\":%.17g,\"median\":%.17g,\"p95\":%.17g,"
-         "\"p99\":%.17g,\"max\":%.17g},\"status_counts\":{",
-         completed ? sum / completed : 0.0, percentile(lat, completed, .5),
-         percentile(lat, completed, .95), percentile(lat, completed, .99),
-         completed ? lat[completed - 1] : 0.0);
+  printf("\"latency_ms\":");
+  print_latency(lat, completed);
+  printf(",\"connect_latency_ms\":");
+  if (c->keep_alive)
+    printf("null");
+  else
+    print_latency(connect_lat, completed);
+  printf(",\"request_latency_ms\":");
+  print_latency(request_lat, completed);
+  printf(",\"status_counts\":{");
   int sep = 0;
   for (int i = 0; i < 1000; i++)
     if (counts[i]) {
@@ -704,11 +730,15 @@ static int benchmark(config *c, int requests, int concurrency, int warmup) {
 cleanup:
   for (int i = 0; i < count; i++) {
     free(workers[i].latencies);
+    free(workers[i].connect_latencies);
+    free(workers[i].request_latencies);
     free(workers[i].statuses);
   }
   free(workers);
   free(threads);
   free(lat);
+  free(connect_lat);
+  free(request_lat);
   return errors ? 1 : 0;
 }
 

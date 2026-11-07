@@ -50,6 +50,7 @@ VENDORED_RUNTIME_ENV = \
 	body-stress \
 	bench-tools \
 	bench-tools-test \
+	bench-baseline-test \
 	router-bench \
 	test \
 	runtest \
@@ -140,6 +141,9 @@ bench-tools:
 
 bench-tools-test:
 	$(DUNE) build @test/runtest-bench_report_test @test/runtest-bench_tools_test --force
+
+bench-baseline-test: bench-tools
+	bash ./test/benchmark_baseline_test.sh
 
 body-stress: vendor-build bench-tools
 	$(VENDORED_RUNTIME_ENV) bash ./scripts/body_stress.sh
