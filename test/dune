@@ -1,4 +1,26 @@
 (rule
+ (targets client_registry_unit.exe)
+ (deps client_registry_unit.c ../c/lib/halo_client_registry.c ../c/lib/halo_client_registry.h)
+ (action
+  (run %{cc} -std=c11 -Wall -Wextra -Werror -o %{targets}
+   %{dep:client_registry_unit.c} %{dep:../c/lib/halo_client_registry.c})))
+
+(rule
+ (alias runtest)
+ (action (run ./client_registry_unit.exe)))
+
+(rule
+ (targets client_registry_fault_unit.exe)
+ (deps client_registry_fault_unit.c ../c/lib/halo_client_registry.c ../c/lib/halo_client_registry.h)
+ (action
+  (run %{cc} -std=c11 -Wall -Wextra -Werror -o %{targets}
+   %{dep:client_registry_fault_unit.c})))
+
+(rule
+ (alias runtest)
+ (action (run ./client_registry_fault_unit.exe)))
+
+(rule
  (targets linear_buffer_unit.exe)
  (deps linear_buffer_unit.c ../c/lib/halo_linear_buffer.c ../c/lib/halo_linear_buffer.h)
  (action
@@ -154,3 +176,21 @@
  (name server_config_unit)
  (modules server_config_unit)
  (libraries ocaml-halo alcotest))
+
+(rule
+ (targets bridge_registry_unit.exe)
+ (deps
+  bridge_registry_unit.c
+  (source_tree ../c/runtime)
+  (source_tree ../c/lib)
+  (source_tree ../vendor/libuv/include)
+  (source_tree ../vendor/llhttp/include)
+  (source_tree ../vendor/s2n-tls/api))
+ (action
+  (run %{cc} -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror
+   -I%{ocaml-config:standard_library} -I../vendor/libuv/include
+   -pthread -o %{targets} %{dep:bridge_registry_unit.c})))
+
+(rule
+ (alias runtest)
+ (action (run ./bridge_registry_unit.exe)))

@@ -59,6 +59,13 @@ int halo_bridge_enable(struct halo_runtime* runtime,
   }
   bridge->command_mutex_initialized = 1;
 
+  if (halo_client_registry_init(&bridge->requests, bridge->request_capacity) != 0
+      || halo_client_registry_init(&bridge->replay_claims,
+                                   HALO_BRIDGE_REPLAY_CLAIM_BUCKET_COUNT) != 0) {
+    halo_bridge_release_partial(bridge);
+    return UV_ENOMEM;
+  }
+
   if (pipe(bridge->event_pipe) != 0) {
     code = uv_translate_sys_error(errno);
     halo_bridge_release_partial(bridge);
@@ -95,9 +102,6 @@ void halo_bridge_destroy(struct halo_runtime* runtime) {
   struct halo_bridge* bridge;
   struct halo_bridge_event* event;
   struct halo_bridge_command* command;
-  struct halo_bridge_request_entry* entry;
-  struct halo_bridge_replay_claim_entry* claim;
-  size_t bucket_index;
 
   if (runtime == NULL || runtime->bridge == NULL)
     return;
@@ -112,18 +116,8 @@ void halo_bridge_destroy(struct halo_runtime* runtime) {
     bridge->command_head = command->next;
     halo_bridge_command_destroy(command);
   }
-  while ((entry = bridge->requests) != NULL) {
-    bridge->requests = entry->next;
-    free(entry);
-  }
-  for (bucket_index = 0;
-       bucket_index < HALO_BRIDGE_REPLAY_CLAIM_BUCKET_COUNT;
-       bucket_index++) {
-    while ((claim = bridge->replay_claims[bucket_index]) != NULL) {
-      bridge->replay_claims[bucket_index] = claim->next;
-      free(claim);
-    }
-  }
+  halo_client_registry_destroy(&bridge->requests);
+  halo_client_registry_destroy(&bridge->replay_claims);
   if (bridge->event_pipe[0] >= 0)
     close(bridge->event_pipe[0]);
   if (bridge->event_pipe[1] >= 0)

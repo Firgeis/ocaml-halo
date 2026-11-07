@@ -353,7 +353,9 @@ backtrace is populated. Disconnects raise
 `Halo.Server.Client_disconnected` in the affected request fiber.
 
 The admission bound defaults to 4096 in-flight requests. It can be changed with
-`~max_in_flight_requests`; excess requests receive 503.
+`~max_in_flight_requests`; excess requests receive 503. The request lookup
+table allocates one pointer-sized bucket per configured slot at startup (32 KiB
+for the default 4096 slots on a 64-bit system), plus an entry per active request.
 
 ## TLS
 

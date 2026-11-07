@@ -3,6 +3,7 @@
 
 #include "halo_bridge.h"
 #include "halo_runtime_internal.h"
+#include "../lib/halo_client_registry.h"
 
 #include <pthread.h>
 
@@ -99,22 +100,11 @@ struct halo_bridge_command {
   struct halo_bridge_command* next;
 };
 
-struct halo_bridge_request_entry {
-  uint64_t request_id;
-  struct halo_client* client;
-  struct halo_bridge_request_entry* next;
-};
-
-struct halo_bridge_replay_claim_entry {
-  uint64_t claim_id;
-  struct halo_client* client;
-  struct halo_bridge_replay_claim_entry* next;
-};
-
 /* The event side is produced by the reactor and consumed by Eio. The command
  * side has the opposite ownership direction. Each queue has its own mutex so
  * neither domain holds a lock while performing reactor or OCaml work. The
- * request registry and ID counter are reactor-domain state. */
+ * request and replay-claim registries and their ID counters are reactor-domain
+ * state. */
 struct halo_bridge {
   enum halo_handle_kind kind;
   struct halo_runtime* runtime;
@@ -126,6 +116,7 @@ struct halo_bridge {
   uv_async_t command_async;
   int reactor_running;
   size_t request_capacity;
+  /* Includes terminal events that Eio has not consumed yet. */
   size_t request_count;
   size_t event_capacity;
   size_t event_count;
@@ -138,10 +129,9 @@ struct halo_bridge {
   struct halo_bridge_command* command_tail;
   uint64_t next_request_id;
   uint64_t next_connection_id;
-  struct halo_bridge_request_entry* requests;
+  struct halo_client_registry requests;
   uint64_t next_replay_claim_id;
-  struct halo_bridge_replay_claim_entry*
-    replay_claims[HALO_BRIDGE_REPLAY_CLAIM_BUCKET_COUNT];
+  struct halo_client_registry replay_claims;
 };
 
 char* halo_bridge_copy_bytes(const char* source, size_t length);

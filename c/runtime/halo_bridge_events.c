@@ -315,87 +315,30 @@ static void halo_bridge_release_request(struct halo_bridge* bridge) {
 
 struct halo_client* halo_bridge_find_client(struct halo_bridge* bridge,
                                             uint64_t request_id) {
-  struct halo_bridge_request_entry* entry;
-
-  for (entry = bridge->requests; entry != NULL; entry = entry->next) {
-    if (entry->request_id == request_id)
-      return entry->client;
-  }
-  return NULL;
+  return halo_client_registry_lookup(&bridge->requests, request_id);
 }
 
 static int halo_bridge_register_client(struct halo_bridge* bridge,
                                        struct halo_client* client,
                                        uint64_t request_id) {
-  struct halo_bridge_request_entry* entry;
-
-  entry = malloc(sizeof(*entry));
-  if (entry == NULL)
-    return -1;
-  entry->request_id = request_id;
-  entry->client = client;
-  entry->next = bridge->requests;
-  bridge->requests = entry;
-  return 0;
+  return halo_client_registry_insert(&bridge->requests, request_id, client);
 }
 
 static void halo_bridge_unregister_client(struct halo_bridge* bridge,
                                           uint64_t request_id) {
-  struct halo_bridge_request_entry** cursor;
-
-  cursor = &bridge->requests;
-  while (*cursor != NULL) {
-    struct halo_bridge_request_entry* entry;
-
-    entry = *cursor;
-    if (entry->request_id == request_id) {
-      *cursor = entry->next;
-      free(entry);
-      return;
-    }
-    cursor = &entry->next;
-  }
+  (void) halo_client_registry_remove(&bridge->requests, request_id);
 }
 
 static int halo_bridge_register_replay_claim(struct halo_bridge* bridge,
                                              struct halo_client* client,
                                              uint64_t claim_id) {
-  struct halo_bridge_replay_claim_entry* entry;
-  size_t bucket_index;
-
-  entry = malloc(sizeof(*entry));
-  if (entry == NULL)
-    return -1;
-  bucket_index = claim_id % HALO_BRIDGE_REPLAY_CLAIM_BUCKET_COUNT;
-  entry->claim_id = claim_id;
-  entry->client = client;
-  entry->next = bridge->replay_claims[bucket_index];
-  bridge->replay_claims[bucket_index] = entry;
-  return 0;
+  return halo_client_registry_insert(&bridge->replay_claims, claim_id, client);
 }
 
 static struct halo_client* halo_bridge_unregister_replay_claim(
     struct halo_bridge* bridge,
     uint64_t claim_id) {
-  struct halo_bridge_replay_claim_entry** cursor;
-  size_t bucket_index;
-
-  bucket_index = claim_id % HALO_BRIDGE_REPLAY_CLAIM_BUCKET_COUNT;
-  cursor = &bridge->replay_claims[bucket_index];
-  while (*cursor != NULL) {
-    struct halo_bridge_replay_claim_entry* entry;
-    struct halo_client* client;
-
-    entry = *cursor;
-    if (entry->claim_id == claim_id) {
-      client = entry->client;
-      *cursor = entry->next;
-      free(entry);
-      return client;
-    }
-    cursor = &entry->next;
-  }
-  return NULL;
+  return halo_client_registry_remove(&bridge->replay_claims, claim_id);
 }
 
 static struct halo_bridge_event* halo_bridge_simple_event(
