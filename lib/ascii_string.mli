@@ -1,6 +1,7 @@
 (** Dependency-free parsing and validation helpers for ASCII protocol text. *)
 
 val is_digit : char -> bool
+val is_http_token_char : char -> bool
 val is_hex_digit : char -> bool
 val is_lowercase_letter : char -> bool
 val is_lower_hex_digit : char -> bool

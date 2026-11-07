@@ -221,3 +221,8 @@
      (setenv BENCH_FIXTURE %{exe:bench_server_fixture.exe}
       (setenv TLS_CERT %{dep:fixtures/tls-cert.pem}
        (setenv TLS_KEY %{dep:fixtures/tls-key.pem} (run %{test})))))))))
+
+(test
+ (name forwarded_unit)
+ (modules forwarded_unit)
+ (libraries ocaml-halo alcotest eio_main))

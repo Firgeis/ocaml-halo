@@ -133,6 +133,11 @@ module Http = struct
     in
     let headers =
       Request_headers.raw_headers event.headers
+      |> List.filter (fun (name, _) ->
+          let name = String.lowercase_ascii name in
+          not
+            (String.equal name "forwarded"
+            || String.starts_with ~prefix:"x-forwarded-" name))
       |> List.map (fun (name, value) -> Printf.sprintf "%s: %s\r\n" name value)
       |> String.concat ""
     in
@@ -445,8 +450,8 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
       state.request_cancel <- None;
       Hashtbl.remove requests event.request_id;
       if Reactor.trace_enabled then
-        Reactor.trace "handler finish request=%Ld completed=%b"
-          event.request_id !completed;
+        Reactor.trace "handler finish request=%Ld completed=%b" event.request_id
+          !completed;
       if not !completed then
         Eio.Cancel.protect (fun () ->
             try Reactor.close_request runtime event.request_id

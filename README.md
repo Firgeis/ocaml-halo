@@ -66,6 +66,9 @@ Request limits are configured independently on `Server.Config.create`:
 defaults are 8 KiB, 32 KiB, and 1 MiB, respectively. Requests exceeding them
 receive 414, 431, and 413.
 
+Trusted proxy forwarding is opt-in. See the [forwarding guide](docs/forwarded.md)
+for policy configuration, trust boundaries, and effective request metadata.
+
 ## Routes and requests
 
 Routes use applicative matchers and compose with `<|>`:

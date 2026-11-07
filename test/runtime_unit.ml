@@ -1446,6 +1446,100 @@ let test_request_snapshot_survives_connection_reuse () =
                "snapshot survives parser storage reuse and collection" true
                (contains "snapshot-retained\n" second))))
 
+let forwarded_router ?(header_mode = Halo.Forwarded.Forwarded_only) () =
+  let policy =
+    match
+      Halo.Forwarded.create ~trusted_proxies:[ "127.0.0.1" ] ~header_mode ()
+    with
+    | Ok policy -> policy
+    | Error message -> failwith message
+  in
+  Halo.Router.(
+    route
+      (Matcher.pure (fun request ->
+           let address =
+             match Request.effective_client_address request with
+             | None -> "none"
+             | Some ip -> Unix.string_of_inet_addr ip
+           in
+           text Status.ok
+             (Printf.sprintf "client=%s;scheme=%s;tls=%b\n" address
+                (Request.effective_scheme request)
+                (Request.is_tls request))))
+    |> with_forwarded_headers policy)
+
+let test_forwarded_live_keepalive () =
+  ignore
+    (with_live_server ~router:(forwarded_router ()) (fun () ->
+         let socket = connect_plaintext () in
+         Fun.protect
+           ~finally:(fun () -> Unix.close socket)
+           (fun () ->
+             write_socket_all socket
+               "GET / HTTP/1.1\r\n\
+                Host: localhost\r\n\
+                Forwarded: for=192.0.2.7;proto=https\r\n\
+                \r\n";
+             let first =
+               read_socket_until socket
+                 "client=192.0.2.7;scheme=https;tls=false\n"
+             in
+             Alcotest.(check bool)
+               "forwarded HTTPS over plaintext" true
+               (contains "client=192.0.2.7;scheme=https;tls=false\n" first);
+             write_socket_all socket
+               "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+             let second =
+               read_socket_until socket
+                 "client=127.0.0.1;scheme=http;tls=false\n"
+             in
+             Alcotest.(check bool)
+               "next request uses direct metadata" true
+               (contains "client=127.0.0.1;scheme=http;tls=false\n" second))))
+
+let test_forwarded_live_tls () =
+  let tls =
+    Halo.Server.Config.tls ~cert_chain_path:(tls_cert_fixture_path ())
+      ~private_key_path:(tls_key_fixture_path ())
+      ~minimum_protocol_version:Halo.Server.TLS13 ()
+  in
+  ignore
+    (with_live_server ~tls ~router:(forwarded_router ()) (fun () ->
+         let result =
+           run_s2nc ~echo:true
+             ~input:
+               "GET / HTTP/1.1\r\n\
+                Host: localhost\r\n\
+                Forwarded: for=192.0.2.8;proto=http\r\n\
+                Connection: close\r\n\
+                \r\n"
+             ()
+         in
+         assert_process_success result;
+         Alcotest.(check bool)
+           "forwarded HTTP over TLS" true
+           (contains "client=192.0.2.8;scheme=http;tls=true\n" result.stdout)))
+
+let test_forwarded_invalid_ipv6_over_http () =
+  List.iter
+    (fun (header_mode, header) ->
+      ignore
+        (with_live_server ~router:(forwarded_router ~header_mode ()) (fun () ->
+             let response =
+               plaintext_request
+                 ~until:"client=127.0.0.1;scheme=http;tls=false\n"
+                 ("GET / HTTP/1.1\r\nHost: localhost\r\n" ^ header
+                ^ "\r\nConnection: close\r\n\r\n")
+             in
+             Alcotest.(check bool)
+               "request continues with direct peer" true
+               (contains "HTTP/1.1 200 OK" response
+               && contains "client=127.0.0.1;scheme=http;tls=false\n" response))))
+    [
+      (Halo.Forwarded.Forwarded_only, "Forwarded: for=\"[::00000]\"");
+      (Halo.Forwarded.X_forwarded_only, "X-Forwarded-For: ::00000");
+    ]
+
 let test_routing_defers_header_materialization () =
   let decoded = ref 0 in
   let retained = ref None in
@@ -2072,6 +2166,11 @@ let () =
             test_keep_alive_requests_share_connection_metadata;
           Alcotest.test_case "request snapshot survives connection reuse" `Quick
             test_request_snapshot_survives_connection_reuse;
+          Alcotest.test_case "forwarded keep-alive isolation" `Quick
+            test_forwarded_live_keepalive;
+          Alcotest.test_case "forwarded TLS" `Slow test_forwarded_live_tls;
+          Alcotest.test_case "invalid forwarded IPv6 falls back" `Quick
+            test_forwarded_invalid_ipv6_over_http;
           Alcotest.test_case "routing defers header materialization" `Quick
             test_routing_defers_header_materialization;
           Alcotest.test_case "chunked body callbacks are batched" `Quick

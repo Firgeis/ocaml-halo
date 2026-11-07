@@ -612,6 +612,94 @@ let test_middleware_wraps_not_found_and_method_not_allowed () =
        "method not allowed\n")
     (Halo.Router.dispatch router (request POST "/health"))
 
+let test_forwarding_preserves_middleware () =
+  let calls = ref [] in
+  let middleware label next request =
+    calls := label :: !calls;
+    next request |> Halo.Router.with_header ("X-" ^ label) "present"
+  in
+  let policy =
+    match
+      Halo.Forwarded.create ~trusted_proxies:[]
+        ~header_mode:Halo.Forwarded.Forwarded_only ()
+    with
+    | Ok policy -> policy
+    | Error message -> failwith message
+  in
+  let base = Halo.Router.use (middleware "inner") health_router in
+  let wrapped =
+    base
+    |> Halo.Router.with_forwarded_headers policy
+    |> Halo.Router.with_forwarded_headers policy
+    |> Halo.Router.use (middleware "outer")
+  in
+  let expected = Halo.Router.use (middleware "outer") base in
+  List.iter
+    (fun (meth, target) ->
+      calls := [];
+      let response = Halo.Router.dispatch expected (request meth target) in
+      let expected_calls = !calls in
+      calls := [];
+      let actual = Halo.Router.dispatch wrapped (request meth target) in
+      check_response
+        ("forwarding preserves response for " ^ target)
+        response actual;
+      Alcotest.(check (list string))
+        "middleware runs once in the same order" expected_calls !calls)
+    [
+      (GET, "/health"); (HEAD, "/health"); (GET, "/missing"); (POST, "/health");
+    ];
+  let require_auth _next _request =
+    Halo.Router.text Status.unauthorized "unauthorized\n"
+  in
+  let secured =
+    health_router
+    |> Halo.Router.use require_auth
+    |> Halo.Router.with_forwarded_headers policy
+  in
+  List.iter
+    (fun (meth, target) ->
+      check_response "middleware can protect fallback responses"
+        (Halo.Router.text Status.unauthorized "unauthorized\n")
+        (Halo.Router.dispatch secured (request meth target)))
+    [ (GET, "/missing"); (POST, "/health") ]
+
+let test_forwarding_does_not_repeat_preprocessing () =
+  let policy =
+    match
+      Halo.Forwarded.create ~trusted_proxies:[]
+        ~header_mode:Halo.Forwarded.Forwarded_only ()
+    with
+    | Ok policy -> policy
+    | Error message -> failwith message
+  in
+  let calls = ref 0 in
+  let rewrite _request =
+    incr calls;
+    Halo.Router.Rewrite
+      {
+        request_method = None;
+        raw_target = None;
+        headers = Some [ ("Host", "rewritten") ];
+        body = None;
+      }
+  in
+  let router =
+    health_router
+    |> Halo.Router.use_pre rewrite
+    |> Halo.Router.with_forwarded_headers policy
+    |> Halo.Router.with_forwarded_headers policy
+  in
+  List.iter
+    (fun (meth, expected_status) ->
+      calls := 0;
+      let response = Halo.Router.dispatch router (request meth "/health") in
+      Alcotest.(check int)
+        "status after rewrite" expected_status
+        (Halo.Router.Response.status response |> Halo.Router.Status.to_int);
+      Alcotest.(check int) "pre-middleware runs once" 1 !calls)
+    [ (HEAD, 200); (POST, 405) ]
+
 let test_pre_middleware_can_rewrite_before_route_matching () =
   let rewrite_legacy request =
     match Halo.Router.Request.raw_target request with
@@ -841,6 +929,10 @@ let () =
             test_middleware_can_short_circuit;
           Alcotest.test_case "middleware wraps not found and method not allowed"
             `Quick test_middleware_wraps_not_found_and_method_not_allowed;
+          Alcotest.test_case "forwarding preserves middleware" `Quick
+            test_forwarding_preserves_middleware;
+          Alcotest.test_case "forwarding does not repeat preprocessing" `Quick
+            test_forwarding_does_not_repeat_preprocessing;
           Alcotest.test_case "pre middleware can rewrite before route matching"
             `Quick test_pre_middleware_can_rewrite_before_route_matching;
           Alcotest.test_case "pre middleware can respond early" `Quick

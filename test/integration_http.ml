@@ -585,8 +585,8 @@ let test_tls_buffer_reuse protocol =
   with_server ~env:(tls_server_env ()) (fun () ->
       let command =
         Printf.sprintf
-          "openssl s_client -connect 127.0.0.1:%d -servername localhost \
-           -quiet -%s -CAfile %s"
+          "openssl s_client -connect 127.0.0.1:%d -servername localhost -quiet \
+           -%s -CAfile %s"
           port protocol
           (Filename.quote (tls_cert_fixture_path ()))
       in
@@ -605,8 +605,10 @@ let test_tls_buffer_reuse protocol =
                 String.init size (fun i -> Char.chr (33 + ((i + index) mod 90)))
               in
               Printf.fprintf output
-                "POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: \
-                 %d\r\n\r\n"
+                "POST /submit HTTP/1.1\r\n\
+                 Host: localhost\r\n\
+                 Content-Length: %d\r\n\
+                 \r\n"
                 size;
               (* Flush uneven pieces to exercise partial TLS input records. *)
               let rec send offset =
@@ -623,7 +625,10 @@ let test_tls_buffer_reuse protocol =
                 ~status:"HTTP/1.1 200 OK" ~body:expected response)
             [ 1; 8191; 128 * 1024; 3; 65537; 17; 1024 ];
           output_string output
-            "GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+            "GET /stream HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Connection: close\r\n\
+             \r\n";
           flush output;
           let response = read_until_eof ~timeout:2.0 fd (Buffer.create 256) in
           match split_headers_body response with
@@ -1268,11 +1273,13 @@ let test_header_names_and_values_across_reads () =
         (fun () ->
           Unix.connect fd (Unix.ADDR_INET (host, port));
           let pieces =
-            [ "GET /inspect/header/x-empty HTTP/1.1\r\nHo";
+            [
+              "GET /inspect/header/x-empty HTTP/1.1\r\nHo";
               "st: local";
               "host\r\nX-Emp";
               "ty: abc";
-              "def\r\nConnection: close\r\n\r\n" ]
+              "def\r\nConnection: close\r\n\r\n";
+            ]
           in
           List.iter
             (fun piece ->
@@ -1943,6 +1950,30 @@ let test_trace_echoes_request_message () =
         "trace content type" true
         (contains "Content-Type: message/http" response))
 
+let test_trace_omits_forwarding_headers () =
+  with_server (fun () ->
+      let response =
+        request_response
+          "TRACE /trace HTTP/1.1\r\n\
+           Host: localhost\r\n\
+           FoRwArDeD: for=192.0.2.1\r\n\
+           X-FoRwArDeD-For: 192.0.2.2\r\n\
+           x-forwarded-custom: secret\r\n\
+           X-Other: retained\r\n\
+           Connection: close\r\n\
+           \r\n"
+      in
+      let expected =
+        "TRACE /trace HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         X-Other: retained\r\n\
+         Connection: close\r\n\
+         \r\n"
+      in
+      assert_response ~connection:"close"
+        ~content_length:(String.length expected) ~status:"HTTP/1.1 200 OK"
+        ~body:expected response)
+
 let test_connect_authority_form_returns_not_implemented () =
   with_server (fun () ->
       let response =
@@ -2157,6 +2188,8 @@ let () =
             test_options_asterisk_returns_server_capabilities;
           timed_test_case "TRACE echoes request message" `Quick
             test_trace_echoes_request_message;
+          timed_test_case "TRACE omits forwarding headers" `Quick
+            test_trace_omits_forwarding_headers;
           timed_test_case "CONNECT authority-form returns not implemented"
             `Quick test_connect_authority_form_returns_not_implemented;
           Alcotest.test_case

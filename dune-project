@@ -19,6 +19,7 @@
   (conf-cmake :build)
   eio
   uri
+  ipaddr
   (eio_main :with-test)
   (alcotest :with-test)
   yojson))

@@ -184,25 +184,11 @@ let vary headers =
     let tokens = List.rev reversed in
     Router.Headers.set_exn "Vary" (String.concat ", " tokens) headers
 
-type list_state = Unquoted | Quoted | Escaped
-
-(* HTTP list fields can contain commas inside quoted strings. *)
+(* Cache-Control tolerates malformed quoted strings as before. *)
 let split_http_list value =
-  let rec loop start index state result =
-    if index = String.length value then
-      List.rev (String.sub value start (index - start) :: result)
-    else
-      match (state, value.[index]) with
-      | Unquoted, ',' ->
-          loop (index + 1) (index + 1) Unquoted
-            (String.sub value start (index - start) :: result)
-      | Unquoted, '"' -> loop start (index + 1) Quoted result
-      | Quoted, '\\' -> loop start (index + 1) Escaped result
-      | Quoted, '"' -> loop start (index + 1) Unquoted result
-      | Escaped, _ -> loop start (index + 1) Quoted result
-      | (Unquoted | Quoted), _ -> loop start (index + 1) state result
-  in
-  loop 0 0 Unquoted []
+  match Http_syntax.split_quoted ~strict:false ~separator:',' value with
+  | Ok items -> items
+  | Error () -> assert false
 
 let has_no_transform values =
   values

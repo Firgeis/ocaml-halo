@@ -269,6 +269,20 @@ module Request : sig
       Unbracketed IPv6 and IPvFuture are unsupported and also yield [None]. Use
       [header request "Host"] to read the original header value. *)
 
+  val effective_client_address : t -> Unix.inet_addr option
+  (** The resolved client IP, or the socket IP if forwarding is disabled or
+      unusable. Synthetic and Unix-domain requests have no socket IP. *)
+
+  val effective_host : t -> parsed_host option
+  (** The resolved host, falling back to the original parsed Host header. *)
+
+  val effective_scheme : t -> string
+  (** The resolved [http] or [https] scheme, falling back to the connection's
+      TLS-derived scheme. Synthetic requests default to [http]. *)
+
+  val forwarded_info : t -> Forwarded.info
+  (** Resolution status, issues and the source of each effective field. *)
+
   val fold_headers : t -> init:'a -> f:('a -> string -> string -> 'a) -> 'a
 
   val copy_headers : t -> (string * string) list
@@ -316,6 +330,9 @@ module Matcher : sig
       case-insensitive. A supplied port must match; an omitted port accepts any
       request port. Malformed or missing hosts produce a normal route miss. *)
 
+  val effective_host : string -> unit t
+  (** Match the effective host using the same matching rules as [host]. *)
+
   val path_segment : string -> unit t
   (** Match one path segment. The initial slash is not a segment, while empty
       segments created by repeated or trailing slashes are significant. The root
@@ -345,6 +362,11 @@ val route : ?template:string -> handler Matcher.t -> t
 val scope : unit Matcher.t -> t -> t
 val scope_path_segment : string -> t -> t
 val use_pre : pre_middleware -> t -> t
+
+val with_forwarded_headers : Forwarded.t -> t -> t
+(** Apply a trusted forwarding policy before this router's pre-middleware and
+    matching. Nested policies resolve from the original peer and headers. *)
+
 val use : middleware -> t -> t
 val empty : t
 val or_else : t -> t -> t

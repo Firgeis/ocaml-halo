@@ -318,6 +318,21 @@ let test_exclusions () =
   Alcotest.(check (list string))
     "quoted value is not directive" [ "gzip" ]
     (header "content-encoding" result);
+  let result =
+    apply ~fields
+      (R.text S.ok payload
+      |> R.with_header "Cache-Control" "private=\"unfinished,no-transform")
+  in
+  Alcotest.(check (list string))
+    "unterminated quoted value retains permissive behavior" [ "gzip" ]
+    (header "content-encoding" result);
+  let result =
+    apply ~fields
+      (R.text S.ok payload
+      |> R.with_header "Cache-Control" "private=\"x,\\\"y\", no-transform")
+  in
+  Alcotest.(check string)
+    "escaped quote preserves following directive" payload (body result);
   let existing = R.text S.ok payload |> R.with_header "Content-Encoding" "br" in
   Alcotest.(check bool)
     "existing coding untouched" true

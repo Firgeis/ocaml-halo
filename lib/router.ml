@@ -197,15 +197,9 @@ module Headers = struct
   type t = (string * string) list
   type error = Invalid_name of string | Invalid_value of { name : string }
 
-  let is_tchar = function
-    | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_'
-    | '`' | '|' | '~' ->
-        true
-    | '0' .. '9' | 'A' .. 'Z' | 'a' .. 'z' -> true
-    | _ -> false
-
   let is_valid_name name =
-    String.length name > 0 && String.for_all is_tchar name
+    String.length name > 0
+    && String.for_all Ascii_string.is_http_token_char name
 
   let is_valid_value value =
     String.for_all
@@ -374,6 +368,8 @@ type request_view = {
   target : request_target;
   headers : (string * string) list Lazy.t;
   raw_headers : (string * string) list Lazy.t;
+  original_headers : (string * string) list Lazy.t;
+  forwarding : Forwarded.Private.resolution option;
   context : request_context;
 }
 
@@ -400,10 +396,17 @@ type route_match =
 type route_eval = { route_match : route_match; effective_input : input }
 type route_result = input -> route_eval
 
+type preprocessing_stage = {
+  policy : Forwarded.t option;
+  middleware : pre_middleware list;
+}
+
 type t = {
   run : route_result;
   middleware : middleware list;
-  pre_middleware : pre_middleware list;
+  (* Outer-to-inner policy stages, each with its own pre-middleware in reverse
+     registration order. Route probes call [run] without replaying these. *)
+  preprocessing : preprocessing_stage list;
 }
 
 let normalize_header_name name = String.lowercase_ascii name
@@ -618,6 +621,8 @@ let apply_request_patch (request_view : request_view) (patch : request_patch) =
     target = parse_request_target request_method raw_target;
     headers;
     raw_headers = headers;
+    original_headers = request_view.original_headers;
+    forwarding = request_view.forwarding;
     context = { request_view.context with body };
   }
 
@@ -680,6 +685,35 @@ module Request = struct
     | [ value ] -> Host.parse value
     | _ -> None
 
+  let direct_host request =
+    match headers_from_list (Lazy.force request.original_headers) "host" with
+    | [ value ] -> Host.parse value
+    | _ -> None
+
+  let effective_client_address request =
+    match Option.bind request.forwarding Forwarded.Private.address with
+    | Some address -> Some (Ipaddr_unix.to_inet_addr address)
+    | None -> (
+        match request.context.connection_info with
+        | Some { remote_address = Unix.ADDR_INET (address, _); _ } ->
+            Some address
+        | _ -> None)
+
+  let effective_host request =
+    match Option.bind request.forwarding Forwarded.Private.host with
+    | Some (hostname, port) -> Some { hostname; port }
+    | None -> direct_host request
+
+  let effective_scheme request =
+    match Option.bind request.forwarding Forwarded.Private.scheme with
+    | Some scheme -> scheme
+    | None -> if is_tls request then "https" else "http"
+
+  let forwarded_info request =
+    match request.forwarding with
+    | Some resolution -> Forwarded.Private.info resolution
+    | None -> Forwarded.Private.disabled
+
   let fold_headers request ~init ~f =
     fold_header_list (Lazy.force request.headers) ~init ~f
 
@@ -737,6 +771,14 @@ module Matcher = struct
     let expected = Host.parse expected in
     fun input ->
       match (Request.host input.request_view, expected) with
+      | Some actual, Some expected when Host.matches ~actual ~expected ->
+          Match ((), input)
+      | _ -> No_match
+
+  let effective_host expected =
+    let expected = Host.parse expected in
+    fun input ->
+      match (Request.effective_host input.request_view, expected) with
       | Some actual, Some expected when Host.matches ~actual ~expected ->
           Match ((), input)
       | _ -> No_match
@@ -832,7 +874,7 @@ let route ?template matcher =
   {
     run = to_route_result template matcher;
     middleware = [];
-    pre_middleware = [];
+    preprocessing = [];
   }
 
 let attach_middleware middleware = function
@@ -861,27 +903,58 @@ let rec run_pre_middleware middleware request_view rewritten =
           let rewritten_request = apply_request_patch request_view patch in
           run_pre_middleware rest rewritten_request true)
 
+let apply_forwarding policy input =
+  match policy with
+  | None -> input
+  | Some policy ->
+      let request = input.request_view in
+      let peer =
+        match request.context.connection_info with
+        | Some { remote_address = Unix.ADDR_INET (address, _); _ } ->
+            Some (Ipaddr_unix.of_inet_addr address)
+        | _ -> None
+      in
+      let resolution =
+        match peer with
+        | Some peer when Forwarded.Private.trusted policy peer ->
+            Forwarded.Private.resolve policy ~peer
+              (Lazy.force request.original_headers)
+        | _ -> Forwarded.Private.untrusted
+      in
+      {
+        input with
+        request_view = { request with forwarding = Some resolution };
+      }
+
 let run_router router input =
-  match (router.pre_middleware, router.middleware) with
-  | [], [] -> router.run input
-  | _ -> (
-      let pre_result, request_view, rewritten =
-        run_pre_middleware
-          (List.rev router.pre_middleware)
-          input.request_view false
-      in
-      let effective_input =
-        if rewritten then input_of_request_view request_view else input
-      in
-      match pre_result with
-      | Pre_respond response ->
-          {
-            route_match = Route_rejected (response, router.middleware, None);
-            effective_input;
-          }
-      | Pre_continue ->
-          router.run effective_input |> attach_middleware_eval router.middleware
-      )
+  let rec preprocess input = function
+    | [] -> router.run input |> attach_middleware_eval router.middleware
+    | stage :: rest -> (
+        let input = apply_forwarding stage.policy input in
+        let result, request_view, rewritten =
+          run_pre_middleware
+            (List.rev stage.middleware)
+            input.request_view false
+        in
+        let effective_input =
+          if rewritten then input_of_request_view request_view else input
+        in
+        match result with
+        | Pre_respond response ->
+            {
+              route_match = Route_rejected (response, router.middleware, None);
+              effective_input;
+            }
+        | Pre_continue -> preprocess effective_input rest)
+  in
+  preprocess input router.preprocessing
+
+let with_forwarded_headers policy router =
+  {
+    router with
+    preprocessing =
+      { policy = Some policy; middleware = [] } :: router.preprocessing;
+  }
 
 let scope prefix_matcher router =
   let run input =
@@ -895,13 +968,19 @@ let scope prefix_matcher router =
     | Matcher.No_match ->
         { route_match = Route_missing; effective_input = input }
   in
-  { run; middleware = []; pre_middleware = [] }
+  { run; middleware = []; preprocessing = [] }
 
 let scope_path_segment segment router =
   scope Matcher.(path_segment segment) router
 
 let use_pre middleware router =
-  { router with pre_middleware = middleware :: router.pre_middleware }
+  let preprocessing =
+    match router.preprocessing with
+    | [] -> [ { policy = None; middleware = [ middleware ] } ]
+    | stage :: rest ->
+        { stage with middleware = middleware :: stage.middleware } :: rest
+  in
+  { router with preprocessing }
 
 let use middleware router =
   { router with middleware = middleware :: router.middleware }
@@ -911,7 +990,7 @@ let empty =
     run =
       (fun input -> { route_match = Route_missing; effective_input = input });
     middleware = [];
-    pre_middleware = [];
+    preprocessing = [];
   }
 
 let run_or_else left right input =
@@ -921,7 +1000,7 @@ let run_or_else left right input =
   | { route_match = Route_missing; _ } -> run_router right input
 
 let or_else left right =
-  { run = run_or_else left right; middleware = []; pre_middleware = [] }
+  { run = run_or_else left right; middleware = []; preprocessing = [] }
 
 let ( <|> ) = or_else
 
@@ -1048,6 +1127,8 @@ let dispatch router (request : request) =
           target = request.target;
           headers = Lazy.from_val request.headers;
           raw_headers = Lazy.from_val request.headers;
+          original_headers = Lazy.from_val request.headers;
+          forwarding = None;
           context;
         };
       request_method = Some request.request_method;
@@ -1069,6 +1150,8 @@ module Runtime = struct
         target;
         headers;
         raw_headers;
+        original_headers = raw_headers;
+        forwarding = None;
         context =
           {
             body;

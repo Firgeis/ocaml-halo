@@ -66,6 +66,45 @@ let parse value =
         let suffix = String.sub value colon (length - colon) in
         parse_suffix hostname suffix valid_reg_name
 
+let unsupported_host h =
+  match Ipaddr.of_string h with
+  | Ok (Ipaddr.V6 _) -> true
+  | _ ->
+      let len = String.length h in
+      if len > 0 && h.[len - 1] = ':' then
+        Option.is_some (parse (String.sub h 0 (len - 1)))
+      else if len > 3 && h.[0] = '[' && (h.[1] = 'v' || h.[1] = 'V') then
+        match String.index_opt h ']' with
+        | None -> false
+        | Some close -> (
+            let suffix = String.sub h (close + 1) (len - close - 1) in
+            let suffix_valid =
+              suffix = ""
+              || suffix.[0] = ':'
+                 && String.for_all Ascii_string.is_digit
+                      (String.sub suffix 1 (String.length suffix - 1))
+            in
+            match String.index_from_opt h 2 '.' with
+            | Some dot when dot > 2 && dot + 1 < close ->
+                suffix_valid
+                && String.for_all Ascii_string.is_hex_digit
+                     (String.sub h 2 (dot - 2))
+                && String.for_all
+                     (fun c ->
+                       Ascii_string.is_uri_unreserved c
+                       || Ascii_string.is_uri_sub_delim c
+                       || c = ':')
+                     (String.sub h (dot + 1) (close - dot - 1))
+            | _ -> false)
+      else false
+
+type parse_error = Malformed | Unsupported
+
+let parse_forwarded value =
+  match parse value with
+  | Some host -> Ok host
+  | None -> Error (if unsupported_host value then Unsupported else Malformed)
+
 let matches ~actual ~expected =
   String.equal actual.hostname expected.hostname
   && Option.fold ~none:true

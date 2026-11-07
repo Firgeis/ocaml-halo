@@ -1,5 +1,14 @@
 let is_digit = function '0' .. '9' -> true | _ -> false
 
+let is_http_token_char = function
+  | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`'
+  | '|' | '~'
+  | '0' .. '9'
+  | 'A' .. 'Z'
+  | 'a' .. 'z' ->
+      true
+  | _ -> false
+
 let is_hex_digit = function
   | '0' .. '9' | 'A' .. 'F' | 'a' .. 'f' -> true
   | _ -> false

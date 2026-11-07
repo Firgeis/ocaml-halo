@@ -17,7 +17,9 @@
  (public_name ocaml-halo)
  (modules
   ascii_string
+  http_syntax
   host
+  forwarded
   int64_encoding
   otlp_http_transport
   body
@@ -36,6 +38,7 @@
   sse)
  (private_modules
   ascii_string
+  http_syntax
   host
   int64_encoding
   otlp_http_transport
@@ -43,7 +46,7 @@
   server_backend
   reactor
   request_runtime)
- (libraries eio eio.unix uri)
+ (libraries eio eio.unix uri ipaddr.unix)
  (foreign_archives ../c/halo_stubs ../c/halo_s2n ../c/halo_uv)
  (c_library_flags
   (-lcrypto -lpthread -lm -lz
