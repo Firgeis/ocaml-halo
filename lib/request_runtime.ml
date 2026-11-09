@@ -176,6 +176,7 @@ type listener = {
 
 type t = {
   runtime : Server_backend.t;
+  owner_domain : Domain.id;
   requests : (int64, request_state) Hashtbl.t;
   connection_infos : (int64, Router.connection_info) Hashtbl.t;
   metrics_waiters :
@@ -197,6 +198,7 @@ let listener ~early_data_policy ~early_data_replay_store router =
 let create ~runtime ~listeners ~bridge_switch ~on_error ~telemetry ~metrics =
   {
     runtime;
+    owner_domain = Domain.self ();
     requests = Hashtbl.create 128;
     connection_infos = Hashtbl.create 128;
     metrics_waiters = Hashtbl.create 4;
@@ -792,6 +794,8 @@ let begin_drain t =
     Reactor.begin_drain t.runtime)
 
 let metrics t =
+  if Domain.self () <> t.owner_domain then
+    invalid_arg "Server.metrics must be called from the server's domain";
   let query_id = t.next_metrics_query in
   t.next_metrics_query <- Int64.succ query_id;
   let promise, resolve = Eio.Promise.create () in

@@ -337,6 +337,10 @@ Halo.Server.run ~shutdown ~handle_sigint:false [ config ]
 The optional `on_ready` callback receives a `Server.running` handle after all
 listeners are bound. Use the handle with `Server.metrics` to get a consistent
 metrics snapshot or with `Server.shutdown` to request shutdown.
+`Server.metrics` and `Server.collect_metrics` must be called from an Eio fiber
+in the domain running the server. A supervisor in another domain can request
+shutdown directly; to obtain metrics, arrange for a fiber in the server domain
+to collect and send the snapshot.
 
 ```ocaml
 Halo.Server.run

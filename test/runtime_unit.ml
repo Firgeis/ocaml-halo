@@ -1709,6 +1709,45 @@ let test_runtime_metrics_defaults () =
   Alcotest.(check bool)
     "backpressure disabled" false metrics.backpressure_enabled
 
+let test_metrics_require_server_domain () =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let started, notify_started = Eio.Promise.create () in
+  let router =
+    Halo.Router.(
+      route Matcher.(let+ () = path_end in fun _ -> text Status.ok "ok"))
+  in
+  let config = Halo.Server.Config.create ~port:8443 router in
+  let server =
+    Eio.Fiber.fork_promise ~sw (fun () ->
+        try
+          Halo.Server.run ~handle_sigint:false
+            ~on_ready:(fun running ->
+              Eio.Promise.resolve notify_started (Ok running))
+            [ config ]
+        with exn ->
+          ignore (Eio.Promise.try_resolve notify_started (Error exn));
+          raise exn)
+  in
+  let running = Result.get_ok (Eio.Promise.await started) in
+  Fun.protect
+    ~finally:(fun () ->
+      Halo.Server.shutdown running;
+      Eio.Promise.await_exn server)
+    (fun () ->
+      Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
+          let rejects f =
+            match f () with
+            | _ -> false
+            | exception Invalid_argument _ -> true
+          in
+          Alcotest.(check bool) "metrics rejects another domain" true
+            (rejects (fun () -> Halo.Server.metrics running));
+          Alcotest.(check bool) "collect_metrics rejects another domain" true
+            (rejects (fun () -> Halo.Server.collect_metrics running)));
+      ignore (Halo.Server.metrics running);
+      ignore (Halo.Server.collect_metrics running))
+
 let test_request_metrics_cover_live_server () =
   let collector =
     Halo.Metrics.create ~duration_buckets:[ 1.0 ] ~size_buckets:[ 4.0; 8.0 ] ()
@@ -2215,6 +2254,8 @@ let () =
         [
           Alcotest.test_case "default snapshot" `Quick
             test_runtime_metrics_defaults;
+          Alcotest.test_case "metrics require server domain" `Quick
+            test_metrics_require_server_domain;
           Alcotest.test_case "request metrics cover live server" `Quick
             test_request_metrics_cover_live_server;
           Alcotest.test_case "explicit keys count full and resumed handshakes"

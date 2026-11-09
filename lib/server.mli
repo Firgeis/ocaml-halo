@@ -56,14 +56,17 @@ type running
 (** A live server handle. It is valid until [run] returns. *)
 
 val metrics : running -> runtime_metrics
-(** Request a metrics snapshot from the reactor domain. *)
+(** Request a metrics snapshot from the reactor. Must be called from an Eio
+    fiber in the domain running [Server.run]; raises [Invalid_argument] when
+    called from another domain. *)
 
 val collect_metrics : running -> Metrics.snapshot
 (** Request a fresh reactor snapshot and combine it with the cumulative HTTP
-    request measurements recorded by the configured [Metrics.t]. *)
+    request measurements recorded by the configured [Metrics.t]. Has the same
+    domain requirement as [metrics]. *)
 
 val shutdown : running -> unit
-(** Request graceful shutdown. *)
+(** Request graceful shutdown. Safe to call from another domain. *)
 
 val run :
   ?shutdown:Shutdown.t ->

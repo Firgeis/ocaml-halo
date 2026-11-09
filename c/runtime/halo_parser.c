@@ -3,7 +3,7 @@
 #include "halo_utils.h"
 
 static llhttp_settings_t halo_http_parser_settings;
-static int halo_http_parser_settings_ready = 0;
+static uv_once_t halo_http_parser_settings_once = UV_ONCE_INIT;
 
 static struct halo_client* halo_parser_client(llhttp_t* parser) {
   return (struct halo_client*) parser->data;
@@ -963,20 +963,20 @@ static int halo_on_message_complete(llhttp_t* parser) {
   return HPE_PAUSED;
 }
 
-const llhttp_settings_t* halo_http_settings(void) {
-  if (!halo_http_parser_settings_ready) {
-    llhttp_settings_init(&halo_http_parser_settings);
-    halo_http_parser_settings.on_method = halo_on_method;
-    halo_http_parser_settings.on_url = halo_on_url;
-    halo_http_parser_settings.on_header_field = halo_on_header_field;
-    halo_http_parser_settings.on_header_value = halo_on_header_value;
-    halo_http_parser_settings.on_method_complete = halo_on_method_complete;
-    halo_http_parser_settings.on_header_value_complete = halo_on_header_value_complete;
-    halo_http_parser_settings.on_headers_complete = halo_on_headers_complete;
-    halo_http_parser_settings.on_body = halo_on_body;
-    halo_http_parser_settings.on_message_complete = halo_on_message_complete;
-    halo_http_parser_settings_ready = 1;
-  }
+static void halo_http_settings_init(void) {
+  llhttp_settings_init(&halo_http_parser_settings);
+  halo_http_parser_settings.on_method = halo_on_method;
+  halo_http_parser_settings.on_url = halo_on_url;
+  halo_http_parser_settings.on_header_field = halo_on_header_field;
+  halo_http_parser_settings.on_header_value = halo_on_header_value;
+  halo_http_parser_settings.on_method_complete = halo_on_method_complete;
+  halo_http_parser_settings.on_header_value_complete = halo_on_header_value_complete;
+  halo_http_parser_settings.on_headers_complete = halo_on_headers_complete;
+  halo_http_parser_settings.on_body = halo_on_body;
+  halo_http_parser_settings.on_message_complete = halo_on_message_complete;
+}
 
+const llhttp_settings_t* halo_http_settings(void) {
+  uv_once(&halo_http_parser_settings_once, halo_http_settings_init);
   return &halo_http_parser_settings;
 }
