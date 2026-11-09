@@ -240,6 +240,11 @@ complete body has been read. Consumed chunks are released rather than retained.
 consumers use memory proportional to the current chunk instead of the complete
 request body.
 
+When a response needs a fixed prefix followed by the complete request body,
+`Body.read_all_with_prefix ~prefix body` combines them in one result without
+first creating a separate contiguous body string. Like `read_all`, it drains
+the unread body before returning.
+
 ```ocaml
 route
   Matcher.(

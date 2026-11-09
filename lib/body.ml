@@ -34,19 +34,25 @@ let read_unlocked t =
 
 let read t = with_lock t (fun () -> read_unlocked t)
 
-let read_all t =
+let read_all_with_prefix ~prefix t =
   with_lock t (fun () ->
       let rec drain chunks_rev =
         match read_unlocked t with
         | Some chunk -> drain (chunk :: chunks_rev)
         | None -> (
             match chunks_rev with
-            | [] -> ""
-            | [ chunk ] -> chunk
-            | chunks_rev -> String.concat "" (List.rev chunks_rev))
+            | [] -> prefix
+            | [ chunk ] when String.length prefix = 0 -> chunk
+            | [ chunk ] -> prefix ^ chunk
+            | chunks_rev ->
+                let chunks = List.rev chunks_rev in
+                String.concat ""
+                  (if String.length prefix = 0 then chunks else prefix :: chunks)
+            )
       in
       drain [])
 
+let read_all t = read_all_with_prefix ~prefix:"" t
 let is_complete t = t.ended
 
 module Private = struct

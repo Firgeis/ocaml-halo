@@ -343,8 +343,8 @@ let run_server clock =
               in
               fun (request : Halo.Router.Request.t) ->
                 text Status.ok
-                  ("submitted:"
-                  ^ Halo.Body.read_all (Halo.Router.Request.body request)))
+                  (Halo.Body.read_all_with_prefix ~prefix:"submitted:"
+                     (Halo.Router.Request.body request)))
       <|> route
             Matcher.(
               let+ () =
@@ -353,8 +353,8 @@ let run_server clock =
               in
               fun (request : Halo.Router.Request.t) ->
                 text Status.ok
-                  ("patched:"
-                  ^ Halo.Body.read_all (Halo.Router.Request.body request))))
+                  (Halo.Body.read_all_with_prefix ~prefix:"patched:"
+                     (Halo.Router.Request.body request))))
   in
   let request_timeout_ms = int_env_or_default "HALO_REQUEST_TIMEOUT_MS" 30000 in
   let idle_timeout_ms = int_env_or_default "HALO_IDLE_TIMEOUT_MS" 5000 in
