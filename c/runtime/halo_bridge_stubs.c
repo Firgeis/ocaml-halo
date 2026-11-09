@@ -412,6 +412,70 @@ CAMLprim value ocaml_halo_bridge_send_response(value runtime_value,
                                               caml_string_length(response)));
 }
 
+/* The command queue copies the slice synchronously, including on failed
+ * enqueue attempts. OCaml retains the lease until the call reports success. */
+static value halo_bridge_enqueue_bytes(value runtime_value, value request_id,
+                                       value bytes, value length,
+                                       enum halo_bridge_command_kind kind) {
+  intnat n = Long_val(length);
+  if (n < 0 || (uintnat) n > caml_string_length(bytes))
+    caml_invalid_argument("invalid response buffer length");
+  return halo_bridge_enqueue_command_stub(runtime_value, request_id, kind,
+                                          String_val(bytes), (size_t) n);
+}
+
+CAMLprim value ocaml_halo_bridge_send_response_bytes(value runtime_value,
+                                                     value request_id,
+                                                     value bytes, value length) {
+  CAMLparam4(runtime_value, request_id, bytes, length);
+  CAMLreturn(halo_bridge_enqueue_bytes(runtime_value, request_id, bytes, length,
+                                       HALO_BRIDGE_SEND_RESPONSE));
+}
+
+CAMLprim value ocaml_halo_bridge_send_response_parts(value runtime_value,
+                                                     value request_id,
+                                                     value head, value length,
+                                                     value body) {
+  CAMLparam5(runtime_value, request_id, head, length, body);
+  struct halo_runtime* runtime = halo_runtime_get(runtime_value);
+  intnat n = Long_val(length);
+  int result;
+  if (n < 0 || (uintnat) n > caml_string_length(head))
+    caml_invalid_argument("invalid response buffer length");
+  if (runtime->bridge == NULL)
+    caml_invalid_argument("reactor bridge is not enabled");
+  result = halo_bridge_enqueue_response_parts(runtime->bridge,
+    (uint64_t) Int64_val(request_id), String_val(head), (size_t) n,
+    String_val(body), caml_string_length(body));
+  if (result == UV_ENOMEM)
+    caml_raise_out_of_memory();
+  CAMLreturn(Val_int(result));
+}
+
+CAMLprim value ocaml_halo_bridge_send_informational_bytes(value runtime_value,
+                                                          value request_id,
+                                                          value bytes, value length) {
+  CAMLparam4(runtime_value, request_id, bytes, length);
+  CAMLreturn(halo_bridge_enqueue_bytes(runtime_value, request_id, bytes, length,
+                                       HALO_BRIDGE_SEND_INFORMATIONAL));
+}
+
+CAMLprim value ocaml_halo_bridge_start_response_stream_bytes(value runtime_value,
+                                                               value request_id,
+                                                               value bytes, value length) {
+  CAMLparam4(runtime_value, request_id, bytes, length);
+  CAMLreturn(halo_bridge_enqueue_bytes(runtime_value, request_id, bytes, length,
+                                       HALO_BRIDGE_START_RESPONSE_STREAM));
+}
+
+CAMLprim value ocaml_halo_bridge_write_response_chunk_bytes(value runtime_value,
+                                                             value request_id,
+                                                             value bytes, value length) {
+  CAMLparam4(runtime_value, request_id, bytes, length);
+  CAMLreturn(halo_bridge_enqueue_bytes(runtime_value, request_id, bytes, length,
+                                       HALO_BRIDGE_WRITE_RESPONSE_CHUNK));
+}
+
 CAMLprim value ocaml_halo_bridge_read_body(value runtime_value,
                                            value request_id) {
   CAMLparam2(runtime_value, request_id);

@@ -812,6 +812,70 @@ let test_response_status_classes_are_enforced () =
     (Invalid_argument "informational response status must be 1xx") (fun () ->
       ignore (Halo.Router.informational Status.ok Response_headers.empty))
 
+let test_prepared_response_framing () =
+  let module R = Halo.Router in
+  let headers =
+    Response_headers.of_list_exn
+      [
+        ("X-First", "one");
+        ("cOnTeNt-LeNgTh", "999");
+        ("Connection", "wrong");
+        ("TRANSFER-Encoding", "wrong");
+        ("X-Last", "two");
+      ]
+  in
+  List.iter
+    (fun status ->
+      let prepared = R.make ~headers ~status "hello" |> R.prepare in
+      let code = Status.to_int status in
+      let forbidden = code = 204 || code = 304 in
+      List.iter
+        (fun minor ->
+          List.iter
+            (fun keep_alive ->
+              List.iter
+                (fun head ->
+                  let expected =
+                    Printf.sprintf
+                      "HTTP/1.%d %d %s\r\n\
+                       X-First: one\r\n\
+                       X-Last: two\r\n\
+                       %s%s\r\n\
+                       %s"
+                      minor code
+                      (Status.reason_phrase status)
+                      (if not keep_alive then "Connection: close\r\n"
+                       else if minor = 0 then "Connection: keep-alive\r\n"
+                       else "")
+                      (if forbidden then "" else "Content-Length: 5\r\n")
+                      (if forbidden || head then "" else "hello")
+                  in
+                  Alcotest.(check (option string))
+                    "prepared wire" (Some expected)
+                    (R.Response.prepared_wire prepared ~http_major:1
+                       ~http_minor:minor ~keep_alive ~head))
+                [ false; true ])
+            [ false; true ])
+        [ 0; 1 ];
+      let modified = R.with_header "X-New" "value" prepared in
+      Alcotest.(check bool)
+        "header change invalidates preparation" true
+        (R.Response.prepared_prefix modified = None);
+      let modified = R.with_status Status.ok prepared in
+      Alcotest.(check bool)
+        "status change invalidates preparation" true
+        (R.Response.prepared_prefix modified = None))
+    [ Status.ok; Status.no_content; Status.not_modified; Status.of_int_exn 599 ];
+  let large = R.make ~status:Status.ok (String.make 4097 'x') |> R.prepare in
+  Alcotest.(check bool)
+    "large response has prepared prefix" true
+    (Option.is_some (R.Response.prepared_prefix large));
+  Alcotest.(check bool)
+    "large response does not duplicate wire body" true
+    (Option.is_none
+       (R.Response.prepared_wire large ~http_major:1 ~http_minor:1
+          ~keep_alive:true ~head:false))
+
 let test_response_header_validation () =
   let expect_invalid_name name =
     match Response_headers.of_list [ (name, "value") ] with
@@ -942,6 +1006,8 @@ let () =
           Alcotest.test_case "status validation" `Quick test_status_validation;
           Alcotest.test_case "response status classes are enforced" `Quick
             test_response_status_classes_are_enforced;
+          Alcotest.test_case "prepared response framing" `Quick
+            test_prepared_response_framing;
           Alcotest.test_case "response header validation" `Quick
             test_response_header_validation;
           Alcotest.test_case "detached request has no transport flags" `Quick

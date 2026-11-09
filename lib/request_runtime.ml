@@ -2,129 +2,145 @@ module Bridge_backend = Reactor
 open Bridge_backend
 
 module Http = struct
-  let response_version http_major http_minor =
-    if http_major = 1 then Printf.sprintf "HTTP/1.%d" http_minor else "HTTP/1.1"
+  module Buffer = Response_buffer
+
+  let rec add_decimal buffer n =
+    if n >= 10 then add_decimal buffer (n / 10);
+    Buffer.add_char buffer (Char.chr (Char.code '0' + (n mod 10)))
+
+  let equal_ascii_case_insensitive a b =
+    let rec loop i =
+      i = String.length a || (Char.lowercase_ascii a.[i] = b.[i] && loop (i + 1))
+    in
+    String.length a = String.length b && loop 0
 
   let status_forbids_body status =
     let code = Router.Status.to_int status in
     Router.Status.is_informational status || code = 204 || code = 304
 
   let is_framework_header name =
-    match String.lowercase_ascii name with
-    | "content-length" | "connection" | "transfer-encoding" -> true
-    | _ -> false
+    equal_ascii_case_insensitive name "content-length"
+    || equal_ascii_case_insensitive name "connection"
+    || equal_ascii_case_insensitive name "transfer-encoding"
 
   let add_header buffer (name, value) =
     if
       (not (Router.Headers.is_valid_name name))
       || not (Router.Headers.is_valid_value value)
     then invalid_arg "invalid response header reached HTTP serializer"
-    else if not (is_framework_header name) then
-      Buffer.add_string buffer (Printf.sprintf "%s: %s\r\n" name value)
+    else if not (is_framework_header name) then (
+      Buffer.add_string buffer name;
+      Buffer.add_string buffer ": ";
+      Buffer.add_string buffer value;
+      Buffer.add_string buffer "\r\n")
 
   let add_connection_header buffer ~http_major ~http_minor ~keep_alive =
     if keep_alive && http_major = 1 && http_minor = 0 then
       Buffer.add_string buffer "Connection: keep-alive\r\n"
     else if not keep_alive then Buffer.add_string buffer "Connection: close\r\n"
 
-  let serialize_head ~capacity ~status ~headers ~http_major ~http_minor
+  let serialize_head buffer ~status ~headers ~prefix ~http_major ~http_minor
       ~keep_alive =
-    let buffer = Buffer.create capacity in
     let status_code = Router.Status.to_int status in
     if status_code < 100 || status_code > 599 then
       invalid_arg "invalid status reached HTTP serializer";
-    Buffer.add_string buffer
-      (Printf.sprintf "%s %d %s\r\n"
-         (response_version http_major http_minor)
-         status_code
-         (Router.Status.reason_phrase status));
-    Router.Headers.iter
-      (fun name value -> add_header buffer (name, value))
-      headers;
-    add_connection_header buffer ~http_major ~http_minor ~keep_alive;
-    buffer
+    Buffer.add_string buffer "HTTP/1.";
+    if http_major = 1 && http_minor < 0 then
+      Buffer.add_string buffer (string_of_int http_minor)
+    else add_decimal buffer (if http_major = 1 then http_minor else 1);
+    (match prefix with
+    | Some prefix -> Buffer.add_string buffer prefix
+    | None ->
+        Buffer.add_char buffer ' ';
+        add_decimal buffer status_code;
+        Buffer.add_char buffer ' ';
+        Buffer.add_string buffer (Router.Status.reason_phrase status);
+        Buffer.add_string buffer "\r\n";
+        Router.Headers.iter
+          (fun name value -> add_header buffer (name, value))
+          headers);
+    add_connection_header buffer ~http_major ~http_minor ~keep_alive
 
   let serialize_response ~request_method ~http_major ~http_minor ~keep_alive
-      ~status ~headers ~body =
-    let buffer =
-      serialize_head
-        ~capacity:(String.length body + 256)
-        ~status ~headers ~http_major ~http_minor ~keep_alive
-    in
-    if not (status_forbids_body status) then
-      Buffer.add_string buffer
-        (Printf.sprintf "Content-Length: %d\r\n" (String.length body));
-    Buffer.add_string buffer "\r\n";
-    if
-      (not (status_forbids_body status))
-      && not (String.equal request_method "HEAD")
-    then Buffer.add_string buffer body;
-    Buffer.contents buffer
+      ~status ~headers ~prefix ~body ~send =
+    Buffer.with_buffer (fun buffer ->
+        serialize_head buffer ~status ~headers ~prefix ~http_major ~http_minor
+          ~keep_alive;
+        if not (status_forbids_body status) then (
+          Buffer.add_string buffer "Content-Length: ";
+          add_decimal buffer (String.length body);
+          Buffer.add_string buffer "\r\n");
+        Buffer.add_string buffer "\r\n";
+        let body =
+          if status_forbids_body status || String.equal request_method "HEAD"
+          then ""
+          else body
+        in
+        send (Buffer.data buffer) (Buffer.length buffer) body)
 
   let serialize_fixed ~request_method ~http_major ~http_minor ~keep_alive
-      (response : Router.response) =
+      (response : Router.response) ~send =
     match Router.Response.body response with
     | Router.Fixed_body body ->
         serialize_response ~request_method ~http_major ~http_minor ~keep_alive
           ~status:(Router.Response.status response)
           ~headers:(Router.Response.headers response)
-          ~body
+          ~prefix:(Router.Response.prepared_prefix response)
+          ~body ~send
     | Router.Stream_body _ -> invalid_arg "expected a fixed response"
 
   let serialize_informational ~http_major ~http_minor
-      (response : Router.informational_response) =
+      (response : Router.informational_response) ~send =
     serialize_response ~request_method:"GET" ~http_major ~http_minor
-      ~keep_alive:true
-      ~status:(Router.Informational_response.status response)
+      ~keep_alive:true ~status:(Router.Informational_response.status response)
       ~headers:(Router.Informational_response.headers response)
-      ~body:""
+      ~prefix:None ~body:"" ~send:(fun bytes length _ -> send bytes length)
 
-  let stream_header_buffer ~http_major ~http_minor ~keep_alive
+  let stream_header_buffer buffer ~http_major ~http_minor ~keep_alive
       (response : Router.response) =
     if http_major <> 1 || http_minor <> 1 then
       invalid_arg "streamed responses require HTTP/1.1";
     let status = Router.Response.status response in
     if status_forbids_body status then
       invalid_arg "streamed responses require a response body";
-    serialize_head ~capacity:256 ~status
+    serialize_head buffer ~status
       ~headers:(Router.Response.headers response)
+      ~prefix:(Router.Response.prepared_prefix response)
       ~http_major ~http_minor ~keep_alive
 
-  let serialize_stream_head ~http_major ~http_minor ~keep_alive response =
-    let buffer =
-      stream_header_buffer ~http_major ~http_minor ~keep_alive response
-    in
-    Buffer.add_string buffer "Transfer-Encoding: chunked\r\n\r\n";
-    Buffer.contents buffer
+  let serialize_stream_head ~http_major ~http_minor ~keep_alive response ~send =
+    Buffer.with_buffer (fun buffer ->
+        stream_header_buffer buffer ~http_major ~http_minor ~keep_alive response;
+        Buffer.add_string buffer "Transfer-Encoding: chunked\r\n\r\n";
+        send (Buffer.data buffer) (Buffer.length buffer))
 
   let serialize_stream_head_only ~http_major ~http_minor ~keep_alive
-      (response : Router.response) =
-    let buffer =
-      stream_header_buffer ~http_major ~http_minor ~keep_alive response
-    in
-    Buffer.add_string buffer "\r\n";
-    Buffer.contents buffer
-
-  let serialize_chunk chunk =
-    if String.length chunk = 0 then
-      invalid_arg "streamed response chunks must not be empty";
-    Printf.sprintf "%x\r\n%s\r\n" (String.length chunk) chunk
+      (response : Router.response) ~send =
+    Buffer.with_buffer (fun buffer ->
+        stream_header_buffer buffer ~http_major ~http_minor ~keep_alive response;
+        Buffer.add_string buffer "\r\n";
+        send (Buffer.data buffer) (Buffer.length buffer))
 
   let internal_server_error =
     Router.text Router.Status.internal_server_error "internal server error\n"
+    |> Router.prepare
 
-  let too_early = Router.text Router.Status.too_early "too early\n"
+  let too_early =
+    Router.text Router.Status.too_early "too early\n" |> Router.prepare
 
   let not_implemented =
     Router.text Router.Status.not_implemented "not implemented\n"
+    |> Router.prepare
 
   let connect_not_implemented =
     Router.text Router.Status.not_implemented "connect not implemented\n"
+    |> Router.prepare
 
   let options_star =
     Router.text Router.Status.ok ""
     |> Router.with_header "Allow"
          "GET, HEAD, POST, PATCH, PUT, DELETE, OPTIONS, TRACE"
+    |> Router.prepare
 
   let trace_response (event : Reactor.request_event) body =
     let request_line =
@@ -196,6 +212,7 @@ let listener ~early_data_policy ~early_data_replay_store router =
   { router; early_data_policy; early_data_replay_store }
 
 let create ~runtime ~listeners ~bridge_switch ~on_error ~telemetry ~metrics =
+  Response_buffer.prewarm ();
   {
     runtime;
     owner_domain = Domain.self ();
@@ -365,11 +382,6 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
     if state.observability_enabled then
       state.telemetry_status_code <-
         Some (Router.Status.to_int (Router.Response.status response));
-    let wire =
-      Http.serialize_fixed ~request_method:event.method_text
-        ~http_major:event.http_major ~http_minor:event.http_minor
-        ~keep_alive:(keep_alive ()) response
-    in
     if state.observability_enabled then
       state.response_body_size <-
         (match Router.Response.body response with
@@ -379,21 +391,36 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
                && not (String.equal event.method_text "HEAD") ->
             Int64.of_int (String.length body)
         | _ -> 0L);
-    if Reactor.trace_enabled then
-      Reactor.trace "fixed response request=%Ld status=%d bytes=%d"
-        event.request_id
-        (Router.Status.to_int (Router.Response.status response))
-        (String.length wire);
-    Reactor.send_response runtime event.request_id wire;
+    let keep_alive = keep_alive () in
+    let trace length =
+      if Reactor.trace_enabled then
+        Reactor.trace "fixed response request=%Ld status=%d bytes=%d"
+          event.request_id
+          (Router.Status.to_int (Router.Response.status response))
+          length
+    in
+    (match
+       Router.Response.prepared_wire response ~http_major:event.http_major
+         ~http_minor:event.http_minor ~keep_alive
+         ~head:(String.equal event.method_text "HEAD")
+     with
+    | Some wire ->
+        trace (String.length wire);
+        Reactor.send_response runtime event.request_id wire
+    | None ->
+        Http.serialize_fixed ~request_method:event.method_text
+          ~http_major:event.http_major ~http_minor:event.http_minor ~keep_alive
+          response ~send:(fun bytes length body ->
+            trace (length + String.length body);
+            Reactor.send_response_parts runtime event.request_id bytes length
+              body));
     sent := true;
     await_response_completion ()
   in
   let send_informational response =
-    let wire =
-      Http.serialize_informational ~http_major:event.http_major
-        ~http_minor:event.http_minor response
-    in
-    Reactor.send_informational runtime event.request_id wire;
+    Http.serialize_informational ~http_major:event.http_major
+      ~http_minor:event.http_minor response
+      ~send:(Reactor.send_informational_bytes runtime event.request_id);
     await_write state
   in
   let send_stream response producer =
@@ -401,31 +428,39 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
       state.telemetry_status_code <-
         Some (Router.Status.to_int (Router.Response.status response));
     if String.equal event.method_text "HEAD" then (
-      let wire =
-        Http.serialize_stream_head_only ~http_major:event.http_major
-          ~http_minor:event.http_minor ~keep_alive:(keep_alive ()) response
-      in
-      Reactor.send_response runtime event.request_id wire;
+      Http.serialize_stream_head_only ~http_major:event.http_major
+        ~http_minor:event.http_minor ~keep_alive:(keep_alive ()) response
+        ~send:(Reactor.send_response_bytes runtime event.request_id);
       sent := true;
       await_response_completion ())
-    else
-      let head =
-        Http.serialize_stream_head ~http_major:event.http_major
-          ~http_minor:event.http_minor ~keep_alive:(keep_alive ()) response
-      in
-      Reactor.start_response_stream runtime event.request_id head;
+    else (
+      Http.serialize_stream_head ~http_major:event.http_major
+        ~http_minor:event.http_minor ~keep_alive:(keep_alive ()) response
+        ~send:(Reactor.start_response_stream_bytes runtime event.request_id);
       sent := true;
       await_write state;
       match
         try
-          producer ~yield:(fun chunk ->
-              Reactor.write_response_chunk runtime event.request_id
-                (Http.serialize_chunk chunk);
-              await_write state;
-              if state.observability_enabled then
-                state.response_body_size <-
-                  Int64.add state.response_body_size
-                    (Int64.of_int (String.length chunk)));
+          let record length =
+            await_write state;
+            if state.observability_enabled then
+              state.response_body_size <-
+                Int64.add state.response_body_size (Int64.of_int length)
+          in
+          (match Router.Response.bytes_producer response with
+          | Some produce ->
+              produce ~yield:(fun bytes length ->
+                  if length <= 0 || length > Bytes.length bytes then
+                    invalid_arg "invalid streamed response chunk";
+                  Reactor.write_response_chunk_bytes runtime event.request_id
+                    bytes length;
+                  record length)
+          | None ->
+              producer ~yield:(fun chunk ->
+                  if String.length chunk = 0 then
+                    invalid_arg "streamed response chunks must not be empty";
+                  Reactor.write_response_chunk runtime event.request_id chunk;
+                  record (String.length chunk)));
           None
         with
         | exn when is_disconnect_exception exn -> raise exn
@@ -438,7 +473,7 @@ let run_handler runtime requests listener (event : Reactor.request_event) state
           state.response_abort <- Some (exn, backtrace);
           on_error event.request_id exn backtrace;
           Reactor.abort_response_stream runtime event.request_id;
-          await_response_abort ()
+          await_response_abort ())
   in
   let send_response (response : Router.response) =
     match Router.Response.body response with

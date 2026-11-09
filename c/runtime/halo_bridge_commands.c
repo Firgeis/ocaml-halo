@@ -1,4 +1,7 @@
 #include "halo_bridge_internal.h"
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
 
 void halo_bridge_command_destroy(struct halo_bridge_command* command) {
   if (command == NULL)
@@ -113,11 +116,11 @@ void halo_bridge_command_async_cb(uv_async_t* async) {
   }
 }
 
-int halo_bridge_enqueue_command(struct halo_bridge* bridge,
-                                enum halo_bridge_command_kind kind,
-                                uint64_t request_id,
-                                const char* payload,
-                                size_t payload_len) {
+static int halo_bridge_enqueue_parts(struct halo_bridge* bridge,
+                                     enum halo_bridge_command_kind kind,
+                                     uint64_t request_id,
+                                     const char* payload, size_t payload_len,
+                                     const char* tail, size_t tail_len) {
   struct halo_bridge_command* command;
   int result;
 
@@ -128,9 +131,40 @@ int halo_bridge_enqueue_command(struct halo_bridge* bridge,
     return UV_ENOMEM;
   command->kind = kind;
   command->request_id = request_id;
-  command->payload = halo_bridge_copy_bytes(payload, payload_len);
-  command->payload_len = payload_len;
-  if (payload_len > 0 && command->payload == NULL) {
+  if (kind == HALO_BRIDGE_WRITE_RESPONSE_CHUNK && payload_len > 0) {
+    char prefix[2 * sizeof(size_t) + 3];
+    int prefix_len = snprintf(prefix, sizeof(prefix), "%zx\r\n", payload_len);
+    if (prefix_len < 0 || (size_t) prefix_len >= sizeof(prefix)
+        || payload_len > SIZE_MAX - (size_t) prefix_len - 2) {
+      halo_bridge_command_destroy(command);
+      return UV_ENOMEM;
+    }
+    command->payload_len = (size_t) prefix_len + payload_len + 2;
+    command->payload = malloc(command->payload_len);
+    if (command->payload != NULL) {
+      memcpy(command->payload, prefix, (size_t) prefix_len);
+      memcpy(command->payload + prefix_len, payload, payload_len);
+      memcpy(command->payload + prefix_len + payload_len, "\r\n", 2);
+    }
+  }
+  else if (tail_len > 0) {
+    if (payload_len > SIZE_MAX - tail_len) {
+      halo_bridge_command_destroy(command);
+      return UV_ENOMEM;
+    }
+    command->payload_len = payload_len + tail_len;
+    command->payload = malloc(command->payload_len);
+    if (command->payload != NULL) {
+      if (payload_len > 0)
+        memcpy(command->payload, payload, payload_len);
+      memcpy(command->payload + payload_len, tail, tail_len);
+    }
+  }
+  else {
+    command->payload = halo_bridge_copy_bytes(payload, payload_len);
+    command->payload_len = payload_len;
+  }
+  if (command->payload_len > 0 && command->payload == NULL) {
     halo_bridge_command_destroy(command);
     return UV_ENOMEM;
   }
@@ -158,4 +192,21 @@ int halo_bridge_enqueue_command(struct halo_bridge* bridge,
   if (result != HALO_BRIDGE_COMMAND_ENQUEUED)
     halo_bridge_command_destroy(command);
   return result;
+}
+
+int halo_bridge_enqueue_command(struct halo_bridge* bridge,
+                                enum halo_bridge_command_kind kind,
+                                uint64_t request_id,
+                                const char* payload,
+                                size_t payload_len) {
+  return halo_bridge_enqueue_parts(bridge, kind, request_id, payload,
+                                   payload_len, NULL, 0);
+}
+
+int halo_bridge_enqueue_response_parts(struct halo_bridge* bridge,
+                                       uint64_t request_id,
+                                       const char* head, size_t head_len,
+                                       const char* body, size_t body_len) {
+  return halo_bridge_enqueue_parts(bridge, HALO_BRIDGE_SEND_RESPONSE, request_id,
+                                   head, head_len, body, body_len);
 }

@@ -511,6 +511,77 @@ let with_server_capture_log ?(env = []) path f =
           wait_until_listening ~timeout:2.0;
           f pid log_path))
 
+let test_prepared_response_equivalence () =
+  with_server (fun () ->
+      List.iter
+        (fun shape ->
+          List.iter
+            (fun meth ->
+              List.iter
+                (fun minor ->
+                  List.iter
+                    (fun connection ->
+                      let request mode =
+                        Printf.sprintf
+                          "%s /serialization/%s/%s HTTP/1.%d\r\n\
+                           Host: localhost\r\n\
+                           Connection: %s\r\n\
+                           \r\n"
+                          meth shape mode minor connection
+                        |> request_response ~body_expected:(meth <> "HEAD")
+                      in
+                      Alcotest.(check string)
+                        "prepared and ordinary wire bytes" (request "ordinary")
+                        (request "prepared"))
+                    [ "close"; "keep-alive" ])
+                [ 0; 1 ])
+            [ "GET"; "HEAD" ])
+        [ "small"; "large"; "empty"; "cached" ])
+
+let test_response_buffers_under_queue_pressure () =
+  with_server
+    ~env:[ ("HALO_COMMAND_CAPACITY", "1") ]
+    (fun () ->
+      let workers = 24 in
+      let start_read, start_write = Unix.pipe () in
+      let children =
+        List.init workers (fun _ ->
+            match Unix.fork () with
+            | 0 ->
+                Unix.close start_write;
+                let token = Bytes.create 1 in
+                let result =
+                  try
+                    if Unix.read start_read token 0 1 <> 1 then
+                      failwith "barrier";
+                    for _ = 1 to 8 do
+                      let response =
+                        request_response
+                          "GET /serialization/large/ordinary HTTP/1.1\r\n\
+                           Host: localhost\r\n\
+                           Connection: close\r\n\
+                           \r\n"
+                      in
+                      match split_headers_body response with
+                      | Some (_, body) when body = String.make 65536 'x' -> ()
+                      | _ -> failwith "corrupt response"
+                    done;
+                    0
+                  with _ -> 1
+                in
+                Unix._exit result
+            | pid -> pid)
+      in
+      Unix.close start_read;
+      write_all start_write (String.make workers 'x') 0 workers;
+      Unix.close start_write;
+      let statuses = List.map (fun pid -> snd (Unix.waitpid [] pid)) children in
+      List.iter
+        (fun status ->
+          Alcotest.(check bool)
+            "concurrent response preserved" true (status = Unix.WEXITED 0))
+        statuses)
+
 let test_fixed_response () =
   with_server (fun () ->
       let response =
@@ -2038,6 +2109,10 @@ let () =
       ( "integration",
         [
           timed_test_case "fixed HTTP response" `Quick test_fixed_response;
+          timed_test_case "prepared response wire equivalence" `Quick
+            test_prepared_response_equivalence;
+          timed_test_case "response buffers under queue pressure" `Quick
+            test_response_buffers_under_queue_pressure;
           timed_test_case "query parameters are percent-decoded" `Quick
             test_query_parameters_are_percent_decoded;
           timed_test_case "invalid URI encoding returns bad request" `Quick

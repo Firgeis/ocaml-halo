@@ -318,7 +318,17 @@ type response_body =
   | Fixed_body of string
   | Stream_body of (yield:(string -> unit) -> unit)
 
-type response = { status : Status.t; headers : Headers.t; body : response_body }
+type bytes_producer = yield:(bytes -> int -> unit) -> unit
+type prepared_response = { prefix : string; wires : string array option }
+
+type response = {
+  status : Status.t;
+  headers : Headers.t;
+  body : response_body;
+  bytes_producer : bytes_producer option;
+  prepared : prepared_response option;
+}
+
 type informational_response = { status : Status.t; headers : Headers.t }
 
 type response_outcome =
@@ -332,6 +342,21 @@ module Response = struct
   let status (response : response) = response.status
   let headers (response : response) = response.headers
   let body (response : response) = response.body
+  let bytes_producer (response : response) = response.bytes_producer
+
+  let prepared_prefix (response : response) =
+    Option.map (fun prepared -> prepared.prefix) response.prepared
+
+  let prepared_wire (response : response) ~http_major ~http_minor ~keep_alive
+      ~head =
+    match response.prepared with
+    | Some { wires = Some wires; _ }
+      when http_major = 1 && (http_minor = 0 || http_minor = 1) ->
+        Some
+          wires.((http_minor * 4)
+                 + (if keep_alive then 2 else 0)
+                 + if head then 1 else 0)
+    | _ -> None
 end
 
 module Informational_response = struct
@@ -856,6 +881,8 @@ module Matcher = struct
             Headers.of_list_exn
               [ ("Content-Type", "text/plain; charset=utf-8") ];
           body = Fixed_body "length required\n";
+          bytes_producer = None;
+          prepared = None;
         }
 end
 
@@ -1013,6 +1040,8 @@ let not_found_response () =
     headers =
       Headers.of_list_exn [ ("Content-Type", "text/plain; charset=utf-8") ];
     body = Fixed_body "not found\n";
+    bytes_producer = None;
+    prepared = None;
   }
 
 let bad_request_response () =
@@ -1021,6 +1050,8 @@ let bad_request_response () =
     headers =
       Headers.of_list_exn [ ("Content-Type", "text/plain; charset=utf-8") ];
     body = Fixed_body "bad request\n";
+    bytes_producer = None;
+    prepared = None;
   }
 
 let method_not_allowed_response allowed_methods =
@@ -1035,6 +1066,8 @@ let method_not_allowed_response allowed_methods =
           ("Content-Type", "text/plain; charset=utf-8");
         ];
     body = Fixed_body "method not allowed\n";
+    bytes_producer = None;
+    prepared = None;
   }
 
 let allowed_methods_for_path router input =
@@ -1194,16 +1227,27 @@ let ensure_final_status status =
 
 let make ?(headers = Headers.empty) ~status body =
   ensure_final_status status;
-  { status; headers; body = Fixed_body body }
+  {
+    status;
+    headers;
+    body = Fixed_body body;
+    bytes_producer = None;
+    prepared = None;
+  }
 
 let with_status status (response : response) =
   ensure_final_status status;
-  { response with status }
+  { response with status; prepared = None }
 
-let with_headers headers (response : response) = { response with headers }
+let with_headers headers (response : response) =
+  { response with headers; prepared = None }
 
 let with_header name value (response : response) =
-  { response with headers = Headers.set_exn name value response.headers }
+  {
+    response with
+    headers = Headers.set_exn name value response.headers;
+    prepared = None;
+  }
 
 let informational status headers =
   if not (Status.is_informational status) then
@@ -1229,4 +1273,86 @@ let json status body =
 
 let stream ?(headers = Headers.empty) ~status producer =
   ensure_final_status status;
-  { status; headers; body = Stream_body producer }
+  {
+    status;
+    headers;
+    body = Stream_body producer;
+    bytes_producer = None;
+    prepared = None;
+  }
+
+let prepare (response : response) =
+  let buffer = Buffer.create 256 in
+  Buffer.add_char buffer ' ';
+  Buffer.add_string buffer (string_of_int (Status.to_int response.status));
+  Buffer.add_char buffer ' ';
+  Buffer.add_string buffer (Status.reason_phrase response.status);
+  Buffer.add_string buffer "\r\n";
+  let equals_ci name expected =
+    String.length name = String.length expected
+    &&
+    let rec loop i =
+      i = String.length name
+      || (Char.lowercase_ascii name.[i] = expected.[i] && loop (i + 1))
+    in
+    loop 0
+  in
+  Headers.iter
+    (fun name value ->
+      if not (Headers.is_valid_name name && Headers.is_valid_value value) then
+        invalid_arg "invalid response header reached HTTP serializer";
+      if
+        not
+          (equals_ci name "content-length"
+          || equals_ci name "connection"
+          || equals_ci name "transfer-encoding")
+      then (
+        Buffer.add_string buffer name;
+        Buffer.add_string buffer ": ";
+        Buffer.add_string buffer value;
+        Buffer.add_string buffer "\r\n"))
+    response.headers;
+  let prefix = Buffer.contents buffer in
+  let wires =
+    match response.body with
+    | Fixed_body body
+      when String.length body <= 4096 && String.length prefix <= 4096 ->
+        let forbidden =
+          Status.is_informational response.status
+          || Status.to_int response.status = 204
+          || Status.to_int response.status = 304
+        in
+        Some
+          (Array.init 8 (fun index ->
+               let minor = index / 4 in
+               let keep_alive = index land 2 <> 0 in
+               let head = index land 1 <> 0 in
+               let wire =
+                 Buffer.create (String.length prefix + String.length body + 80)
+               in
+               Buffer.add_string wire
+                 (if minor = 0 then "HTTP/1.0" else "HTTP/1.1");
+               Buffer.add_string wire prefix;
+               if keep_alive && minor = 0 then
+                 Buffer.add_string wire "Connection: keep-alive\r\n"
+               else if not keep_alive then
+                 Buffer.add_string wire "Connection: close\r\n";
+               if not forbidden then (
+                 Buffer.add_string wire "Content-Length: ";
+                 Buffer.add_string wire (string_of_int (String.length body));
+                 Buffer.add_string wire "\r\n");
+               Buffer.add_string wire "\r\n";
+               if (not forbidden) && not head then Buffer.add_string wire body;
+               Buffer.contents wire))
+    | _ -> None
+  in
+  { response with prepared = Some { prefix; wires } }
+
+module Private = struct
+  let stream_bytes ?(headers = Headers.empty) ~status producer =
+    let fallback ~yield =
+      producer ~yield:(fun bytes length ->
+          yield (Bytes.sub_string bytes 0 length))
+    in
+    { (stream ~headers ~status fallback) with bytes_producer = Some producer }
+end

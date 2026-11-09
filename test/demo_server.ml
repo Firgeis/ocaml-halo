@@ -142,20 +142,52 @@ let write_disconnect_marker () =
       Out_channel.with_open_bin path (fun channel ->
           output_string channel "client disconnected\n")
 
+let serialization_responses =
+  List.map
+    (fun (name, status, body) ->
+      let response =
+        Halo.Router.make ~status body
+        |> Halo.Router.with_header "X-Example" "value"
+        |> Halo.Router.with_header "Content-Length" "999"
+        |> Halo.Router.with_header "Transfer-Encoding" "ignored"
+      in
+      (name, response, Halo.Router.prepare response))
+    [
+      ("small", Status.ok, "hello");
+      ("large", Status.ok, String.make 65536 'x');
+      ("empty", Status.no_content, "ignored");
+      ("cached", Status.not_modified, "ignored");
+    ]
+
 let run_server clock =
   let router =
     Halo.Router.(
       route
         Matcher.(
-          let+ () = request_method_is GET *> path_segment "early" *> path_end in
-          fun request ->
-            respond_with_headers informational_headers
-              (fun (processing_headers, early_hints_headers) ->
-                Request.send_informational request
-                  (informational Status.processing processing_headers);
-                Request.send_informational request
-                  (informational Status.early_hints early_hints_headers);
-                text Status.ok "hello world\n"))
+          let+ shape = path_segment "serialization" *> string_parameter
+          and+ mode = string_parameter <* path_end in
+          fun _ ->
+            match
+              List.find_opt
+                (fun (name, _, _) -> name = shape)
+                serialization_responses
+            with
+            | Some (_, ordinary, prepared) ->
+                if mode = "prepared" then prepared else ordinary
+            | None -> text Status.not_found "not found")
+      <|> route
+            Matcher.(
+              let+ () =
+                request_method_is GET *> path_segment "early" *> path_end
+              in
+              fun request ->
+                respond_with_headers informational_headers
+                  (fun (processing_headers, early_hints_headers) ->
+                    Request.send_informational request
+                      (informational Status.processing processing_headers);
+                    Request.send_informational request
+                      (informational Status.early_hints early_hints_headers);
+                    text Status.ok "hello world\n"))
       <|> route
             Matcher.(
               let+ () =
@@ -342,6 +374,7 @@ let run_server clock =
     int_env_or_default "HALO_SHUTDOWN_TIMEOUT_MS"
       Halo.Server.default_shutdown_timeout_ms
   in
+  let command_capacity = int_env_or_default "HALO_COMMAND_CAPACITY" 4096 in
   let config =
     Halo.Server.Config.create ~port:8080 ~max_request_line_size ~max_header_size
       ~max_body_size ~request_timeout_ms ~idle_timeout_ms
@@ -349,7 +382,7 @@ let run_server clock =
   in
   Printf.printf "server on %s:%d using %s\n%!" config.host config.port
     (Halo.Server.runtime_backend_name ());
-  Halo.Server.run ~shutdown_timeout_ms [ config ]
+  Halo.Server.run ~shutdown_timeout_ms ~command_capacity [ config ]
 
 let () =
   try Eio_main.run @@ fun env -> run_server (Eio.Stdenv.clock env)

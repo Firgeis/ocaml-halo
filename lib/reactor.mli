@@ -89,6 +89,19 @@ val event_fd : Server_backend.t -> Unix.file_descr
 val drain_wakeup : Server_backend.t -> unit
 val poll_event : Server_backend.t -> event option
 val send_response : Server_backend.t -> int64 -> string -> unit
+val send_response_bytes : Server_backend.t -> int64 -> bytes -> int -> unit
+
+val send_response_parts :
+  Server_backend.t -> int64 -> bytes -> int -> string -> unit
+
+val send_informational_bytes : Server_backend.t -> int64 -> bytes -> int -> unit
+
+val start_response_stream_bytes :
+  Server_backend.t -> int64 -> bytes -> int -> unit
+
+val write_response_chunk_bytes :
+  Server_backend.t -> int64 -> bytes -> int -> unit
+
 val request_body : Server_backend.t -> int64 -> unit
 val close_request : Server_backend.t -> int64 -> unit
 val stop : Server_backend.t -> unit

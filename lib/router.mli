@@ -205,6 +205,20 @@ module Response : sig
   val status : t -> Status.t
   val headers : t -> Headers.t
   val body : t -> response_body
+
+  val bytes_producer : t -> (yield:(bytes -> int -> unit) -> unit) option
+  (** Internal transport hook; the receiver must not mutate the bytes or retain
+      them after [yield] returns. *)
+
+  val prepared_prefix : t -> string option
+
+  val prepared_wire :
+    t ->
+    http_major:int ->
+    http_minor:int ->
+    keep_alive:bool ->
+    head:bool ->
+    string option
 end
 
 module Informational_response : sig
@@ -432,8 +446,25 @@ val text : Status.t -> string -> response
 val html : Status.t -> string -> response
 val json : Status.t -> string -> response
 
+val prepare : response -> response
+(** Precompute immutable serialization data for a response reused across
+    requests. Call this once when constructing the response, outside the request
+    handler. Small fixed bodies and headers also get complete HTTP/1.0 and
+    HTTP/1.1 wire representations. Response modifiers discard the prepared data.
+*)
+
 val stream :
   ?headers:Headers.t ->
   status:Status.t ->
   (yield:(string -> unit) -> unit) ->
   response
+
+module Private : sig
+  val stream_bytes :
+    ?headers:Headers.t ->
+    status:Status.t ->
+    (yield:(bytes -> int -> unit) -> unit) ->
+    response
+  (** Internal transport hook. The receiver must not mutate the bytes or retain
+      them after [yield] returns. *)
+end

@@ -129,6 +129,36 @@ int main(void) {
   assert(pthread_mutex_init(&bridge.event_mutex, NULL) == 0);
   assert(pthread_mutex_init(&bridge.command_mutex, NULL) == 0);
   bridge.event_pipe[1] = -1;
+  bridge.accepting_commands = 1;
+  bridge.command_capacity = 1;
+  {
+    char head[] = "head";
+    char body[] = "body";
+    struct halo_bridge_command* command;
+    assert(halo_bridge_enqueue_response_parts(&bridge, 42, head, 4, body, 4)
+           == HALO_BRIDGE_COMMAND_ENQUEUED);
+    head[0] = 'X';
+    body[0] = 'Y';
+    assert(halo_bridge_enqueue_response_parts(&bridge, 43, head, 4, body, 4)
+           == HALO_BRIDGE_COMMAND_FULL);
+    command = halo_bridge_pop_command(&bridge);
+    assert(command != NULL && command->request_id == 42 && command->payload_len == 8);
+    assert(memcmp(command->payload, "headbody", 8) == 0);
+    halo_bridge_command_destroy(command);
+    assert(halo_bridge_enqueue_command(&bridge, HALO_BRIDGE_WRITE_RESPONSE_CHUNK,
+                                       42, "abc", 3) == HALO_BRIDGE_COMMAND_ENQUEUED);
+    command = halo_bridge_pop_command(&bridge);
+    assert(command != NULL && command->payload_len == 8);
+    assert(memcmp(command->payload, "3\r\nabc\r\n", 8) == 0);
+    halo_bridge_command_destroy(command);
+    allocations_until_failure = 1;
+    assert(halo_bridge_enqueue_response_parts(&bridge, 42, head, 4, body, 4)
+           == UV_ENOMEM);
+    assert(bridge.command_count == 0);
+    bridge.accepting_commands = 0;
+    assert(halo_bridge_enqueue_response_parts(&bridge, 42, head, 4, body, 4)
+           == HALO_BRIDGE_COMMAND_CLOSED);
+  }
   bridge.request_capacity = 2;
   bridge.event_capacity = 8;
   assert(halo_client_registry_init(&bridge.requests, 2) == 0);

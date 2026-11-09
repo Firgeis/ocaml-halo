@@ -147,6 +147,10 @@ int halo_bridge_enqueue_command(struct halo_bridge* bridge,
                                 uint64_t request_id,
                                 const char* payload,
                                 size_t payload_len);
+int halo_bridge_enqueue_response_parts(struct halo_bridge* bridge,
+                                       uint64_t request_id,
+                                       const char* head, size_t head_len,
+                                       const char* body, size_t body_len);
 
 struct halo_client* halo_bridge_find_client(struct halo_bridge* bridge,
                                             uint64_t request_id);

@@ -32,6 +32,7 @@
   server_config
   server_backend
   reactor
+  response_buffer
   request_runtime
   server
   stream
@@ -45,6 +46,7 @@
   request_headers
   server_backend
   reactor
+  response_buffer
   request_runtime)
  (libraries eio eio.unix uri ipaddr.unix)
  (foreign_archives ../c/halo_stubs ../c/halo_s2n ../c/halo_uv)

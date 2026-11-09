@@ -5,7 +5,8 @@ let trace_enabled = Sys.getenv_opt "HALO_BRIDGE_TRACE" = Some "1"
 
 let trace fmt =
   if trace_enabled then
-    Printf.ksprintf (fun message -> prerr_endline ("halo bridge: " ^ message))
+    Printf.ksprintf
+      (fun message -> prerr_endline ("halo bridge: " ^ message))
       fmt
   else Printf.ikfprintf (fun () -> ()) () fmt
 
@@ -102,6 +103,26 @@ external poll_event : Server_backend.t -> event option
 external send_response_raw : Server_backend.t -> int64 -> string -> int
   = "ocaml_halo_bridge_send_response"
 
+external send_response_bytes_raw :
+  Server_backend.t -> int64 -> bytes -> int -> int
+  = "ocaml_halo_bridge_send_response_bytes"
+
+external send_response_parts_raw :
+  Server_backend.t -> int64 -> bytes -> int -> string -> int
+  = "ocaml_halo_bridge_send_response_parts"
+
+external send_informational_bytes_raw :
+  Server_backend.t -> int64 -> bytes -> int -> int
+  = "ocaml_halo_bridge_send_informational_bytes"
+
+external start_response_stream_bytes_raw :
+  Server_backend.t -> int64 -> bytes -> int -> int
+  = "ocaml_halo_bridge_start_response_stream_bytes"
+
+external write_response_chunk_bytes_raw :
+  Server_backend.t -> int64 -> bytes -> int -> int
+  = "ocaml_halo_bridge_write_response_chunk_bytes"
+
 external request_body_raw : Server_backend.t -> int64 -> int
   = "ocaml_halo_bridge_read_body"
 
@@ -196,6 +217,30 @@ let rec enqueue command =
 
 let send_response runtime request_id response =
   enqueue (fun () -> send_response_status runtime request_id response)
+
+let send_response_bytes runtime request_id bytes length =
+  enqueue (fun () ->
+      command_status (send_response_bytes_raw runtime request_id bytes length))
+
+let send_response_parts runtime request_id bytes length body =
+  enqueue (fun () ->
+      command_status
+        (send_response_parts_raw runtime request_id bytes length body))
+
+let send_informational_bytes runtime request_id bytes length =
+  enqueue (fun () ->
+      command_status
+        (send_informational_bytes_raw runtime request_id bytes length))
+
+let start_response_stream_bytes runtime request_id bytes length =
+  enqueue (fun () ->
+      command_status
+        (start_response_stream_bytes_raw runtime request_id bytes length))
+
+let write_response_chunk_bytes runtime request_id bytes length =
+  enqueue (fun () ->
+      command_status
+        (write_response_chunk_bytes_raw runtime request_id bytes length))
 
 let request_body runtime request_id =
   enqueue (fun () -> request_body_status runtime request_id)
