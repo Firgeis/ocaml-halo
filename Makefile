@@ -10,18 +10,19 @@ S2N_TLS_BUILD_DIR = $(S2N_TLS_DIR)/lib
 S2N_TLS_LIB = $(S2N_TLS_BUILD_DIR)/libs2n.a
 S2N_TLS_S2NC = $(S2N_TLS_DIR)/bin/s2nc
 S2N_TLS_RUNTIME_DIR = $(S2N_TLS_BUILD_DIR)
-S2N_TLS_FETCH_URL = https://github.com/aws/s2n-tls/archive/refs/tags/v1.7.3.tar.gz
-S2N_TLS_FETCH_REF = v1.7.3
+S2N_TLS_FETCH_URL = https://github.com/aws/s2n-tls/archive/refs/tags/v1.7.12.tar.gz
+S2N_TLS_FETCH_REF = v1.7.12
+S2N_TLS_FETCH_SHA256 = 76d3e6125ad8f7d960a62bf1e18c451fb75ed6ab640247b046b5b0f55d39d099
 
-# The historical vendored libuv snapshot exposed 1.52.2-dev in headers, but
-# upstream currently publishes 1.52.x releases through v1.52.1.
 LIBUV_DIR = $(VENDOR_DIR)/libuv
-LIBUV_FETCH_URL = https://github.com/libuv/libuv/archive/refs/tags/v1.52.1.tar.gz
-LIBUV_FETCH_REF = v1.52.1
+LIBUV_FETCH_URL = https://github.com/libuv/libuv/archive/refs/tags/v1.53.0.tar.gz
+LIBUV_FETCH_REF = v1.53.0
+LIBUV_FETCH_SHA256 = 279f3f67a24bb9921fe999ca6cd5e332fade8d515873ef9ba054b70e70a31d9e
 
 LLHTTP_DIR = $(VENDOR_DIR)/llhttp
-LLHTTP_FETCH_URL = https://github.com/nodejs/llhttp/archive/refs/tags/release/v9.3.0.tar.gz
-LLHTTP_FETCH_REF = release/v9.3.0
+LLHTTP_FETCH_URL = https://github.com/nodejs/llhttp/archive/refs/tags/release/v9.4.3.tar.gz
+LLHTTP_FETCH_REF = release/v9.4.3
+LLHTTP_FETCH_SHA256 = 1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39
 
 OTELCOL_DIR = $(VENDOR_DIR)/otelcol
 OTELCOL_BIN = $(OTELCOL_DIR)/otelcol
@@ -108,13 +109,13 @@ local-setup:
 	bash ./scripts/detect_local_env.sh ./mk/local.env
 
 vendor-fetch-s2n-tls:
-	bash ./scripts/vendor_fetch.sh s2n-tls $(S2N_TLS_FETCH_URL) $(S2N_TLS_FETCH_REF) ./$(S2N_TLS_DIR) $(VENDOR_FORCE_FETCH)
+	bash ./scripts/vendor_fetch.sh s2n-tls $(S2N_TLS_FETCH_URL) $(S2N_TLS_FETCH_REF) ./$(S2N_TLS_DIR) $(S2N_TLS_FETCH_SHA256) $(VENDOR_FORCE_FETCH)
 
 vendor-fetch-libuv:
-	bash ./scripts/vendor_fetch.sh libuv $(LIBUV_FETCH_URL) $(LIBUV_FETCH_REF) ./$(LIBUV_DIR) $(VENDOR_FORCE_FETCH)
+	bash ./scripts/vendor_fetch.sh libuv $(LIBUV_FETCH_URL) $(LIBUV_FETCH_REF) ./$(LIBUV_DIR) $(LIBUV_FETCH_SHA256) $(VENDOR_FORCE_FETCH)
 
 vendor-fetch-llhttp:
-	bash ./scripts/vendor_fetch.sh llhttp $(LLHTTP_FETCH_URL) $(LLHTTP_FETCH_REF) ./$(LLHTTP_DIR) $(VENDOR_FORCE_FETCH)
+	bash ./scripts/vendor_fetch.sh llhttp $(LLHTTP_FETCH_URL) $(LLHTTP_FETCH_REF) ./$(LLHTTP_DIR) $(LLHTTP_FETCH_SHA256) $(VENDOR_FORCE_FETCH)
 
 build: vendor-build
 	$(VENDORED_RUNTIME_ENV) $(DUNE) build

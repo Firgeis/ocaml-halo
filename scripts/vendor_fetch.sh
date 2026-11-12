@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-if [[ $# -lt 4 || $# -gt 5 ]]; then
-  echo "usage: $0 <name> <url> <ref> <dest-dir> [force]" >&2
+if [[ $# -lt 5 || $# -gt 6 ]]; then
+  echo "usage: $0 <name> <url> <ref> <dest-dir> <sha256> [force]" >&2
   exit 2
 fi
 
@@ -11,7 +11,12 @@ name=$1
 url=$2
 ref=$3
 dest_dir=$4
-force=${5:-0}
+expected_sha256=$5
+force=${6:-0}
+if [[ ! "$expected_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "Invalid SHA-256 for ${name}" >&2
+  exit 2
+fi
 marker_file=
 
 tmp_dir=
@@ -29,7 +34,7 @@ cleanup() {
 trap cleanup EXIT
 
 marker_payload() {
-  printf '%s\n%s\n' "$ref" "$url"
+  printf '%s\n%s\n%s\n' "$ref" "$url" "$expected_sha256"
 }
 
 dir_has_downloaded_contents() {
@@ -85,12 +90,23 @@ if [[ -d "$dest_dir" && "$force" != "1" ]]; then
 fi
 
 mkdir -p "$(dirname "$dest_dir")"
-reset_dest_dir
 tmp_dir=$(mktemp -d)
 archive_path="${tmp_dir}/${name}.tar.gz"
 
 echo "Fetching ${name} (${ref})"
 download "$url" "$archive_path"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual_sha256=$(sha256sum "$archive_path" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  actual_sha256=$(shasum -a 256 "$archive_path" | awk '{print $1}')
+else
+  echo "vendor-fetch requires sha256sum or shasum" >&2
+  exit 1
+fi
+if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+  echo "SHA-256 mismatch for ${name}: expected ${expected_sha256}, got ${actual_sha256}" >&2
+  exit 1
+fi
 tar -xzf "$archive_path" -C "$tmp_dir"
 
 extracted_dir=$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)
@@ -100,6 +116,7 @@ if [[ -z "${extracted_dir}" ]]; then
   exit 1
 fi
 
+reset_dest_dir
 find "$extracted_dir" -mindepth 1 -maxdepth 1 -exec mv {} "$dest_dir"/ \;
 marker_payload > "$marker_file"
 echo "Fetched ${name} into ${dest_dir}"
