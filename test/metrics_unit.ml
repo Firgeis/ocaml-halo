@@ -149,6 +149,20 @@ let test_bucket_validation () =
        "duration_buckets must contain finite, non-negative, increasing values")
     (fun () -> ignore (Metrics.create ~duration_buckets:[ 1.0; 1.0 ] ()))
 
+let test_combine () =
+  let snapshot = sample_snapshot () in
+  let point = find_point "halo.runtime.utilization" (fun _ -> true) snapshot in
+  let one = { snapshot with points = [ point ] } in
+  Alcotest.check_raises "duplicate series rejected"
+    (Invalid_argument
+       "Metrics.combine: duplicate point halo.runtime.utilization") (fun () ->
+      ignore (Metrics.combine [ one; one ]));
+  let combined = Metrics.combine [ Metrics.snapshot Metrics.noop; one ] in
+  Alcotest.(check int64)
+    "empty collector does not reset start time" one.start_time_unix_ns
+    combined.start_time_unix_ns;
+  Alcotest.(check int) "one metric remains" 1 (List.length combined.points)
+
 let () =
   Alcotest.run "metrics"
     [
@@ -157,6 +171,7 @@ let () =
           Alcotest.test_case "request and runtime snapshot" `Quick
             test_request_and_runtime_snapshot;
           Alcotest.test_case "bucket validation" `Quick test_bucket_validation;
+          Alcotest.test_case "combine snapshots" `Quick test_combine;
         ] );
       ( "adapters",
         [

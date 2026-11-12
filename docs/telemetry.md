@@ -74,6 +74,44 @@ Runtime snapshots expose these instrument families:
 `Metrics.create` accepts custom duration and size histogram boundaries. The
 defaults cover typical HTTP latencies and payload sizes.
 
+Each compute pool owns its measurements; it does not update the server's
+request collector from worker domains. `Compute.metrics compute` returns an
+immutable snapshot and is safe to call from any domain. Combine snapshots for
+one response or export them separately:
+
+```ocaml
+let snapshot =
+  Halo.Metrics.combine
+    [ Halo.Server.collect_metrics running; Halo.Compute.metrics compute ]
+```
+
+The server snapshot must still be collected on the server domain. The combined
+snapshot uses the earliest source start time and latest observation time;
+export separately when exact per-source timestamps are needed. Combined points
+must be unique, so give pools distinct names.
+
+Compute points carry the `halo.compute.pool.name` attribute:
+
+| Instrument | Kind |
+|---|---|
+| `halo.compute.domains.configured` | gauge |
+| `halo.compute.queue.capacity` | gauge |
+| `halo.compute.jobs.queued` | gauge |
+| `halo.compute.jobs.running` | gauge |
+| `halo.compute.jobs.detached` | gauge for jobs still executing after callers stop waiting |
+| `halo.compute.jobs` | cumulative sum by `completed`, `failed`, `rejected`, `cancelled`, or `expired` outcome |
+| `halo.compute.queue.wait` | cumulative histogram in seconds |
+| `halo.compute.job.duration` | cumulative histogram in seconds |
+
+Queue wait includes jobs that expire or are cancelled while queued; execution
+duration is observed when a worker actually exits a job. Completed and failed
+count worker outcomes, while cancelled and expired count callers that stopped
+waiting. These counters may overlap when a non-cooperative job later finishes.
+Rejected includes submissions refused because the pool is full, closed, or
+failed. Startup probes are excluded. Compute histograms use fixed boundaries
+from 100 microseconds through 10 seconds; the HTTP collector's bucket options
+do not change them.
+
 ## Local tracer
 
 The usual production setup uses the bounded batch processor and OTLP/HTTP
@@ -137,6 +175,12 @@ The active context is fiber-local and is inherited by Eio child fibers. Trace
 and span identifiers remain in binary form internally. The default generator
 uses OpenSSL's cryptographic RNG; `Id_generator.create` accepts deterministic
 generators when an application needs one.
+
+Compute submissions capture the active immutable trace context on the caller
+and bind it on the worker. The worker does not inherit the caller's mutable
+span. `~trace_context` can supply an explicit parent, and a worker can create a
+child span with a suitable tracer. As with other job inputs, use only
+domain-safe tracer and exporter implementations on worker domains.
 
 ## Custom observer
 

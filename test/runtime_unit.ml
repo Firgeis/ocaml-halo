@@ -1715,7 +1715,10 @@ let test_metrics_require_server_domain () =
   let started, notify_started = Eio.Promise.create () in
   let router =
     Halo.Router.(
-      route Matcher.(let+ () = path_end in fun _ -> text Status.ok "ok"))
+      route
+        Matcher.(
+          let+ () = path_end in
+          fun _ -> text Status.ok "ok"))
   in
   let config = Halo.Server.Config.create ~port:8443 router in
   let server =
@@ -1737,13 +1740,13 @@ let test_metrics_require_server_domain () =
     (fun () ->
       Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
           let rejects f =
-            match f () with
-            | _ -> false
-            | exception Invalid_argument _ -> true
+            match f () with _ -> false | exception Invalid_argument _ -> true
           in
-          Alcotest.(check bool) "metrics rejects another domain" true
+          Alcotest.(check bool)
+            "metrics rejects another domain" true
             (rejects (fun () -> Halo.Server.metrics running));
-          Alcotest.(check bool) "collect_metrics rejects another domain" true
+          Alcotest.(check bool)
+            "collect_metrics rejects another domain" true
             (rejects (fun () -> Halo.Server.collect_metrics running)));
       ignore (Halo.Server.metrics running);
       ignore (Halo.Server.collect_metrics running))
@@ -2164,6 +2167,164 @@ let test_blocking_replay_store_deadline_and_capacity () =
     "occupied capacity rejects another claim" true
     (Store.claim store ~identity:"other" ~ttl_secs:1L = Store.Unavailable)
 
+let test_compute_pool_server_shutdown ~expire () =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let compute =
+    Halo.Compute.create ~sw ~domain_count:1 ~max_queued:1
+      (Eio.Stdenv.domain_mgr env)
+  in
+  let shutdown = Halo.Server.Shutdown.create () in
+  let ready, notify_ready = Eio.Promise.create () in
+  let started, notify_started = Eio.Promise.create () in
+  let continue, notify_continue = Eio.Promise.create () in
+  let finish_worker = Atomic.make false in
+  let router =
+    let open Halo.Router in
+    let open Matcher in
+    route
+      (let+ () = request_method_is GET *> path_end in
+       fun _request ->
+         if expire then (
+           ignore
+             (Halo.Compute.run_cancellable compute (fun cancellation ->
+                  Eio.Promise.resolve notify_started (Some cancellation);
+                  while not (Atomic.get finish_worker) do
+                    Domain.cpu_relax ()
+                  done));
+           text Status.ok "late")
+         else (
+           Eio.Promise.resolve notify_started None;
+           Eio.Promise.await continue;
+           match Halo.Compute.run compute (fun () -> 42) with
+           | Ok value -> text Status.ok (string_of_int value)
+           | Error _ -> text Status.internal_server_error "compute closed"))
+  in
+  let config = Halo.Server.Config.create ~port:8443 router in
+  let server =
+    Eio.Fiber.fork_promise ~sw (fun () ->
+        try
+          Fun.protect
+            ~finally:(fun () -> Halo.Compute.close compute)
+            (fun () ->
+              Halo.Server.run ~shutdown ~handle_sigint:false
+                ~shutdown_timeout_ms:(if expire then 100 else 5000)
+                ~on_ready:(fun _ -> Eio.Promise.resolve notify_ready (Ok ()))
+                [ config ])
+        with ex ->
+          ignore (Eio.Promise.try_resolve notify_ready (Error ex));
+          raise ex)
+  in
+  Eio.Promise.await_exn ready;
+  Fun.protect
+    ~finally:(fun () ->
+      Atomic.set finish_worker true;
+      ignore (Eio.Promise.try_resolve notify_continue ());
+      Halo.Server.Shutdown.request shutdown)
+    (fun () ->
+      let client =
+        Eio.Fiber.fork_promise ~sw (fun () ->
+            Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
+                plaintext_request ~until:"42"
+                  "GET / HTTP/1.1\r\n\
+                   Host: localhost\r\n\
+                   Connection: close\r\n\
+                   \r\n"))
+      in
+      let cancellation =
+        Eio.Time.Timeout.run_exn
+          (Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock env) 3.)
+          (fun () -> Eio.Promise.await started)
+      in
+      Halo.Server.Shutdown.request shutdown;
+      if not expire then (
+        Eio_unix.sleep 0.03;
+        Alcotest.(check bool)
+          "pool stays open while draining" true
+          (Halo.Compute.run compute (fun () -> ()) = Ok ());
+        Eio.Promise.resolve notify_continue ());
+      Eio.Time.Timeout.run_exn
+        (Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock env) 3.)
+        (fun () ->
+          Eio.Promise.await_exn server;
+          let response = Eio.Promise.await_exn client in
+          if not expire then
+            Alcotest.(check bool)
+              "draining request completes its job" true (contains "42" response));
+      Alcotest.(check bool)
+        "pool closed after server returns" true
+        (Halo.Compute.run compute (fun () -> ()) = Error `Pool_closed);
+      Option.iter
+        (fun cancellation ->
+          Alcotest.(check bool)
+            "running worker signalled" true
+            (Halo.Compute.Cancellation.is_cancelled cancellation))
+        cancellation)
+
+let test_compute_trace_from_http () =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let compute =
+    Halo.Compute.create ~sw ~domain_count:1 ~max_queued:1
+      (Eio.Stdenv.domain_mgr env)
+  in
+  let memory = Halo.Telemetry.In_memory_exporter.create () in
+  let processor =
+    Halo.Telemetry.In_memory_exporter.exporter memory
+    |> Halo.Telemetry.Processor.simple
+  in
+  let tracer = Halo.Telemetry.Tracer.create ~processor () in
+  let telemetry = Halo.Telemetry.of_tracer tracer in
+  let router =
+    let open Halo.Router in
+    let open Matcher in
+    route
+      (let+ () = request_method_is GET *> path_end in
+       fun _request ->
+         match
+           Halo.Compute.run compute (fun () ->
+               let trace =
+                 Option.map Halo.Telemetry.Trace_context.trace_id
+                   (Halo.Telemetry.Context.current ())
+               in
+               (trace, Option.is_none (Halo.Telemetry.Context.current_span ())))
+         with
+         | Ok (Some trace, true) -> text Status.ok trace
+         | _ -> text Status.internal_server_error "missing trace")
+  in
+  let ready, notify_ready = Eio.Promise.create () in
+  let shutdown = Halo.Server.Shutdown.create () in
+  let config = Halo.Server.Config.create ~port:8443 router in
+  let server =
+    Eio.Fiber.fork_promise ~sw (fun () ->
+        try
+          Fun.protect
+            ~finally:(fun () -> Halo.Compute.close compute)
+            (fun () ->
+              Halo.Server.run ~shutdown ~handle_sigint:false ~telemetry
+                ~on_ready:(fun _ -> Eio.Promise.resolve notify_ready (Ok ()))
+                [ config ])
+        with ex ->
+          ignore (Eio.Promise.try_resolve notify_ready (Error ex));
+          raise ex)
+  in
+  Eio.Promise.await_exn ready;
+  Fun.protect
+    ~finally:(fun () -> Halo.Server.Shutdown.request shutdown)
+    (fun () ->
+      let trace_id = "4bf92f3577b34da6a3ce929d0e0e4736" in
+      let response =
+        Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) (fun () ->
+            plaintext_request ~until:trace_id
+              ("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+             ^ "traceparent: 00-" ^ trace_id ^ "-00f067aa0ba902b7-01\r\n\r\n"))
+      in
+      Alcotest.(check bool)
+        "worker received request trace without span" true
+        (contains trace_id response);
+      Halo.Server.Shutdown.request shutdown;
+      Eio.Promise.await_exn server)
+
 let () =
   Alcotest.run "runtime"
     [
@@ -2221,6 +2382,18 @@ let () =
         [
           Alcotest.test_case "handler reports raw backtrace" `Quick
             test_handler_error_reports_raw_backtrace;
+        ] );
+      ( "compute shutdown",
+        [
+          Alcotest.test_case "drain allows compute" `Quick
+            (test_compute_pool_server_shutdown ~expire:false);
+          Alcotest.test_case "deadline closes pool" `Quick
+            (test_compute_pool_server_shutdown ~expire:true);
+        ] );
+      ( "compute trace",
+        [
+          Alcotest.test_case "HTTP trace reaches worker" `Quick
+            test_compute_trace_from_http;
         ] );
       ( "response lifecycle",
         [

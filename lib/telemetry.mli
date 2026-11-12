@@ -273,6 +273,10 @@ module Context : sig
 
   val with_span : Span.t -> (unit -> 'a) -> 'a
   (** Bind the span to the current fiber. Child Eio fibers inherit it. *)
+
+  val with_trace_context : Trace_context.t option -> (unit -> 'a) -> 'a
+  (** Bind an immutable context without sharing a mutable span. Within the
+      callback [current] returns that context and [current_span] is [None]. *)
 end
 
 module Exporter : sig

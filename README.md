@@ -69,6 +69,111 @@ receive 414, 431, and 413.
 Trusted proxy forwarding is opt-in. See the [forwarding guide](docs/forwarded.md)
 for policy configuration, trust boundaries, and effective request metadata.
 
+## CPU work
+
+Create a compute pool once at application startup and pass it to routes through
+their closures. The application switch owns the pool and must outlive the server:
+
+```ocaml
+let make_router ~compute =
+  let open Halo.Router in
+  let open Matcher in
+  route ~template:"/answer"
+    (let+ () = request_method_is GET *> path_segment "answer" *> path_end in
+     fun _request ->
+       match Halo.Compute.run compute (fun () -> 6 * 7) with
+       | Ok answer -> text Status.ok (string_of_int answer)
+       | Error (`Job_failed (exn, backtrace)) ->
+           Printexc.raise_with_backtrace exn backtrace
+       | Error (`Pool_failed exn) -> raise exn
+       | Error (`Queue_full | `Queue_timeout | `Operation_timeout | `Pool_closed) ->
+           text Status.service_unavailable "compute unavailable")
+
+let () =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let compute =
+    Halo.Compute.create ~sw ~domain_count:4 ~max_queued:32 ~name:"cpu"
+      (Eio.Stdenv.domain_mgr env)
+  in
+  let router = make_router ~compute in
+  Fun.protect
+    ~finally:(fun () -> Halo.Compute.close compute)
+    (fun () ->
+      Halo.Server.run [ Halo.Server.Config.create ~port:8080 router ])
+```
+
+Set `~queue_timeout` and `~operation_timeout` with
+`Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock env) seconds` to bound the
+queue wait and the whole operation. `Compute.run` suspends the handler fiber and
+returns distinct errors for overload, deadlines, pool closure, worker
+infrastructure failures, and application exceptions. A job failure carries
+the original exception and worker backtrace. The raising `Compute.submit` API
+is also available.
+
+Keep the pool open throughout server draining: active requests may still submit
+work. The example closes it after `Server.run` returns, including after the
+shutdown deadline. When several servers share a pool, close it after all have
+drained. Closing rejects new jobs, wakes waiting callers, and signals remaining
+jobs to stop. The application switch waits for the worker domains to exit.
+OCaml domains cannot safely be forcibly killed, so non-cooperative jobs can
+delay application shutdown indefinitely. Use separate processes when work
+must be terminated by a hard deadline.
+
+For long-running computations, use `Compute.run_cancellable` and check the
+signal periodically:
+
+```ocaml
+Halo.Compute.run_cancellable compute (fun cancellation ->
+    let rec process remaining result =
+      Halo.Compute.Cancellation.check cancellation;
+      match remaining with
+      | [] -> result
+      | item :: rest -> process rest (update result item)
+    in
+    process items initial_result)
+```
+
+Cancellation of a queued job prevents it from executing. A running CPU job
+receives the signal but cannot be forcibly interrupted, so it continues to occupy
+capacity after its caller times out or is cancelled. Read request bodies and
+write responses on the handler domain. For large decoding or encoding work,
+collect bounded input bytes first, then pass those bytes to the worker. Pass
+only domain-safe application data, not the request or unsynchronized mutable
+state, to jobs. See `Halo.Compute` for details.
+
+Compute domains are separate from Halo's reactor and handler domain. Changing
+their count does not add listeners, reactors, or handler domains.
+
+`Compute.metrics compute` returns a thread-safe `Metrics.snapshot` labeled with
+the pool name. It includes configured domains, queue capacity, running and
+queued jobs, jobs still running after their callers stopped waiting, job outcome
+counters, and queue-wait and execution-duration histograms. For example, an
+application can expose a combined snapshot using Halo's existing encoders:
+
+```ocaml
+let snapshot =
+  Halo.Metrics.combine
+    [ Halo.Server.collect_metrics running; Halo.Compute.metrics compute ]
+in
+let prometheus_text = Halo.Metrics.Prometheus.encode snapshot
+```
+
+Use distinct names for pools in a combined snapshot. Compute snapshots can be
+taken from any domain; `Server.collect_metrics` still runs on the server
+domain. The outcome counters describe separate events: a caller may time out
+and its non-cooperative job may subsequently complete or fail. Queue-wait
+histograms include jobs that leave the queue before starting. If running jobs
+equal configured domains, the pool is fully occupied; rising queue depth and
+queue wait show compute contention. Compare those with HTTP request duration to
+identify latency outside the pool.
+
+On submission, Halo captures `Telemetry.Context.current` and binds the immutable
+trace context on the worker. The worker can start a child span using its own
+tracer without sharing the request's mutable span. Pass `~trace_context` to a
+submission to supply a context explicitly. The worker's `current_span` is
+empty until it creates or binds its own span.
+
 ## Routes and requests
 
 Routes use applicative matchers and compose with `<|>`:

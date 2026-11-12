@@ -174,9 +174,12 @@ struct halo_client {
   uv_tcp_t handle;
   uv_shutdown_t shutdown_req;
   uv_timer_t timer;
+  uv_timer_t disconnect_timer;
   int timer_initialized;
   int handle_closed;
   int timer_closed;
+  int disconnect_timer_initialized;
+  int disconnect_timer_closed;
   int response_started;
   int interim_response_started;
   int shutdown_started;

@@ -6,9 +6,11 @@
 #include <netinet/in.h>
 #include <openssl/sha.h>
 #include <signal.h>
+#include <sys/socket.h>
 #include "s2n_connection.h"
 
 #define HALO_TLS13_REPLAY_TTL_SECS (7ULL * 24ULL * 60ULL * 60ULL)
+#define HALO_DISCONNECT_POLL_MS 100
 
 static const char halo_http_continue_response[] =
   "HTTP/1.1 100 Continue\r\n"
@@ -942,8 +944,12 @@ static void halo_free_handle(uv_handle_t* handle) {
       else if (client->timer_initialized
                && handle == (uv_handle_t*) &client->timer)
         client->timer_closed = 1;
+      else if (client->disconnect_timer_initialized
+               && handle == (uv_handle_t*) &client->disconnect_timer)
+        client->disconnect_timer_closed = 1;
       if (client->handle_closed
-          && (!client->timer_initialized || client->timer_closed)) {
+          && (!client->timer_initialized || client->timer_closed)
+          && (!client->disconnect_timer_initialized || client->disconnect_timer_closed)) {
         struct halo_tls_write_chunk* chunk;
         struct halo_tls_write_chunk* next;
         struct halo_listener_ref* listener_ref;
@@ -1019,6 +1025,34 @@ static void halo_client_timeout_cb(uv_timer_t* timer) {
     halo_close_client(client);
 }
 
+/* SO_ERROR reports a pending transport error without consuming request or TLS
+ * bytes. In particular, a clean TCP half-close is not an error: the peer can
+ * still be waiting for the response. Poll only while a request is dispatched;
+ * socket reads and writes continue to handle errors in their normal paths. */
+static void halo_client_disconnect_poll_cb(uv_timer_t* timer) {
+  struct halo_client* client = timer->data;
+  uv_os_fd_t descriptor;
+  int socket_error = 0;
+  socklen_t error_length = sizeof(socket_error);
+
+  if (client == NULL || client->bridge_request_id == 0) {
+    uv_timer_stop(timer);
+    return;
+  }
+  if (uv_fileno((uv_handle_t*) &client->handle, &descriptor) != 0) {
+    halo_close_client(client);
+    return;
+  }
+  if (getsockopt(descriptor, SOL_SOCKET, SO_ERROR,
+                 &socket_error, &error_length) != 0) {
+    if (errno != EINTR)
+      halo_close_client(client);
+    return;
+  }
+  if (socket_error != 0)
+    halo_close_client(client);
+}
+
 void halo_client_stop_timer(struct halo_client* client) {
   if (client == NULL || !client->timer_initialized)
     return;
@@ -1057,6 +1091,9 @@ void halo_close_client(struct halo_client* client) {
 
   if (client->timer_initialized && !uv_is_closing((uv_handle_t*) &client->timer))
     uv_close((uv_handle_t*) &client->timer, halo_on_handle_closed);
+  if (client->disconnect_timer_initialized
+      && !uv_is_closing((uv_handle_t*) &client->disconnect_timer))
+    uv_close((uv_handle_t*) &client->disconnect_timer, halo_on_handle_closed);
   if (!uv_is_closing((uv_handle_t*) &client->handle))
     uv_close((uv_handle_t*) &client->handle, halo_on_handle_closed);
 }
@@ -1267,6 +1304,14 @@ static int halo_try_dispatch_request(uv_stream_t* stream,
   }
   halo_runtime_note_request_started(client);
   result = halo_bridge_dispatch_request(client);
+  if (result == 0 && client->bridge_request_id != 0
+      && uv_timer_start(&client->disconnect_timer,
+                        halo_client_disconnect_poll_cb,
+                        HALO_DISCONNECT_POLL_MS,
+                        HALO_DISCONNECT_POLL_MS) != 0) {
+    halo_close_client(client);
+    return 0;
+  }
   /* A rejected request may be observed after this input buffer is gone. */
   if ((result != 0 || client->direct_response_status != 0)
       && halo_request_materialize_header_spans(&client->request) != 0)
@@ -1330,6 +1375,7 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
     halo_runtime_note_request_finished(client, 1);
 
     halo_bridge_complete_request(client);
+    uv_timer_stop(&client->disconnect_timer);
 
     if (!client->should_keep_alive) {
       if (fast_close_direct_response) {
@@ -1368,6 +1414,7 @@ static int halo_handle_write_kind_complete(uv_stream_t* stream,
   }
 
   if (kind == HALO_WRITE_FINAL) {
+    uv_timer_stop(&client->disconnect_timer);
     if (client->bridge_response_in_flight) {
       client->bridge_response_in_flight = 0;
       halo_bridge_complete_request(client);
@@ -2434,6 +2481,12 @@ static void halo_connection_cb(uv_stream_t* server, int status) {
   client->parser.data = client;
   client->timer.data = client;
   client->timer_initialized = 1;
+  if (uv_timer_init(server->loop, &client->disconnect_timer) != 0) {
+    halo_close_client(client);
+    return;
+  }
+  client->disconnect_timer.data = client;
+  client->disconnect_timer_initialized = 1;
   client->dispatch_started = 0;
   client->dispatch_after_headers = 0;
   client->awaiting_request_body = 0;

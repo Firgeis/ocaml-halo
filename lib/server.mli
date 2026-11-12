@@ -84,15 +84,19 @@ val run :
     fiber. [on_ready] runs in a child fiber after listeners are bound.
 
     [max_in_flight_requests] defaults to 4096. The request lookup table
-    allocates one pointer-sized bucket per configured slot at startup (32 KiB
-    at the default on a 64-bit system), plus an entry for each active request.
-    A finished request continues to occupy admission capacity until its
-    completion or disconnection event is consumed.
+    allocates one pointer-sized bucket per configured slot at startup (32 KiB at
+    the default on a 64-bit system), plus an entry for each active request. A
+    finished request continues to occupy admission capacity until its completion
+    or disconnection event is consumed.
 
     On shutdown, Halo closes its listeners and idle connections, lets active
     requests and responses drain, and then force-closes anything remaining after
     [shutdown_timeout_ms]. The default is [default_shutdown_timeout_ms]. Zero
     requests an immediate force-stop.
+
+    An application-owned [Compute.t] must remain open while requests drain.
+    Close it after [run] returns (or after every server sharing it has
+    returned), using a cleanup handler to cover exceptional exits as well.
 
     [telemetry] receives each request's full lifecycle, from the first plaintext
     byte observed by the C reactor through the terminal response write or

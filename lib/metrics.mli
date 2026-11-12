@@ -52,6 +52,13 @@ val snapshot : t -> snapshot
 (** Take an immutable snapshot. Runtime points are present after the first
     [Server.metrics] or [Server.collect_metrics] call. *)
 
+val combine : snapshot list -> snapshot
+(** Combine immutable snapshots, such as server metrics and one or more compute
+    pools. Raises [Invalid_argument] if two points have the same name and
+    attributes; use distinct pool names. The combined snapshot uses the earliest
+    start time and latest observation time among nonempty inputs. Export
+    snapshots separately if exact per-source start times are required. *)
+
 module Prometheus : sig
   val content_type : string
 

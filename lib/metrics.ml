@@ -436,6 +436,41 @@ let snapshot collector =
     points = List.sort compare_point points;
   }
 
+let combine (snapshots : snapshot list) =
+  match List.filter (fun snapshot -> snapshot.points <> []) snapshots with
+  | [] ->
+      let now = unix_time_ns () in
+      { start_time_unix_ns = now; time_unix_ns = now; points = [] }
+  | first :: rest ->
+      let start_time_unix_ns, time_unix_ns, points =
+        List.fold_left
+          (fun (start_time, time, points) (snapshot : snapshot) ->
+            ( Int64.min start_time snapshot.start_time_unix_ns,
+              Int64.max time snapshot.time_unix_ns,
+              List.rev_append snapshot.points points ))
+          (first.start_time_unix_ns, first.time_unix_ns, first.points)
+          rest
+      in
+      let points =
+        List.map
+          (fun point ->
+            {
+              point with
+              attributes = List.sort compare_attribute point.attributes;
+            })
+          points
+        |> List.sort compare_point
+      in
+      let rec check_duplicates = function
+        | left :: (right :: _ as rest) ->
+            if compare_point left right = 0 then
+              invalid_arg ("Metrics.combine: duplicate point " ^ left.name);
+            check_duplicates rest
+        | _ -> ()
+      in
+      check_duplicates points;
+      { start_time_unix_ns; time_unix_ns; points }
+
 module Prometheus = struct
   let content_type = "text/plain; version=0.0.4; charset=utf-8"
 

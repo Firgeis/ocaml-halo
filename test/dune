@@ -123,6 +123,26 @@
  (libraries ocaml-halo eio_main alcotest))
 
 (test
+ (name compute_unit)
+ (modules compute_unit)
+ (libraries ocaml-halo eio_main alcotest))
+
+(test
+ (name compute_http_integration)
+ (modules compute_http_integration)
+ (libraries ocaml-halo eio_main unix alcotest)
+ (deps tls_reset_client.exe fixtures/tls-cert.pem fixtures/tls-key.pem)
+ (action
+  (setenv HALO_TLS_RESET_CLIENT %{dep:tls_reset_client.exe}
+   (setenv HALO_TLS_CERT_FIXTURE %{dep:fixtures/tls-cert.pem}
+    (setenv HALO_TLS_KEY_FIXTURE %{dep:fixtures/tls-key.pem} (run %{test}))))))
+
+(rule
+ (targets tls_reset_client.exe)
+ (deps tls_reset_client.c)
+ (action (run %{cc} -std=c11 -Wall -Wextra -Werror -o %{targets} %{deps} -lssl -lcrypto)))
+
+(test
  (name headers_unit)
  (modules headers_unit)
  (libraries ocaml-halo alcotest))

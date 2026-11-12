@@ -630,10 +630,25 @@ module Span = struct
 end
 
 module Context = struct
-  let current_span_key = Eio.Fiber.create_key ()
-  let current_span () = Eio.Fiber.get current_span_key
-  let current () = Option.map Span.context (current_span ())
-  let with_span span run = Eio.Fiber.with_binding current_span_key span run
+  type binding = Span of Span.t | Trace_context of Trace_context.t option
+
+  let current_key = Eio.Fiber.create_key ()
+
+  let current_span () =
+    match Eio.Fiber.get current_key with
+    | Some (Span span) -> Some span
+    | _ -> None
+
+  let current () =
+    match Eio.Fiber.get current_key with
+    | Some (Span span) -> Some (Span.context span)
+    | Some (Trace_context context) -> context
+    | None -> None
+
+  let with_span span run = Eio.Fiber.with_binding current_key (Span span) run
+
+  let with_trace_context context run =
+    Eio.Fiber.with_binding current_key (Trace_context context) run
 end
 
 module Exporter = struct
